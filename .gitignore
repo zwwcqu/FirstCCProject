@@ -15,9 +15,6 @@ Thumbs.db
 # Data (moved out of project, just in case)
 data/
 
-# App config (contains local paths)
-config/app_config.json
-
 # Claude Code
 .claude/
 

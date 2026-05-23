@@ -4,14 +4,14 @@ import json
 import os
 from pathlib import Path
 
-_APP_CONFIG_FILE = Path(__file__).parent.parent / "config" / "app_config.json"
+_APP_CONFIG_FILE = Path(__file__).parent.parent / "config" / "app.dirconfig.json"
 
 
 def _read_app_config() -> dict:
     if not _APP_CONFIG_FILE.exists():
         raise FileNotFoundError(
-            f"配置文件不存在: {_APP_CONFIG_FILE}\n"
-            f"请复制 app_config.example.json 为 app_config.json 并填写 data_dir"
+            f"配置文件缺失: {_APP_CONFIG_FILE}\n"
+            f"请检查 config/ 目录，确保 app.dirconfig.json 存在且包含 data_dir 字段"
         )
     with open(_APP_CONFIG_FILE, "r", encoding="utf-8") as f:
         return json.load(f)
@@ -22,7 +22,7 @@ def _get_data_dir() -> Path:
     raw = config.get("data_dir")
     if not raw:
         raise ValueError(
-            f"app_config.json 中未配置 data_dir，"
+            f"app.dirconfig.json 中未配置 data_dir，"
             f"请设置数据目录路径（如 ~/CadMarkData）"
         )
     return Path(raw).expanduser().resolve()

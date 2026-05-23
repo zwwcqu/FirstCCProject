@@ -34,12 +34,9 @@ python3 -m venv venv
 ./venv/bin/pip install -r requirements.txt
 
 # 【必须】配置数据目录
-cp app_config.example.json app_config.json
-# 编辑 app_config.json，设置 data_dir（如 "~/CadMarkData" 或 "/data/cadmark"）
+# config/app.dirconfig.json 已内置默认路径 ~/CadMarkData
+# 如需修改数据目录，编辑此文件中的 data_dir 字段
 cd ..
-```
-
-如果不执行 `cp app_config.example.json app_config.json`，程序会报错提示配置文件缺失。
 
 ### 4. 构建前端
 
@@ -65,7 +62,7 @@ cd backend
 ~/FirstCCProject/          # 项目根目录
   backend/
     venv/                  # Python 虚拟环境（本地创建，不入库）
-    app_config.json        # 数据目录配置（本地创建，不入库）
+    app.dirconfig.json     # 数据目录配置（默认 ~/CadMarkData）
     main.py                # FastAPI 入口
     ...
   frontend/
@@ -112,7 +109,7 @@ server {
 
 ### 修改数据目录
 
-编辑 `backend/app_config.json`，修改 `data_dir` 后重启服务：
+编辑 `config/app.dirconfig.json`，修改 `data_dir` 后重启服务：
 
 ```json
 {
@@ -132,7 +129,7 @@ cd ../frontend && npm install && npm run build
 
 ## 注意事项
 
-- `app_config.json` 和 `~/CadMarkData/` 不会提交到 Git，部署时需手动创建/配置
+- `~/CadMarkData/` 为业务数据目录，不会提交到 Git。`config/app.dirconfig.json` 可修改为其他路径
 - `venv/` 和 `node_modules/` 是平台相关的，换系统必须重建
 - PDF 批阅功能依赖 `poppler-utils`，缺少时提交 PDF 会报错
 - LLM 服务地址需要在教师后台手动配置，建议放内网
