@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+backend/venv/
+
+# Node
+frontend/node_modules/
+frontend/dist/
+
+# System
+.DS_Store
+Thumbs.db
+
+# Data (moved out of project, just in case)
+data/
+
+# App config (contains local paths)
+backend/app_config.json
+
+# Claude Code
+.claude/
+
+# Environment
+.env
+.env.local
