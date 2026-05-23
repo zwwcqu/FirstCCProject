@@ -16,7 +16,7 @@ Thumbs.db
 data/
 
 # App config (contains local paths)
-backend/app_config.json
+config/app_config.json
 
 # Claude Code
 .claude/

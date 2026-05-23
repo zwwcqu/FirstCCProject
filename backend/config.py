@@ -4,7 +4,7 @@ import json
 import os
 from pathlib import Path
 
-_APP_CONFIG_FILE = Path(__file__).parent / "app_config.json"
+_APP_CONFIG_FILE = Path(__file__).parent.parent / "config" / "app_config.json"
 
 
 def _read_app_config() -> dict:
