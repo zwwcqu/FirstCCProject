@@ -8,6 +8,7 @@ from pathlib import Path
 
 from config import (
     DATA_DIR,
+    CONFIG_DIR,
     read_questions_index,
     write_questions_index,
     get_question_dir,
@@ -129,8 +130,8 @@ def get_question_files(qid: str) -> dict:
 def get_scoring_templates() -> dict:
     """Read global scoring templates from data directory for pre-filling new questions."""
     result = {"phase1": "", "phase2": ""}
-    t1 = DATA_DIR / "评分模版1.md"
-    t2 = DATA_DIR / "评分模版2.md"
+    t1 = CONFIG_DIR / "评分模版1.md"
+    t2 = CONFIG_DIR / "评分模版2.md"
     if t1.exists():
         result["phase1"] = t1.read_text(encoding="utf-8").strip()
     if t2.exists():
@@ -220,12 +221,8 @@ def delete_class_roster(class_name: str) -> bool:
 
 
 def ensure_template() -> str:
-    """确保模版文件存在，返回模版路径"""
-    _ensure_student_info_dir()
-    tmpl = STUDENT_INFO_DIR / TEMPLATE_NAME
-    if not tmpl.exists():
-        tmpl.write_text("姓名,学号\n", encoding="utf-8-sig")
-    return str(tmpl)
+    """返回学生名单模版路径（位于 config/ 目录）"""
+    return str(CONFIG_DIR / "学生名单模版.csv")
 
 
 def check_roster(name: str, student_id: str) -> tuple[bool, str]:

@@ -29,9 +29,30 @@ def _get_data_dir() -> Path:
 
 
 DATA_DIR = _get_data_dir()
+CONFIG_DIR = _APP_CONFIG_FILE.parent
 SETTINGS_FILE = DATA_DIR / "settings.json"
 QUESTIONS_FILE = DATA_DIR / "questions.json"
 STUDENT_INFO_DIR = DATA_DIR / "StudentInfo"
+
+
+def _init_data_dir() -> None:
+    """首次启动时初始化数据目录：复制 settings 模版、创建空的 questions.json"""
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    STUDENT_INFO_DIR.mkdir(parents=True, exist_ok=True)
+
+    if not SETTINGS_FILE.exists():
+        example = CONFIG_DIR / "settings.example.json"
+        if example.exists():
+            import shutil
+            shutil.copy(example, SETTINGS_FILE)
+        else:
+            raise FileNotFoundError(
+                f"缺少 settings 模版文件: {example}\n"
+                f"且数据目录下 settings.json 也不存在，无法启动"
+            )
+
+    if not QUESTIONS_FILE.exists():
+        write_questions_index([])
 
 
 def read_settings() -> dict:
@@ -60,3 +81,6 @@ def get_question_dir(qid: str) -> Path:
 
 def get_student_dir(qid: str) -> Path:
     return get_question_dir(qid) / "student"
+
+
+_init_data_dir()
