@@ -33,11 +33,13 @@ python3 -m venv venv
 # 安装 Python 依赖
 ./venv/bin/pip install -r requirements.txt
 
-# 配置数据目录（缺省 ~/CadMarkData，可修改）
+# 【必须】配置数据目录
 cp app_config.example.json app_config.json
-# 如需修改数据目录，编辑 app_config.json 中的 data_dir 字段
+# 编辑 app_config.json，设置 data_dir（如 "~/CadMarkData" 或 "/data/cadmark"）
 cd ..
 ```
+
+如果不执行 `cp app_config.example.json app_config.json`，程序会报错提示配置文件缺失。
 
 ### 4. 构建前端
 
