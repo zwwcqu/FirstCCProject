@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { listQuestions, getQuestionDetail, submitHomework, getStudentResult, getQuestionFileUrl, getTeacherPreviewUrl, getStudentPreviewUrl } from "../api";
+import { listQuestions, getQuestionDetail, analyzeSubmission, gradeSubmission, getStudentResult, getQuestionFileUrl, getTeacherPreviewUrl, getStudentPreviewUrl } from "../api";
 
 interface Question {
   id: string;
@@ -31,13 +31,17 @@ export default function StudentPage() {
   const [name, setName] = useState("");
   const [studentId, setStudentId] = useState("");
   const [file, setFile] = useState<File | null>(null);
-  const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<GradeResult | null>(null);
-  const [refFilenames, setRefFilenames] = useState<string[]>([]);
   const [studentFilename, setStudentFilename] = useState("");
   const [submitTs, setSubmitTs] = useState(0);
   const [mode, setMode] = useState<"test" | "submit">("test");
   const [error, setError] = useState("");
+
+  // 新版分步流程状态
+  const [analyzing, setAnalyzing] = useState(false);
+  const [analysisData, setAnalysisData] = useState<any>(null);   // 图面分析结果
+  const [grading, setGrading] = useState(false);                  // 评分中
+  const [submitKey, setSubmitKey] = useState<{ name: string; id: string } | null>(null);  // 分析时生成的提交标识，评分时复用
 
   useEffect(() => {
     listQuestions().then(setQuestions).catch(console.error);
@@ -85,26 +89,47 @@ export default function StudentPage() {
     return null;
   };
 
-  const handleSubmit = async () => {
+  // 第一步：上传 + 图面分析
+  const handleAnalyze = async () => {
     const validationError = validate();
     if (validationError) {
       setError(validationError);
       return;
     }
 
-    // overwrite check
-    if (mode === "submit" && result?.成绩) {
-      if (!confirm(`学号 ${studentId} 已有成绩 ${result.成绩}，确定覆盖吗？`)) {
-        return;
-      }
-    }
-
-    setLoading(true);
+    setAnalyzing(true);
     setError("");
+    setAnalysisData(null);
+    setResult(null);
     try {
       const submitName = mode === "test" ? "测试" : name;
       const submitId = mode === "test" ? `test_${Date.now()}` : studentId;
-      const data = await submitHomework(selectedQid!, submitName, submitId, file!, mode);
+      setSubmitKey({ name: submitName, id: submitId });  // 保存标识，评分时复用
+      const data = await analyzeSubmission(selectedQid!, submitName, submitId, file!, mode);
+      setAnalysisData(data.analysis);
+      setStudentFilename(data.student_filename || "");
+      setSubmitTs(Date.now());
+    } catch (e: any) {
+      setError(e.message);
+    } finally {
+      setAnalyzing(false);
+    }
+  };
+
+  // 第二步：提交评分
+  const handleGrade = async () => {
+    if (!analysisData) {
+      setError("请先完成图面分析");
+      return;
+    }
+    if (!submitKey) {
+      setError("分析数据异常，请重新上传分析");
+      return;
+    }
+    setGrading(true);
+    setError("");
+    try {
+      const data = await gradeSubmission(selectedQid!, submitKey.name, submitKey.id, mode);
       if (data.result) {
         setResult({
           姓名: name,
@@ -112,14 +137,11 @@ export default function StudentPage() {
           成绩: data.grade,
           ...data.result,
         });
-        setRefFilenames(data.ref_filenames || []);
-        setStudentFilename(data.student_filename || "");
-        setSubmitTs(Date.now());
       }
     } catch (e: any) {
       setError(e.message);
     } finally {
-      setLoading(false);
+      setGrading(false);
     }
   };
 
@@ -224,18 +246,131 @@ export default function StudentPage() {
               <input
                 type="file"
                 accept=".pdf,.png,.jpg,.jpeg,.gif,.webp"
-                onChange={(e) => setFile(e.target.files?.[0] || null)}
+                onChange={(e) => { setFile(e.target.files?.[0] || null); setAnalysisData(null); setSubmitKey(null); setResult(null); }}
                 className="w-full"
               />
             </div>
-            <button
-              onClick={handleSubmit}
-              disabled={loading}
-              className="bg-blue-600 text-white px-6 py-2 rounded hover:bg-blue-700 disabled:opacity-50"
-            >
-              {loading ? "批阅中..." : "提交批阅"}
-            </button>
+
+            {/* 第一步：图面分析 */}
+            {!analysisData ? (
+              <button
+                onClick={handleAnalyze}
+                disabled={analyzing}
+                className="bg-blue-600 text-white px-6 py-2 rounded hover:bg-blue-700 disabled:opacity-50"
+              >
+                {analyzing ? "模型分析中…" : "上传并分析"}
+              </button>
+            ) : (
+              /* 第二步：提交评分 */
+              <button
+                onClick={handleGrade}
+                disabled={grading}
+                className="bg-green-600 text-white px-6 py-2 rounded hover:bg-green-700 disabled:opacity-50"
+              >
+                {grading ? "评分中…" : "提交评分"}
+              </button>
+            )}
             {error && <p className="text-red-500 mt-2">{error}</p>}
+
+            {/* 图面分析结果预览 */}
+            {analysisData && (
+              <div className="mt-4 border rounded p-3 bg-gray-50 text-xs">
+                <h3 className="text-sm font-semibold mb-3 text-green-700">图面分析完成</h3>
+
+                {/* 参考图 vs 学生图对比 */}
+                {(question?.files?.reference_pdf || studentFilename) && (
+                  <div className="grid grid-cols-2 gap-3 mb-3">
+                    {question?.files?.reference_pdf && (
+                      <div>
+                        <p className="text-xs text-gray-500 mb-1">参考工程图</p>
+                        <img src={getTeacherPreviewUrl(selectedQid!, question.files.reference_pdf, submitTs)} alt="参考图" className="w-full rounded border" />
+                      </div>
+                    )}
+                    {studentFilename && (
+                      <div>
+                        <p className="text-xs text-gray-500 mb-1">你的作业</p>
+                        <img src={getStudentPreviewUrl(selectedQid!, studentFilename, submitTs)} alt="学生工程图" className="w-full rounded border" />
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* ===== 结构分析 ===== */}
+                {analysisData.structure && (
+                  <details className="mb-2" open>
+                    <summary className="text-sm font-medium text-blue-700 cursor-pointer hover:underline mb-2">结构分析</summary>
+
+                    {analysisData.structure.title_block && (
+                      <table className="w-full border mb-2"><thead><tr className="bg-blue-50"><th colSpan={4} className="p-1 text-left text-blue-800">标题栏</th></tr></thead><tbody>
+                        <tr className="border"><td className="p-1 text-gray-500 w-16">零件名称</td><td className="p-1">{analysisData.structure.title_block.part_name || "-"}</td><td className="p-1 text-gray-500 w-16">图号</td><td className="p-1">{analysisData.structure.title_block.drawing_number || "-"}</td></tr>
+                        <tr className="border"><td className="p-1 text-gray-500">材料</td><td className="p-1">{analysisData.structure.title_block.material || "-"}</td><td className="p-1 text-gray-500">比例</td><td className="p-1">{analysisData.structure.title_block.scale || "-"}</td></tr>
+                      </tbody></table>
+                    )}
+
+                    {analysisData.structure.overall_shape && (
+                      <table className="w-full border mb-2"><thead><tr className="bg-blue-50"><th colSpan={4} className="p-1 text-left text-blue-800">整体形状</th></tr></thead><tbody>
+                        <tr className="border"><td className="p-1 text-gray-500 w-16">类型</td><td className="p-1">{analysisData.structure.overall_shape.type || "-"}</td><td className="p-1 text-gray-500 w-16">对称性</td><td className="p-1">{analysisData.structure.overall_shape.symmetry || "-"}</td></tr>
+                        <tr className="border"><td className="p-1 text-gray-500">外形尺寸</td><td className="p-1">{analysisData.structure.overall_shape.approx_dimensions || "-"}</td><td className="p-1 text-gray-500">材料标注</td><td className="p-1">{analysisData.structure.overall_shape.material_text || (analysisData.structure.overall_shape.has_material_label ? "有" : "无")}</td></tr>
+                      </tbody></table>
+                    )}
+
+                    {analysisData.structure.views?.length > 0 && (
+                      <table className="w-full border mb-2"><thead><tr className="bg-blue-50"><th colSpan={3} className="p-1 text-left text-blue-800">视图组成（{analysisData.structure.views.length} 个）</th></tr></thead><thead><tr className="bg-gray-50 border"><th className="p-1 text-left">名称</th><th className="p-1 text-left">类型</th><th className="p-1 text-left">说明</th></tr></thead><tbody>
+                        {analysisData.structure.views.map((v: any, i: number) => (<tr key={i} className="border"><td className="p-1">{v.name}</td><td className="p-1">{v.type}</td><td className="p-1 text-gray-600">{v.description || "-"}</td></tr>))}
+                      </tbody></table>
+                    )}
+
+                    {analysisData.structure.features?.length > 0 && (
+                      <table className="w-full border mb-2"><thead><tr className="bg-blue-50"><th colSpan={5} className="p-1 text-left text-blue-800">结构特征（{analysisData.structure.features.length} 个）</th></tr></thead><thead><tr className="bg-gray-50 border"><th className="p-1 text-left">ID</th><th className="p-1 text-left">类型</th><th className="p-1 text-center w-10">数量</th><th className="p-1 text-left">位置</th><th className="p-1 text-left">备注</th></tr></thead><tbody>
+                        {analysisData.structure.features.map((f: any, i: number) => (<tr key={i} className="border"><td className="p-1 font-mono">{f.id}</td><td className="p-1">{f.type}</td><td className="p-1 text-center">{f.count}</td><td className="p-1">{f.location || "-"}</td><td className="p-1 text-gray-600">{f.notes || "-"}</td></tr>))}
+                      </tbody></table>
+                    )}
+
+                    {analysisData.structure.technical_notes && <p className="mb-2"><span className="text-gray-500">技术要求：</span>{analysisData.structure.technical_notes}</p>}
+                  </details>
+                )}
+
+                {/* ===== 量化分析 ===== */}
+                {analysisData.quantitative && (
+                  <details className="mb-2" open>
+                    <summary className="text-sm font-medium text-blue-700 cursor-pointer hover:underline mb-2">量化分析</summary>
+
+                    {analysisData.quantitative.general_notes && (
+                      <table className="w-full border mb-2"><thead><tr className="bg-green-50"><th colSpan={6} className="p-1 text-left text-green-800">图纸通用信息</th></tr></thead><tbody>
+                        <tr className="border"><td className="p-1 text-gray-500">比例</td><td className="p-1">{analysisData.quantitative.general_notes.scale || "-"}</td><td className="p-1 text-gray-500">未注公差</td><td className="p-1">{analysisData.quantitative.general_notes.general_tolerance || "-"}</td><td className="p-1 text-gray-500">热处理</td><td className="p-1">{analysisData.quantitative.general_notes.heat_treatment || "-"}</td></tr>
+                        <tr className="border"><td className="p-1 text-gray-500">表面处理</td><td className="p-1">{analysisData.quantitative.general_notes.surface_treatment || "-"}</td><td className="p-1 text-gray-500">未注圆角</td><td className="p-1">{analysisData.quantitative.general_notes.unspecified_rounds || "-"}</td><td className="p-1 text-gray-500">未注倒角</td><td className="p-1">{analysisData.quantitative.general_notes.unspecified_chamfers || "-"}</td></tr>
+                      </tbody></table>
+                    )}
+
+                    {analysisData.quantitative.dimensions?.length > 0 && (
+                      <table className="w-full border mb-2"><thead><tr className="bg-green-50"><th colSpan={6} className="p-1 text-left text-green-800">尺寸标注（{analysisData.quantitative.dimensions.length} 个）</th></tr></thead><thead><tr className="bg-gray-50 border"><th className="p-1 text-left">ID</th><th className="p-1 text-left">类型</th><th className="p-1 text-right">数值</th><th className="p-1 text-left">公差</th><th className="p-1 text-left">关联特征</th><th className="p-1 text-left">说明</th></tr></thead><tbody>
+                        {analysisData.quantitative.dimensions.map((d: any, i: number) => (<tr key={i} className="border"><td className="p-1 font-mono">{d.id}</td><td className="p-1">{d.type}</td><td className="p-1 text-right font-mono">{d.value}{d.unit && d.unit !== "无" ? d.unit : ""}</td><td className="p-1 font-mono">{d.tolerance || "-"}</td><td className="p-1 font-mono">{d.feature_ref || "-"}</td><td className="p-1 text-gray-600 max-w-xs truncate">{d.description || "-"}</td></tr>))}
+                      </tbody></table>
+                    )}
+
+                    {analysisData.quantitative.surface_roughness?.length > 0 && (
+                      <table className="w-full border mb-2"><thead><tr className="bg-green-50"><th colSpan={3} className="p-1 text-left text-green-800">表面粗糙度（{analysisData.quantitative.surface_roughness.length} 处）</th></tr></thead><thead><tr className="bg-gray-50 border"><th className="p-1 text-left">数值</th><th className="p-1 text-left">关联特征</th><th className="p-1 text-left">位置</th></tr></thead><tbody>
+                        {analysisData.quantitative.surface_roughness.map((r: any, i: number) => (<tr key={i} className="border"><td className="p-1 font-mono">{r.value}</td><td className="p-1 font-mono">{r.feature_ref || "-"}</td><td className="p-1 text-gray-600">{r.location || "-"}</td></tr>))}
+                      </tbody></table>
+                    )}
+
+                    {analysisData.quantitative.geometric_tolerances?.length > 0 && (
+                      <table className="w-full border mb-2"><thead><tr className="bg-green-50"><th colSpan={6} className="p-1 text-left text-green-800">形位公差（{analysisData.quantitative.geometric_tolerances.length} 项）</th></tr></thead><thead><tr className="bg-gray-50 border"><th className="p-1 text-left">ID</th><th className="p-1 text-left">类型</th><th className="p-1 text-right">数值</th><th className="p-1 text-left">关联特征</th><th className="p-1 text-left">基准</th><th className="p-1 text-left">说明</th></tr></thead><tbody>
+                        {analysisData.quantitative.geometric_tolerances.map((g: any, i: number) => (<tr key={i} className="border"><td className="p-1 font-mono">{g.id}</td><td className="p-1">{g.type}</td><td className="p-1 text-right font-mono">{g.value}{g.unit || "mm"}</td><td className="p-1 font-mono">{g.ref_feature || "-"}</td><td className="p-1 font-mono">{g.datum || "-"}</td><td className="p-1 text-gray-600 max-w-xs truncate">{g.description || "-"}</td></tr>))}
+                      </tbody></table>
+                    )}
+
+                    {analysisData.quantitative.thread_specs?.length > 0 && (
+                      <table className="w-full border mb-2"><thead><tr className="bg-green-50"><th colSpan={5} className="p-1 text-left text-green-800">螺纹规格（{analysisData.quantitative.thread_specs.length} 处）</th></tr></thead><thead><tr className="bg-gray-50 border"><th className="p-1 text-left">ID</th><th className="p-1 text-left">类型</th><th className="p-1 text-left">规格</th><th className="p-1 text-left">关联特征</th><th className="p-1 text-left">备注</th></tr></thead><tbody>
+                        {analysisData.quantitative.thread_specs.map((t: any, i: number) => (<tr key={i} className="border"><td className="p-1 font-mono">{t.id}</td><td className="p-1">{t.type}</td><td className="p-1 font-mono">{t.spec}</td><td className="p-1 font-mono">{t.feature_ref || "-"}</td><td className="p-1 text-gray-600">{t.notes || "-"}</td></tr>))}
+                      </tbody></table>
+                    )}
+
+                    {analysisData.quantitative.completeness_notes && <p className="text-orange-600"><span className="font-medium">完整度提示：</span>{analysisData.quantitative.completeness_notes}</p>}
+                  </details>
+                )}
+              </div>
+            )}
           </div>
         )}
 
@@ -243,29 +378,6 @@ export default function StudentPage() {
         {result && (
           <div className="bg-white rounded-lg shadow p-4 border-l-4 border-blue-500 space-y-4">
             <h2 className="text-lg font-semibold">批阅结果</h2>
-
-            {/* Image Comparison */}
-            {(refFilenames.length > 0 || studentFilename) && (
-              <div className="border rounded p-3 bg-gray-50">
-                <h3 className="text-sm font-medium text-gray-600 mb-2">图形对比</h3>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  {refFilenames.length > 0 && (
-                    <div>
-                      <p className="text-xs text-gray-500 mb-1">参考答案</p>
-                      {refFilenames.map((fn,i) => (
-                        <img key={i} src={getTeacherPreviewUrl(selectedQid!, fn, submitTs)} alt="参考图" className="w-full rounded border" />
-                      ))}
-                    </div>
-                  )}
-                  {studentFilename && (
-                    <div>
-                      <p className="text-xs text-gray-500 mb-1">学生作业</p>
-                      <img src={getStudentPreviewUrl(selectedQid!, studentFilename, submitTs)} alt="学生工程图" className="w-full rounded border" />
-                    </div>
-                  )}
-                </div>
-              </div>
-            )}
 
             {/* Final Grade */}
             <div className="flex items-center gap-4 p-3 bg-gray-50 rounded">

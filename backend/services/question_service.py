@@ -316,6 +316,73 @@ def find_student_class(name: str, student_id: str) -> str:
     return ""
 
 
+# ── 分析结果存取（参考图 / 学生图的结构+量化 JSON）─────
+
+def save_reference_analysis(qid: str, analysis: dict) -> None:
+    """
+    保存参考图的分析结果。
+    analysis 应包含 structure 和 quantitative 两个 key。
+    写入 data/{qid}/参考图_结构分析.json 和 参考图_量化分析.json
+    """
+    qdir = get_question_dir(qid)
+    qdir.mkdir(parents=True, exist_ok=True)
+    struct_path = qdir / "参考图_结构分析.json"
+    quant_path = qdir / "参考图_量化分析.json"
+    struct_path.write_text(json.dumps(analysis.get("structure", {}), ensure_ascii=False, indent=2), encoding="utf-8")
+    quant_path.write_text(json.dumps(analysis.get("quantitative", {}), ensure_ascii=False, indent=2), encoding="utf-8")
+    logger.info(f"参考图分析结果已保存: [{qid}]")
+
+
+def get_reference_analysis(qid: str) -> dict | None:
+    """
+    读取参考图的分析结果。
+    返回 {"structure": ..., "quantitative": ...} 或 None（分析文件不存在时）
+    """
+    qdir = get_question_dir(qid)
+    struct_path = qdir / "参考图_结构分析.json"
+    quant_path = qdir / "参考图_量化分析.json"
+    if not struct_path.exists() or not quant_path.exists():
+        return None
+    return {
+        "structure": json.loads(struct_path.read_text(encoding="utf-8")),
+        "quantitative": json.loads(quant_path.read_text(encoding="utf-8")),
+    }
+
+
+def save_student_analysis(qid: str, student_id: str, name: str, analysis: dict) -> None:
+    """
+    保存学生图的分析结果。
+    写入 data/{qid}/student/{姓名}_{学号}_结构分析.json 和 _量化分析.json
+    """
+    student_dir = get_student_dir(qid)
+    student_dir.mkdir(parents=True, exist_ok=True)
+    safe_name = _sanitize_filename_part(name)
+    safe_id = _sanitize_filename_part(student_id)
+    struct_path = student_dir / f"{safe_name}_{safe_id}_结构分析.json"
+    quant_path = student_dir / f"{safe_name}_{safe_id}_量化分析.json"
+    struct_path.write_text(json.dumps(analysis.get("structure", {}), ensure_ascii=False, indent=2), encoding="utf-8")
+    quant_path.write_text(json.dumps(analysis.get("quantitative", {}), ensure_ascii=False, indent=2), encoding="utf-8")
+    logger.info(f"学生图分析结果已保存: [{qid}] {name}({student_id})")
+
+
+def get_student_analysis(qid: str, student_id: str, name: str) -> dict | None:
+    """
+    读取学生图的分析结果。
+    返回 {"structure": ..., "quantitative": ...} 或 None
+    """
+    student_dir = get_student_dir(qid)
+    safe_name = _sanitize_filename_part(name)
+    safe_id = _sanitize_filename_part(student_id)
+    struct_path = student_dir / f"{safe_name}_{safe_id}_结构分析.json"
+    quant_path = student_dir / f"{safe_name}_{safe_id}_量化分析.json"
+    if not struct_path.exists() or not quant_path.exists():
+        return None
+    return {
+        "structure": json.loads(struct_path.read_text(encoding="utf-8")),
+        "quantitative": json.loads(quant_path.read_text(encoding="utf-8")),
+    }
+
+
 def _read_csv(path: Path) -> list[dict]:
     """读取 CSV 文件，返回字典列表（内部工具）"""
     with open(path, "r", encoding="utf-8-sig") as f:

@@ -3,7 +3,8 @@
 
 功能：
 - 题目列表与详情查询（公开，无需登录）
-- 作业提交与 LLM 批阅（两阶段评分）
+- 作业提交 → 图面分析 → 两阶段评分（新版流水线）
+- 旧版兼容：POST /submit/{qid} 内部串联 analyze + grade
 - 成绩查询（按学号查历史成绩）
 - 文件服务（学生提交文件下载 + 预览图生成）
 
@@ -20,6 +21,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Request, UploadFile, File, Form
 from fastapi.responses import FileResponse
 
+from config import CONFIG_DIR, get_question_dir as _get_question_dir
 from services.question_service import (
     list_questions,
     get_question,
@@ -27,8 +29,16 @@ from services.question_service import (
     save_student_submission,
     get_student_submission_path,
     get_question_dir,
+    get_reference_analysis,
+    save_student_analysis,
+    get_student_analysis,
 )
-from services.llm_service import grade_submission
+from services.llm_service import (
+    grade_submission,
+    analyze_structure,
+    analyze_quantitative,
+    run_two_phase_grading,
+)
 from services.grade_service import save_grade, save_result_json, get_student_grade
 
 logger = logging.getLogger(__name__)
@@ -72,7 +82,151 @@ async def get_question_detail(qid: str):
     return q
 
 
-# ── 作业提交与批阅 ──────────────────────────────────────
+# ── 作业图面分析（新版流水线第一步）─────────────────────
+
+@router.post("/analyze/{qid}")
+async def analyze_submission(
+    qid: str,
+    request: Request,
+    name: str = Form(...),
+    student_id: str = Form(...),
+    file: UploadFile = File(...),
+    mode: str = Form("submit"),
+):
+    """
+    学生上传作业 → 结构分析 → 量化分析 → 保存结果 → 返回分析数据。
+    不执行评分，仅提取图中实际标注内容供学生确认。
+    """
+    _check_rate_limit(request)
+
+    q = get_question(qid)
+    if q is None:
+        raise HTTPException(status_code=404, detail="题目不存在")
+
+    is_test = mode == "test"
+
+    # 正式模式校验名单
+    if not is_test:
+        from services.question_service import check_roster
+        ok, msg = check_roster(name, student_id)
+        if not ok:
+            raise HTTPException(status_code=403, detail=msg)
+
+    # 保存学生上传的文件
+    file_bytes = await file.read()
+    student_path = save_student_submission(qid, student_id, name, file_bytes, file.filename or "submission.pdf")
+    student_path_obj = Path(student_path)
+
+    # 结构分析
+    struct_tpl = CONFIG_DIR / "结构分析_学生.txt"
+    quant_tpl = CONFIG_DIR / "量化分析_学生.txt"
+
+    try:
+        logger.info(f"[{qid}] 学生图结构分析: {name}({student_id})")
+        structure = analyze_structure(student_path_obj, struct_tpl)
+        logger.info(f"[{qid}] 学生图量化分析: {name}({student_id})")
+        quantitative = analyze_quantitative(student_path_obj, quant_tpl, structure)
+    except Exception as e:
+        logger.error(f"[{qid}] 学生图分析失败: {e}")
+        raise HTTPException(status_code=500, detail=f"图面分析失败: {str(e)}")
+
+    analysis = {"structure": structure, "quantitative": quantitative}
+
+    # 保存分析结果（测试模式和正式模式都保存）
+    save_student_analysis(qid, student_id, name, analysis)
+
+    return {
+        "ok": True,
+        "analysis": analysis,
+        "student_filename": student_path_obj.name,
+    }
+
+
+# ── 两阶段评分（新版流水线第二步）────────────────────────
+
+@router.post("/grade/{qid}")
+async def grade_submission_handler(
+    qid: str,
+    request: Request,
+    name: str = Form(...),
+    student_id: str = Form(...),
+    mode: str = Form("submit"),
+):
+    """
+    对已分析的学生作业执行两阶段评分。
+    前提：参考图和学生图都已完成分析。
+    阶段一：结构相似度（视觉 + 结构JSON）
+    阶段二：量化标注对比（纯文本 + 量化JSON）
+    """
+    _check_rate_limit(request)
+
+    q = get_question(qid)
+    if q is None:
+        raise HTTPException(status_code=404, detail="题目不存在")
+
+    is_test = mode == "test"
+
+    # 读取参考图分析结果
+    ref_analysis = get_reference_analysis(qid)
+    if ref_analysis is None:
+        raise HTTPException(status_code=400, detail="参考图尚未完成分析，请联系老师")
+
+    # 读取学生图分析结果
+    stu_analysis = get_student_analysis(qid, student_id, name)
+    if stu_analysis is None:
+        raise HTTPException(status_code=400, detail="请先完成图面分析再提交评分")
+
+    # 读取得分标准
+    files = get_question_files(qid)
+    phase1_criteria = files.get("phase1_criteria", "")
+    phase2_criteria = files.get("phase2_criteria", "")
+
+    # 参考图和学生图文件路径
+    qdir = _get_question_dir(qid)
+    ref_pdf = qdir / "参考工程图.pdf"
+    student_path = get_student_submission_path(qid, student_id, name)
+    if student_path is None:
+        raise HTTPException(status_code=400, detail="学生提交文件不存在，请重新上传")
+
+    if not ref_pdf.exists():
+        raise HTTPException(status_code=400, detail="参考工程图不存在，请联系老师")
+
+    # 执行两阶段评分
+    try:
+        result = run_two_phase_grading(
+            ref_struct=ref_analysis["structure"],
+            ref_quant=ref_analysis["quantitative"],
+            stu_struct=stu_analysis["structure"],
+            stu_quant=stu_analysis["quantitative"],
+            phase1_criteria=phase1_criteria,
+            phase2_criteria=phase2_criteria,
+            ref_image_path=ref_pdf,
+            stu_image_path=student_path,
+        )
+    except Exception as e:
+        logger.error(f"[{qid}] 两阶段评分失败: {e}")
+        raise HTTPException(status_code=500, detail=f"评分失败: {str(e)}")
+
+    grade = result.get("grade", "N/A")
+    logger.info(f"[{qid}] 评分完成: {name}({student_id}) → {grade}")
+
+    # 正式模式写入成绩
+    if not is_test:
+        from services.question_service import find_student_class
+        class_name = find_student_class(name, student_id)
+        save_grade(qid, student_id, name, grade, result, class_name)
+        save_result_json(qid, student_id, name, result)
+
+    return {
+        "ok": True,
+        "grade": grade,
+        "result": result,
+        "student_filename": student_path.name,
+        "mode": mode,
+    }
+
+
+# ── 旧版兼容：一次性提交 + 批阅 ──────────────────────────
 
 @router.post("/submit/{qid}")
 async def submit(

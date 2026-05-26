@@ -3,7 +3,8 @@
 
 功能：
 - 登录/登出（HttpOnly Cookie + Session）
-- 题目 CRUD（创建时支持上传附图 + 参考工程图）
+- 题目 CRUD（创建时支持上传附图 + 参考工程图，自动触发 LLM 分析）
+- 参考图分析（手动触发 + 结果查询）
 - 成绩查询（CSV 按题号返回）
 - 系统设置（LLM 配置 + 密码修改）
 - 学生名单管理（班级导入/查看/删除/模板下载）
@@ -14,13 +15,14 @@
 
 import json
 import logging
+import threading
 from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request, Response, UploadFile, File, Form
 
 from auth import verify_password, create_session, validate_session, destroy_session, change_password
-from config import get_question_dir, read_settings, write_settings
+from config import CONFIG_DIR, get_question_dir, read_settings, write_settings
 from services.question_service import (
     list_questions,
     create_question,
@@ -30,6 +32,8 @@ from services.question_service import (
     save_reference_pdf,
     get_question_files,
     get_scoring_templates,
+    save_reference_analysis,
+    get_reference_analysis,
 )
 from services.grade_service import read_all_grades, get_grades_csv_path, FIELDNAMES
 
@@ -42,6 +46,38 @@ def _require_auth(request: Request) -> None:
     token = request.cookies.get("session")
     if not token or not validate_session(token):
         raise HTTPException(status_code=401, detail="请先登录")
+
+
+def _run_reference_analysis(qid: str) -> None:
+    """
+    后台线程执行参考图分析：结构分析 → 量化分析 → 保存结果。
+    使用线程避免阻塞 HTTP 响应，学生端不需要实时等待。
+    """
+    from services.llm_service import analyze_structure, analyze_quantitative
+
+    def _task():
+        try:
+            qdir = get_question_dir(qid)
+            ref_pdf = qdir / "参考工程图.pdf"
+            if not ref_pdf.exists():
+                logger.warning(f"[{qid}] 参考工程图不存在，跳过分析")
+                return
+
+            struct_tpl = CONFIG_DIR / "结构分析模版.txt"
+            quant_tpl = CONFIG_DIR / "量化分析模版.txt"
+
+            logger.info(f"[{qid}] 开始参考图结构分析…")
+            structure = analyze_structure(ref_pdf, struct_tpl)
+            logger.info(f"[{qid}] 参考图量化分析…")
+            quantitative = analyze_quantitative(ref_pdf, quant_tpl, structure)
+
+            save_reference_analysis(qid, {"structure": structure, "quantitative": quantitative})
+            logger.info(f"[{qid}] 参考图分析完成并已保存")
+        except Exception as e:
+            logger.error(f"[{qid}] 参考图分析失败: {e}")
+
+    t = threading.Thread(target=_task, daemon=True)
+    t.start()
 
 
 # ── 登录 / 登出 ──────────────────────────────────────────
@@ -122,6 +158,7 @@ async def create_question_handler(
     if reference_pdf and reference_pdf.filename:
         pdf_bytes = await reference_pdf.read()
         save_reference_pdf(qid, pdf_bytes, reference_pdf.filename)
+        _run_reference_analysis(qid)   # 后台异步分析参考图
     return entry
 
 
@@ -147,6 +184,7 @@ async def update_question_handler(
     if reference_pdf and reference_pdf.filename:
         pdf_bytes = await reference_pdf.read()
         save_reference_pdf(qid, pdf_bytes, reference_pdf.filename)
+        _run_reference_analysis(qid)   # 参考图更新后重新分析
     return entry
 
 
@@ -165,6 +203,30 @@ async def get_templates(request: Request):
     """获取评分模板内容，供新增/编辑题目时预填"""
     _require_auth(request)
     return get_scoring_templates()
+
+
+# ── 参考图分析 ────────────────────────────────────────────
+
+@router.post("/questions/{qid}/analyze")
+async def trigger_analysis(request: Request, qid: str):
+    """手动触发参考图分析（用于重分析已有参考图）"""
+    _require_auth(request)
+    qdir = get_question_dir(qid)
+    ref_pdf = qdir / "参考工程图.pdf"
+    if not ref_pdf.exists():
+        raise HTTPException(status_code=400, detail="请先上传参考工程图 PDF")
+    _run_reference_analysis(qid)
+    return {"ok": True, "message": "分析已启动，请稍后查询结果"}
+
+
+@router.get("/questions/{qid}/analysis")
+async def get_analysis_result(request: Request, qid: str):
+    """获取参考图的分析结果（结构 + 量化 JSON）"""
+    _require_auth(request)
+    analysis = get_reference_analysis(qid)
+    if analysis is None:
+        return {"ok": True, "ready": False, "analysis": None}
+    return {"ok": True, "ready": True, "analysis": analysis}
 
 
 # ── 成绩查询 ─────────────────────────────────────────────

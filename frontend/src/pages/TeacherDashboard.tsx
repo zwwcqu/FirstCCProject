@@ -15,6 +15,9 @@ import {
   deleteClass,
   downloadRosterTemplate,
   getScoringTemplates,
+  triggerAnalysis,
+  getAnalysisResult,
+  getTeacherPreviewUrl,
 } from "../api";
 
 interface Question {
@@ -38,6 +41,11 @@ export default function TeacherDashboard() {
   const [newClassName, setNewClassName] = useState("");
   const [rosterFile, setRosterFile] = useState<File | null>(null);
 
+  // 参考图分析状态
+  const [analyzingQid, setAnalyzingQid] = useState<string | null>(null);
+  const [analysisResults, setAnalysisResults] = useState<Record<string, any>>({});
+  const [expandedAnalysis, setExpandedAnalysis] = useState<Record<string, boolean>>({});
+
   // form fields
   const [qid, setQid] = useState("");
   const [title, setTitle] = useState("");
@@ -51,6 +59,17 @@ export default function TeacherDashboard() {
     try {
       const data = await getTeacherQuestions();
       setQuestions(data);
+      // 加载已有分析结果
+      for (const q of data) {
+        if (q.files?.reference_pdf) {
+          try {
+            const res = await getAnalysisResult(q.id);
+            if (res.ready && res.analysis) {
+              setAnalysisResults((prev) => ({ ...prev, [q.id]: res.analysis }));
+            }
+          } catch (_) { /* 该题尚未分析 */ }
+        }
+      }
     } catch (e: any) {
       if (e.message?.includes("401") || e.message?.includes("请先登录")) {
         navigate("/teacher");
@@ -62,6 +81,22 @@ export default function TeacherDashboard() {
     checkLogin().catch(() => navigate("/teacher"));
     loadQuestions();
   }, [navigate, loadQuestions]);
+
+  // 轮询参考图分析结果
+  useEffect(() => {
+    if (!analyzingQid) return;
+    const timer = setInterval(async () => {
+      try {
+        const res = await getAnalysisResult(analyzingQid);
+        if (res.ready && res.analysis) {
+          setAnalysisResults((prev) => ({ ...prev, [analyzingQid]: res.analysis }));
+          setAnalyzingQid(null);
+          clearInterval(timer);
+        }
+      } catch (_) { /* 继续轮询 */ }
+    }, 3000);  // 每 3 秒查询一次
+    return () => clearInterval(timer);
+  }, [analyzingQid]);
 
   const resetForm = () => {
     setQid("");
@@ -88,6 +123,7 @@ export default function TeacherDashboard() {
       await createQuestion(fd);
       resetForm();
       loadQuestions();
+      if (refPdf) setAnalyzingQid(qid);  // 开始轮询分析结果
     } catch (e: any) {
       alert(e.message);
     }
@@ -106,6 +142,7 @@ export default function TeacherDashboard() {
       await updateQuestion(editingId, fd);
       resetForm();
       loadQuestions();
+      if (refPdf) setAnalyzingQid(editingId);  // 换参考图后重新分析
     } catch (e: any) {
       alert(e.message);
     }
@@ -261,6 +298,7 @@ export default function TeacherDashboard() {
                 <tr className="bg-gray-50 border-b">
                   <th className="text-left p-2">题号</th>
                   <th className="text-left p-2">标题</th>
+                  <th className="text-center p-2">参考图分析</th>
                   <th className="text-right p-2">操作</th>
                 </tr>
               </thead>
@@ -269,6 +307,42 @@ export default function TeacherDashboard() {
                   <tr key={q.id} className="border-b hover:bg-gray-50">
                     <td className="p-2 font-mono">{q.id}</td>
                     <td className="p-2">{q.title}</td>
+                    <td className="p-2 text-center">
+                      {analyzingQid === q.id ? (
+                        <span className="text-yellow-600 text-xs animate-pulse">分析中…</span>
+                      ) : analysisResults[q.id] ? (
+                        <div className="flex items-center justify-center gap-1">
+                          <button
+                            onClick={() => setExpandedAnalysis((prev) => ({ ...prev, [q.id]: !prev[q.id] }))}
+                            className="text-blue-600 hover:underline text-xs"
+                          >
+                            {expandedAnalysis[q.id] ? "收起" : "查看"}
+                          </button>
+                          <button
+                            onClick={async () => {
+                              setAnalyzingQid(q.id);
+                              try { await triggerAnalysis(q.id); } catch (_) {}
+                            }}
+                            className="text-orange-500 hover:underline text-xs"
+                            title="重新分析参考图"
+                          >
+                            重分析
+                          </button>
+                        </div>
+                      ) : q.files?.reference_pdf ? (
+                        <button
+                          onClick={async () => {
+                            setAnalyzingQid(q.id);
+                            try { await triggerAnalysis(q.id); } catch (_) {}
+                          }}
+                          className="text-gray-500 hover:text-blue-600 text-xs"
+                        >
+                          分析
+                        </button>
+                      ) : (
+                        <span className="text-gray-300 text-xs">-</span>
+                      )}
+                    </td>
                     <td className="p-2 text-right space-x-2">
                       <button onClick={() => handleEdit(q)} className="text-blue-600 hover:underline">编辑</button>
                       <button onClick={() => handleViewGrades(q.id)} className="text-green-600 hover:underline">成绩</button>
@@ -278,6 +352,206 @@ export default function TeacherDashboard() {
                 ))}
               </tbody>
             </table>
+          )}
+          {/* 展开的分析结果 */}
+          {Object.entries(analysisResults).map(([qid, analysis]) =>
+            expandedAnalysis[qid] ? (
+              <div key={qid} className="mt-3 border-t pt-3 text-xs">
+                <h4 className="text-sm font-semibold mb-3">题{qid} 参考图分析结果</h4>
+
+                {/* 参考工程图预览 */}
+                {(() => {
+                  const q = questions.find((x) => x.id === qid);
+                  if (q?.files?.reference_pdf) {
+                    return (
+                      <div className="mb-3">
+                        <p className="text-xs text-gray-500 mb-1">参考工程图</p>
+                        <img
+                          src={getTeacherPreviewUrl(qid, q.files.reference_pdf, Date.now())}
+                          alt="参考工程图"
+                          className="w-full rounded border"
+                        />
+                      </div>
+                    );
+                  }
+                  return null;
+                })()}
+
+                {/* ===== 结构分析 ===== */}
+                <details className="mb-3" open>
+                  <summary className="text-sm font-medium text-blue-700 cursor-pointer hover:underline mb-2">结构分析</summary>
+
+                  {/* 标题栏 */}
+                  {analysis.structure?.title_block && (
+                    <table className="w-full border mb-2">
+                      <thead><tr className="bg-blue-50"><th colSpan={4} className="p-1 text-left text-blue-800">标题栏</th></tr></thead>
+                      <tbody>
+                        <tr className="border">
+                          <td className="p-1 text-gray-500 w-16">零件名称</td><td className="p-1">{analysis.structure.title_block.part_name || "-"}</td>
+                          <td className="p-1 text-gray-500 w-16">图号</td><td className="p-1">{analysis.structure.title_block.drawing_number || "-"}</td>
+                        </tr>
+                        <tr className="border">
+                          <td className="p-1 text-gray-500">材料</td><td className="p-1">{analysis.structure.title_block.material || "-"}</td>
+                          <td className="p-1 text-gray-500">比例</td><td className="p-1">{analysis.structure.title_block.scale || "-"}</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  )}
+
+                  {/* 整体形状 */}
+                  {analysis.structure?.overall_shape && (
+                    <table className="w-full border mb-2">
+                      <thead><tr className="bg-blue-50"><th colSpan={4} className="p-1 text-left text-blue-800">整体形状</th></tr></thead>
+                      <tbody>
+                        <tr className="border">
+                          <td className="p-1 text-gray-500 w-16">类型</td><td className="p-1">{analysis.structure.overall_shape.type || "-"}</td>
+                          <td className="p-1 text-gray-500 w-16">对称性</td><td className="p-1">{analysis.structure.overall_shape.symmetry || "-"}</td>
+                        </tr>
+                        <tr className="border">
+                          <td className="p-1 text-gray-500">外形尺寸</td><td className="p-1">{analysis.structure.overall_shape.approx_dimensions || "-"}</td>
+                          <td className="p-1 text-gray-500">材料标注</td><td className="p-1">{analysis.structure.overall_shape.material_text || (analysis.structure.overall_shape.has_material_label ? "有" : "无")}</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  )}
+
+                  {/* 视图列表 */}
+                  {analysis.structure?.views?.length > 0 && (
+                    <table className="w-full border mb-2">
+                      <thead><tr className="bg-blue-50"><th colSpan={3} className="p-1 text-left text-blue-800">视图组成（{analysis.structure.views.length} 个）</th></tr></thead>
+                      <thead><tr className="bg-gray-50 border"><th className="p-1 text-left">名称</th><th className="p-1 text-left">类型</th><th className="p-1 text-left">说明</th></tr></thead>
+                      <tbody>
+                        {analysis.structure.views.map((v: any, i: number) => (
+                          <tr key={i} className="border">
+                            <td className="p-1">{v.name}</td><td className="p-1">{v.type}</td><td className="p-1 text-gray-600">{v.description || "-"}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+
+                  {/* 特征列表 */}
+                  {analysis.structure?.features?.length > 0 && (
+                    <table className="w-full border mb-2">
+                      <thead><tr className="bg-blue-50"><th colSpan={5} className="p-1 text-left text-blue-800">结构特征（{analysis.structure.features.length} 个）</th></tr></thead>
+                      <thead><tr className="bg-gray-50 border"><th className="p-1 text-left">ID</th><th className="p-1 text-left">类型</th><th className="p-1 text-center w-10">数量</th><th className="p-1 text-left">位置</th><th className="p-1 text-left">备注</th></tr></thead>
+                      <tbody>
+                        {analysis.structure.features.map((f: any, i: number) => (
+                          <tr key={i} className="border">
+                            <td className="p-1 font-mono">{f.id}</td><td className="p-1">{f.type}</td><td className="p-1 text-center">{f.count}</td><td className="p-1">{f.location || "-"}</td><td className="p-1 text-gray-600">{f.notes || "-"}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+
+                  {analysis.structure?.technical_notes && (
+                    <p className="mb-2"><span className="text-gray-500">技术要求：</span>{analysis.structure.technical_notes}</p>
+                  )}
+                </details>
+
+                {/* ===== 量化分析 ===== */}
+                <details className="mb-3" open>
+                  <summary className="text-sm font-medium text-blue-700 cursor-pointer hover:underline mb-2">量化分析</summary>
+
+                  {/* 通用信息 */}
+                  {analysis.quantitative?.general_notes && (
+                    <table className="w-full border mb-2">
+                      <thead><tr className="bg-green-50"><th colSpan={6} className="p-1 text-left text-green-800">图纸通用信息</th></tr></thead>
+                      <tbody>
+                        <tr className="border">
+                          <td className="p-1 text-gray-500">比例</td><td className="p-1">{analysis.quantitative.general_notes.scale || "-"}</td>
+                          <td className="p-1 text-gray-500">未注公差</td><td className="p-1">{analysis.quantitative.general_notes.general_tolerance || "-"}</td>
+                          <td className="p-1 text-gray-500">热处理</td><td className="p-1">{analysis.quantitative.general_notes.heat_treatment || "-"}</td>
+                        </tr>
+                        <tr className="border">
+                          <td className="p-1 text-gray-500">表面处理</td><td className="p-1">{analysis.quantitative.general_notes.surface_treatment || "-"}</td>
+                          <td className="p-1 text-gray-500">未注圆角</td><td className="p-1">{analysis.quantitative.general_notes.unspecified_rounds || "-"}</td>
+                          <td className="p-1 text-gray-500">未注倒角</td><td className="p-1">{analysis.quantitative.general_notes.unspecified_chamfers || "-"}</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  )}
+
+                  {/* 尺寸列表 */}
+                  {analysis.quantitative?.dimensions?.length > 0 && (
+                    <table className="w-full border mb-2">
+                      <thead><tr className="bg-green-50"><th colSpan={6} className="p-1 text-left text-green-800">尺寸标注（{analysis.quantitative.dimensions.length} 个）</th></tr></thead>
+                      <thead><tr className="bg-gray-50 border"><th className="p-1 text-left">ID</th><th className="p-1 text-left">类型</th><th className="p-1 text-right">数值</th><th className="p-1 text-left">公差</th><th className="p-1 text-left">关联特征</th><th className="p-1 text-left">说明</th></tr></thead>
+                      <tbody>
+                        {analysis.quantitative.dimensions.map((d: any, i: number) => (
+                          <tr key={i} className="border">
+                            <td className="p-1 font-mono">{d.id}</td>
+                            <td className="p-1">{d.type}</td>
+                            <td className="p-1 text-right font-mono">{d.value}{d.unit && d.unit !== "无" ? d.unit : ""}</td>
+                            <td className="p-1 font-mono">{d.tolerance || "-"}</td>
+                            <td className="p-1 font-mono">{d.feature_ref || "-"}</td>
+                            <td className="p-1 text-gray-600 max-w-xs truncate">{d.description || "-"}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+
+                  {/* 粗糙度 */}
+                  {analysis.quantitative?.surface_roughness?.length > 0 && (
+                    <table className="w-full border mb-2">
+                      <thead><tr className="bg-green-50"><th colSpan={3} className="p-1 text-left text-green-800">表面粗糙度（{analysis.quantitative.surface_roughness.length} 处）</th></tr></thead>
+                      <thead><tr className="bg-gray-50 border"><th className="p-1 text-left">数值</th><th className="p-1 text-left">关联特征</th><th className="p-1 text-left">位置</th></tr></thead>
+                      <tbody>
+                        {analysis.quantitative.surface_roughness.map((r: any, i: number) => (
+                          <tr key={i} className="border">
+                            <td className="p-1 font-mono">{r.value}</td><td className="p-1 font-mono">{r.feature_ref || "-"}</td><td className="p-1 text-gray-600">{r.location || "-"}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+
+                  {/* 形位公差 */}
+                  {analysis.quantitative?.geometric_tolerances?.length > 0 && (
+                    <table className="w-full border mb-2">
+                      <thead><tr className="bg-green-50"><th colSpan={6} className="p-1 text-left text-green-800">形位公差（{analysis.quantitative.geometric_tolerances.length} 项）</th></tr></thead>
+                      <thead><tr className="bg-gray-50 border"><th className="p-1 text-left">ID</th><th className="p-1 text-left">类型</th><th className="p-1 text-right">数值</th><th className="p-1 text-left">关联特征</th><th className="p-1 text-left">基准</th><th className="p-1 text-left">说明</th></tr></thead>
+                      <tbody>
+                        {analysis.quantitative.geometric_tolerances.map((g: any, i: number) => (
+                          <tr key={i} className="border">
+                            <td className="p-1 font-mono">{g.id}</td><td className="p-1">{g.type}</td><td className="p-1 text-right font-mono">{g.value}{g.unit || "mm"}</td><td className="p-1 font-mono">{g.ref_feature || "-"}</td><td className="p-1 font-mono">{g.datum || "-"}</td><td className="p-1 text-gray-600 max-w-xs truncate">{g.description || "-"}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+
+                  {/* 螺纹 */}
+                  {analysis.quantitative?.thread_specs?.length > 0 && (
+                    <table className="w-full border mb-2">
+                      <thead><tr className="bg-green-50"><th colSpan={5} className="p-1 text-left text-green-800">螺纹规格（{analysis.quantitative.thread_specs.length} 处）</th></tr></thead>
+                      <thead><tr className="bg-gray-50 border"><th className="p-1 text-left">ID</th><th className="p-1 text-left">类型</th><th className="p-1 text-left">规格</th><th className="p-1 text-left">关联特征</th><th className="p-1 text-left">备注</th></tr></thead>
+                      <tbody>
+                        {analysis.quantitative.thread_specs.map((t: any, i: number) => (
+                          <tr key={i} className="border">
+                            <td className="p-1 font-mono">{t.id}</td><td className="p-1">{t.type}</td><td className="p-1 font-mono">{t.spec}</td><td className="p-1 font-mono">{t.feature_ref || "-"}</td><td className="p-1 text-gray-600">{t.notes || "-"}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+
+                  {analysis.quantitative?.completeness_notes && (
+                    <p className="text-orange-600"><span className="font-medium">完整度提示：</span>{analysis.quantitative.completeness_notes}</p>
+                  )}
+                </details>
+
+                {/* 原始 JSON（折叠到底部，备查） */}
+                <details>
+                  <summary className="text-xs text-gray-400 cursor-pointer hover:underline">原始 JSON（调试用）</summary>
+                  <pre className="text-xs bg-gray-100 p-2 rounded mt-1 overflow-auto max-h-48 whitespace-pre-wrap">
+                    {JSON.stringify(analysis, null, 2)}
+                  </pre>
+                </details>
+              </div>
+            ) : null
           )}
         </div>
 

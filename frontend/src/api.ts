@@ -43,6 +43,24 @@ export function getStudentResult(qid: string, studentId: string) {
   return api(`/api/student/result/${qid}/${studentId}`);
 }
 
+// 新版：分步 analyze + grade
+export function analyzeSubmission(qid: string, name: string, studentId: string, file: File, mode: "test" | "submit" = "submit") {
+  const fd = new FormData();
+  fd.append("name", name);
+  fd.append("student_id", studentId);
+  fd.append("file", file);
+  fd.append("mode", mode);
+  return api(`/api/student/analyze/${qid}`, { method: "POST", body: fd });
+}
+
+export function gradeSubmission(qid: string, name: string, studentId: string, mode: "test" | "submit" = "submit") {
+  const fd = new FormData();
+  fd.append("name", name);
+  fd.append("student_id", studentId);
+  fd.append("mode", mode);
+  return api(`/api/student/grade/${qid}`, { method: "POST", body: fd });
+}
+
 // ------- Teacher -------
 export async function teacherLogin(password: string) {
   const fd = new FormData();
@@ -108,6 +126,15 @@ export function deleteClass(className: string) {
 
 export function getScoringTemplates() {
   return api("/api/teacher/scoring-templates");
+}
+
+// 参考图分析
+export function triggerAnalysis(qid: string) {
+  return api(`/api/teacher/questions/${qid}/analyze`, { method: "POST" });
+}
+
+export function getAnalysisResult(qid: string) {
+  return api(`/api/teacher/questions/${qid}/analysis`);
 }
 
 export function downloadRosterTemplate() {
