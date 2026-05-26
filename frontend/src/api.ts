@@ -47,10 +47,7 @@ export function getStudentResult(qid: string, studentId: string) {
 export async function teacherLogin(password: string) {
   const fd = new FormData();
   fd.append("password", password);
-  const result = await api("/api/teacher/login", { method: "POST", body: fd });
-  // set session cookie
-  document.cookie = `session=${result.token};path=/;max-age=14400`;
-  return result;
+  return api("/api/teacher/login", { method: "POST", body: fd });
 }
 
 export function teacherLogout() {

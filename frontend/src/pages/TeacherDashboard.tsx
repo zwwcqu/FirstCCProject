@@ -30,6 +30,7 @@ export default function TeacherDashboard() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [gradesView, setGradesView] = useState<string | null>(null);
   const [gradeData, setGradeData] = useState<any[]>([]);
+  const [gradeColumns, setGradeColumns] = useState<string[]>([]);
   const [rosterView, setRosterView] = useState(false);
   const [classes, setClasses] = useState<{ class_name: string; count: number }[]>([]);
   const [selectedClass, setSelectedClass] = useState<string | null>(null);
@@ -141,6 +142,7 @@ export default function TeacherDashboard() {
     try {
       const data = await getGrades(qid);
       setGradeData(data.grades || []);
+      setGradeColumns(data.columns || []);
       setGradesView(qid);
     } catch (e: any) {
       alert(e.message);
@@ -366,7 +368,7 @@ export default function TeacherDashboard() {
                 <table className="w-full border-collapse text-sm">
                   <thead>
                     <tr className="bg-gray-50 border-b">
-                      {Object.keys(gradeData[0]).map((k) => (
+                      {gradeColumns.map((k) => (
                         <th key={k} className="text-left p-2 whitespace-nowrap">{k}</th>
                       ))}
                     </tr>
@@ -374,8 +376,8 @@ export default function TeacherDashboard() {
                   <tbody>
                     {gradeData.map((row, i) => (
                       <tr key={i} className="border-b hover:bg-gray-50">
-                        {Object.values(row).map((v: any, j) => (
-                          <td key={j} className="p-2 max-w-xs truncate">{v}</td>
+                        {gradeColumns.map((col, j) => (
+                          <td key={j} className="p-2 max-w-xs truncate">{row[col]}</td>
                         ))}
                       </tr>
                     ))}

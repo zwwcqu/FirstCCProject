@@ -1,3 +1,15 @@
+"""
+工程图批阅系统 — FastAPI 入口。
+
+功能：
+- 配置 CORS、挂载路由（teacher / student）
+- 生产模式下托管前端 SPA（frontend/dist/）
+- 启动时初始化数据目录（config._init_data_dir）
+- 配置全局日志格式与级别
+"""
+
+import logging
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -5,10 +17,31 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
+from config import _init_data_dir
 from routers import teacher, student
 
-app = FastAPI(title="工程图批阅系统")
+# ── 日志配置 ──────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger("main")
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """应用生命周期：启动时初始化数据目录"""
+    logger.info("正在初始化数据目录…")
+    _init_data_dir()
+    logger.info("应用启动完成")
+    yield
+    logger.info("应用关闭")
+
+
+app = FastAPI(title="工程图批阅系统", lifespan=lifespan)
+
+# CORS 开放给内网使用
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -20,6 +53,7 @@ app.add_middleware(
 app.include_router(teacher.router)
 app.include_router(student.router)
 
+# ── 前端 SPA 托管（仅生产模式下 dist/ 存在时生效）──────────
 FRONTEND_DIR = Path(__file__).parent.parent / "frontend" / "dist"
 
 if FRONTEND_DIR.exists():
@@ -29,6 +63,7 @@ if FRONTEND_DIR.exists():
 @app.get("/student")
 @app.get("/student/")
 async def serve_student_spa():
+    """学生端 SPA 入口"""
     return FileResponse(FRONTEND_DIR / "index.html")
 
 
@@ -36,11 +71,13 @@ async def serve_student_spa():
 @app.get("/teacher/")
 @app.get("/teacher/{rest:path}")
 async def serve_teacher_spa():
+    """教师端 SPA 入口"""
     return FileResponse(FRONTEND_DIR / "index.html")
 
 
 @app.get("/")
 async def root():
+    """根路径，直接返回前端首页"""
     return FileResponse(FRONTEND_DIR / "index.html")
 
 

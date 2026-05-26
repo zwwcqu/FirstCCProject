@@ -65,13 +65,30 @@ export default function StudentPage() {
     }
   };
 
-  const handleSubmit = async () => {
-    if (!selectedQid || !file) {
-      setError("请选择题目并上传文件");
-      return;
+  // 输入校验（正式提交模式）
+  const MAX_NAME_LEN = 50;
+  const MAX_ID_LEN = 30;
+  const MAX_FILE_MB = 20;
+
+  const validate = (): string | null => {
+    if (!selectedQid) return "请选择题目";
+    if (!file) return "请上传工程图文件";
+    if (file.size > MAX_FILE_MB * 1024 * 1024) {
+      return `文件过大（上限 ${MAX_FILE_MB}MB），请压缩后重新上传`;
     }
-    if (mode === "submit" && (!name || !studentId)) {
-      setError("提交作业需填写姓名和学号");
+    if (mode === "submit") {
+      if (!name.trim()) return "请填写姓名";
+      if (name.length > MAX_NAME_LEN) return `姓名不能超过${MAX_NAME_LEN}个字符`;
+      if (!studentId.trim()) return "请填写学号";
+      if (studentId.length > MAX_ID_LEN) return `学号不能超过${MAX_ID_LEN}个字符`;
+    }
+    return null;
+  };
+
+  const handleSubmit = async () => {
+    const validationError = validate();
+    if (validationError) {
+      setError(validationError);
       return;
     }
 
@@ -87,7 +104,7 @@ export default function StudentPage() {
     try {
       const submitName = mode === "test" ? "测试" : name;
       const submitId = mode === "test" ? `test_${Date.now()}` : studentId;
-      const data = await submitHomework(selectedQid, submitName, submitId, file, mode);
+      const data = await submitHomework(selectedQid!, submitName, submitId, file!, mode);
       if (data.result) {
         setResult({
           姓名: name,
