@@ -19,6 +19,7 @@ import {
   getAnalysisResult,
   getTeacherPreviewUrl,
   batchGrade,
+  batchClearGrades,
   editGrade,
   getTeacherStudentPreviewUrl,
   supplementSubmission,
@@ -55,6 +56,7 @@ export default function TeacherDashboard() {
   // 成绩管理
   const [selectedStudents, setSelectedStudents] = useState<Set<string>>(new Set());
   const [batchGrading, setBatchGrading] = useState(false);
+  const [batchClearing, setBatchClearing] = useState(false);
   const [editingCell, setEditingCell] = useState<{ sid: string; col: string } | null>(null);
   const [editValue, setEditValue] = useState("");
   const [previewImage, setPreviewImage] = useState<string | null>(null);
@@ -270,6 +272,28 @@ export default function TeacherDashboard() {
       alert(e.message);
     } finally {
       setBatchGrading(false);
+    }
+  };
+
+  const handleBatchClear = async () => {
+    if (!gradesView || selectedStudents.size === 0) return;
+    if (!confirm(`确定要清除 ${selectedStudents.size} 名学生的评分记录和分析数据吗？此操作不可恢复。`)) return;
+    setBatchClearing(true);
+    try {
+      const ids = Array.from(selectedStudents);
+      await batchClearGrades(gradesView, ids);
+      setGradeData((prev) =>
+        prev.map((r: any) =>
+          ids.includes(r["学号"])
+            ? { ...r, 成绩: "", 阶段1相似度: "", 阶段2评分: "", 总分: "", 相似度评价: "", 阶段2评语: "", 总评: "", 图样表达: "", 尺寸标注: "", 尺寸公差: "", 表面质量: "", 形位公差: "", 技术要求: "", 教师评语: "", _status: "uploaded" }
+            : r
+        )
+      );
+      setSelectedStudents(new Set());
+    } catch (e: any) {
+      alert(e.message);
+    } finally {
+      setBatchClearing(false);
     }
   };
 
@@ -840,6 +864,13 @@ export default function TeacherDashboard() {
                   >
                     {batchGrading ? "提交中…" : `批量评分 (${selectedStudents.size})`}
                   </button>
+                  <button
+                    onClick={handleBatchClear}
+                    disabled={selectedStudents.size === 0 || batchClearing}
+                    className="px-4 py-1 bg-red-600 text-white rounded hover:bg-red-700 disabled:opacity-50 text-sm"
+                  >
+                    {batchClearing ? "清除中…" : `清除评分 (${selectedStudents.size})`}
+                  </button>
                   <button onClick={() => { setGradesView(null); setEditingCell(null); }} className="px-3 py-1 border rounded hover:bg-gray-50">关闭</button>
                 </div>
               </div>
@@ -1038,7 +1069,7 @@ export default function TeacherDashboard() {
           const row = gradeData.find((r: any) => r["学号"] === reviewSid);
           if (!row) return null;
           const isGraded = row["_status"] === "graded";
-          const DIMS = ["图样表达", "尺寸标注", "尺寸公差", "表面质量", "形位公差"];
+          const DIMS = ["图样表达", "尺寸标注", "尺寸公差", "表面质量", "形位公差", "技术要求"];
           return (
             <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[65]"
               onClick={(e) => {
@@ -1094,7 +1125,7 @@ export default function TeacherDashboard() {
                         ))}
                       </select>
                       <span className="text-gray-400 text-xs ml-2">
-                        阶段1: {row["阶段1相似度"] || "-"}% × 阶段2: {row["阶段2评分"] || "-"}% = 总分: {row["总分"] || "-"}%
+                        阶段1: {row["阶段1相似度"] || "-"}% × 阶段2: {row["阶段2评分"] || "-"}% → √(P1×P2) = 总分: {row["总分"] || "-"}%
                       </span>
                     </div>
 
@@ -1107,6 +1138,7 @@ export default function TeacherDashboard() {
                     {/* 阶段二评价 */}
                     <div>
                       <p className="font-medium text-gray-700">阶段二 · 量化评分</p>
+                      <p className="text-gray-600 mt-1">{row["阶段2评语"] || "-"}</p>
                       <div className="grid grid-cols-2 gap-2 mt-1">
                         {DIMS.map((dim) => (
                           <div key={dim} className="bg-gray-50 rounded p-2">

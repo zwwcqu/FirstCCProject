@@ -542,8 +542,20 @@ def get_all_roster_students() -> list[dict]:
     return students
 
 
+def _validate_pdf_file(path: Path) -> bool:
+    """校验 PDF 文件是否可渲染。返回 True 表示有效。"""
+    if path.stat().st_size == 0:
+        return False
+    try:
+        from pdf2image import convert_from_path
+        images = convert_from_path(str(path), first_page=1, last_page=1, dpi=72)
+        return len(images) > 0
+    except Exception:
+        return False
+
+
 def sync_submissions_from_disk(qid: str) -> int:
-    """扫描 student 目录下的 PDF/PNG 文件，将名单中的学生自动注册到 submissions.json。返回新增数量。"""
+    """扫描 student 目录：清理损坏文件、将 PDF/非PNG 图片转为 3508px PNG、自动注册提交。返回新增数量。"""
     student_dir = get_student_dir(qid)
     if not student_dir.exists():
         return 0
@@ -557,25 +569,78 @@ def sync_submissions_from_disk(qid: str) -> int:
 
     submissions = get_submissions(qid)
     added = 0
+    valid_exts = (".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")
+    corrupt_stems: set[str] = set()
+    submission_dirty = False
 
-    for f in student_dir.iterdir():
-        if not f.is_file() or f.suffix.lower() not in (".pdf", ".png"):
+    for f in sorted(student_dir.iterdir()):
+        if not f.is_file():
             continue
+        ext = f.suffix.lower()
+        # 跳过分析/结果 JSON（_结构分析, _量化分析 等）
+        if ext == ".json" or f.stem.endswith("_结构分析") or f.stem.endswith("_量化分析"):
+            continue
+        if ext not in valid_exts:
+            continue
+
         stem = f.stem
         student = roster_map.get(stem)
         if student is None:
             continue
+
         sid = student["学号"]
+        name = student["姓名"]
+
+        # 校验 PDF 有效性（损坏/空文件 → 标记清理）
+        if ext == ".pdf" and not _validate_pdf_file(f):
+            logger.warning(f"[{qid}] 损坏的 PDF，将清除: {f.name}")
+            corrupt_stems.add(stem)
+            continue
+
+        # 非 PNG 格式 → 转换为 3508px PNG，保留原始文件
+        if ext != ".png":
+            png_path = f.with_suffix(".png")
+            if not png_path.exists():
+                try:
+                    from services.llm_service import save_as_png
+                    save_as_png(f, png_path)
+                    logger.info(f"[{qid}] 转换为 PNG: {f.name} → {png_path.name}")
+                except Exception as e:
+                    logger.error(f"[{qid}] PNG 转换失败: {f.name}: {e}")
+
+        # 自动注册到 submissions
         if sid not in submissions:
             submissions[sid] = {
-                "name": student["姓名"],
+                "name": name,
                 "filename": stem,
                 "status": "uploaded",
                 "submitted_at": "",
             }
             added += 1
-            logger.info(f"[{qid}] 自动发现提交: {student['姓名']}({sid}) ← {f.name}")
+            submission_dirty = True
+            logger.info(f"[{qid}] 自动发现提交: {name}({sid}) ← {f.name}")
 
-    if added > 0:
+    # 清理损坏文件（PDF + 分析 JSON + submissions 记录）
+    for stem in corrupt_stems:
+        for cf in list(student_dir.iterdir()):
+            if cf.stem == stem or cf.stem.startswith(stem + "_"):
+                cf.unlink()
+                logger.info(f"[{qid}] 已删除损坏相关文件: {cf.name}")
+        for sid, rec in list(submissions.items()):
+            safe_name = _sanitize_filename_part(rec.get("name", ""))
+            safe_id = _sanitize_filename_part(sid)
+            if f"{safe_name}_{safe_id}" == stem:
+                submissions.pop(sid, None)
+                submission_dirty = True
+                logger.info(f"[{qid}] 已从记录移除损坏提交: {rec.get('name')}({sid})")
+                # 同时清理成绩 CSV
+                try:
+                    from services.grade_service import remove_grade
+                    remove_grade(qid, sid)
+                except Exception:
+                    pass
+                break
+
+    if submission_dirty or corrupt_stems:
         _save_submissions(qid, submissions)
     return added

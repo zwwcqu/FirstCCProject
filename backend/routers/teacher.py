@@ -41,8 +41,9 @@ from services.question_service import (
     get_student_dir,
     update_submission_record,
     sync_submissions_from_disk,
+    _sanitize_filename_part,
 )
-from services.grade_service import read_all_grades, get_grades_csv_path, FIELDNAMES, save_grade, get_student_grade, save_result_json
+from services.grade_service import read_all_grades, get_grades_csv_path, FIELDNAMES, save_grade, get_student_grade, save_result_json, remove_grade
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/teacher", tags=["teacher"])
@@ -375,7 +376,39 @@ async def batch_grade(request: Request, qid: str):
     return {"ok": True, "count": len(student_ids)}
 
 
-@router.post("/grades/{qid}/supplement-submission")
+@router.post("/grades/{qid}/batch-clear")
+async def batch_clear_grades(request: Request, qid: str):
+    """批量清除评分：删除选中学生的成绩记录 + 结构/量化分析文件"""
+    _require_auth(request)
+    body = await request.json()
+    student_ids: list[str] = body.get("student_ids", [])
+    if not student_ids:
+        raise HTTPException(status_code=400, detail="请选择至少一名学生")
+
+    student_dir = get_student_dir(qid)
+    cleared = 0
+    for sid in student_ids:
+        rec = get_submission_record(qid, sid)
+        name = rec.get("name", "") if rec else ""
+        if name:
+            safe_name = _sanitize_filename_part(name)
+            safe_id = _sanitize_filename_part(sid)
+            stem = f"{safe_name}_{safe_id}"
+            # 删除分析/结果 JSON 文件（保留 PDF/PNG 原文件）
+            if student_dir.exists():
+                for f in list(student_dir.iterdir()):
+                    if f.suffix.lower() in (".pdf", ".png"):
+                        continue
+                    if f.stem == stem or f.stem.startswith(stem + "_"):
+                        f.unlink()
+                        logger.info(f"[{qid}] 已删除分析文件: {f.name}")
+            # 删除成绩记录
+            remove_grade(qid, sid)
+            # 更新提交状态为 uploaded（尚未评分）
+            update_submission_record(qid, sid, name, stem, "uploaded")
+            cleared += 1
+
+    return {"ok": True, "cleared": cleared}
 async def supplement_submission(
     request: Request,
     qid: str,

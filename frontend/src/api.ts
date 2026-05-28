@@ -148,6 +148,13 @@ export function batchGrade(qid: string, studentIds: string[]) {
   });
 }
 
+export function batchClearGrades(qid: string, studentIds: string[]) {
+  return api(`/api/teacher/grades/${qid}/batch-clear`, {
+    method: "POST",
+    body: JSON.stringify({ student_ids: studentIds }),
+  });
+}
+
 export function editGrade(qid: string, studentId: string, fields: Record<string, string>) {
   return api(`/api/teacher/grades/${qid}/${studentId}`, {
     method: "PUT",

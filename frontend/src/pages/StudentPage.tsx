@@ -702,10 +702,11 @@ export default function StudentPage() {
                   "text-orange-600"
                 }`}>{result.成绩}</div>
               </div>
-              <div className="flex-1 text-center text-sm text-gray-500">
+              <div className="flex-1 text-right text-sm text-gray-500">
                 阶段1 相似度<br/><span className="text-lg font-bold text-gray-800">{(result as any)["阶段1相似度"] || (result as any).phase1_similarity || "-"}%</span>
-                <span className="mx-2">×</span>
+                <span className="mx-1 text-xs">√(</span>
                 阶段2 评分<br/><span className="text-lg font-bold text-gray-800">{(result as any)["阶段2评分"] || (result as any).phase2_criteria || "-"}%</span>
+                <span className="mx-1 text-xs">)</span>
                 <span className="mx-2">=</span>
                 总分<br/><span className="text-lg font-bold text-blue-600">{(result as any)["总分"] || (result as any).total_score || "-"}%</span>
               </div>
@@ -714,8 +715,12 @@ export default function StudentPage() {
               <h4 className="text-sm font-medium text-yellow-700">阶段1：相似度评价</h4>
               <p className="text-sm mt-1 whitespace-pre-wrap">{(result as any)["相似度评价"] || (result as any).phase1_comment || "-"}</p>
             </div>
+            <div className="bg-blue-50 rounded p-3">
+              <h4 className="text-sm font-medium text-blue-700">阶段2：量化评分评语</h4>
+              <p className="text-sm mt-1 whitespace-pre-wrap">{(result as any)["阶段2评语"] || (result as any).phase2_comment || "-"}</p>
+            </div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              {["图样表达", "尺寸标注", "尺寸公差", "表面质量", "形位公差"].map((key) => (
+              {["图样表达", "尺寸标注", "尺寸公差", "表面质量", "形位公差", "技术要求"].map((key) => (
                 <div key={key} className="bg-gray-50 rounded p-3">
                   <h4 className="text-sm font-medium text-gray-500">{key}</h4>
                   <p className="text-sm mt-1 whitespace-pre-wrap">{(result as any)[key] || "-"}</p>

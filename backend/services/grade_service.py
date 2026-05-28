@@ -31,8 +31,8 @@ logger = logging.getLogger(__name__)
 FIELDNAMES = [
     "班级", "姓名", "学号", "提交时间", "成绩",
     "阶段1相似度", "阶段2评分", "总分",
-    "相似度评价", "总评",
-    "图样表达", "尺寸标注", "尺寸公差", "表面质量", "形位公差",
+    "相似度评价", "阶段2评语", "总评",
+    "图样表达", "尺寸标注", "尺寸公差", "表面质量", "形位公差", "技术要求",
     "教师评语",
 ]
 
@@ -75,12 +75,14 @@ def save_grade(qid: str, student_id: str, name: str, grade: str, comments: dict,
         "阶段2评分": str(comments.get("phase2_criteria", "")),
         "总分": str(comments.get("total_score", "")),
         "相似度评价": comments.get("phase1_comment", ""),
+        "阶段2评语": comments.get("phase2_comment", ""),
         "总评": comments.get("总评", ""),
         "图样表达": comments.get("图样表达", ""),
         "尺寸标注": comments.get("尺寸标注", ""),
         "尺寸公差": comments.get("尺寸公差", ""),
         "表面质量": comments.get("表面质量", ""),
         "形位公差": comments.get("形位公差", ""),
+        "技术要求": comments.get("技术要求", ""),
         "教师评语": comments.get("教师评语", ""),
     }
 

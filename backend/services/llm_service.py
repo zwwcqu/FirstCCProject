@@ -521,6 +521,39 @@ def grade_phase1(
     return result
 
 
+def _simplify_quantitative(data: dict) -> dict:
+    """精简量化分析 JSON，仅保留评分所需的关键字段，减少 token 消耗。"""
+    simplified: dict = {}
+
+    # 尺寸标注：仅保留 count + 每条数值/公差
+    dims = data.get("dimensions", [])
+    simplified["尺寸数量"] = len(dims)
+    simplified["尺寸标注"] = [
+        {"数值": d.get("value"), "公差": d.get("tolerance")}
+        for d in dims
+    ]
+
+    # 表面粗糙度：仅保留 count + 每条数值
+    roughness = data.get("surface_roughness", [])
+    simplified["粗糙度数量"] = len(roughness)
+    simplified["表面粗糙度"] = [{"数值": r.get("value")} for r in roughness]
+
+    # 形位公差：仅保留 count + 每条类型/数值/基准
+    geos = data.get("geometric_tolerances", [])
+    simplified["形位公差项数"] = len(geos)
+    simplified["形位公差"] = [
+        {"类型": g.get("type"), "数值": g.get("value")}
+        for g in geos
+    ]
+
+    if data.get("技术要求"):
+        simplified["技术要求"] = data["技术要求"]
+    if "thread_specs" in data and data["thread_specs"]:
+        simplified["螺纹规格"] = data["thread_specs"]
+
+    return simplified
+
+
 def grade_phase2(
     ref_quant: dict,
     stu_quant: dict,
@@ -530,8 +563,7 @@ def grade_phase2(
 ) -> dict:
     """
     阶段二：量化标注评分（纯文本对比，无需图片）。
-    Prompt = 量化对比指令 + 两份量化 JSON + 老师阶段二评分标准
-    Content = 纯文本
+    先精简量化 JSON（去掉 id/feature_ref/description/location 等冗余字段），再发送评分。
     返回 dict 包含 phase2_criteria, 图样表达, 尺寸标注, 尺寸公差, 表面质量, 形位公差, phase2_comment, 总评
     """
     client = _build_client()
@@ -541,16 +573,19 @@ def grade_phase2(
     hint_path = CONFIG_DIR / "二阶段修正提示词.txt"
     phase2_hint = hint_path.read_text(encoding="utf-8") if hint_path.exists() else ""
 
+    ref_simple = _simplify_quantitative(ref_quant)
+    stu_simple = _simplify_quantitative(stu_quant)
+
     kn_block = f"【补充知识】\n{knowledge}\n\n" if knowledge else ""
     prompt_text = f"""{kn_block}{phase2_hint}
 
 你是一位机械检测工程师。请逐项对比两份量化分析数据，评估学生标注的完整性和正确性。
 
 【参考图量化数据】
-{json.dumps(ref_quant, ensure_ascii=False, indent=2)}
+{json.dumps(ref_simple, ensure_ascii=False, indent=2)}
 
 【学生图量化数据】
-{json.dumps(stu_quant, ensure_ascii=False, indent=2)}
+{json.dumps(stu_simple, ensure_ascii=False, indent=2)}
 
 【评分标准】
 {phase2_criteria}
@@ -563,6 +598,7 @@ def grade_phase2(
   "尺寸公差": "评价公差标注是否规范",
   "表面质量": "评价粗糙度等表面质量标注",
   "形位公差": "评价形位公差标注情况",
+  "技术要求": "评价技术要求文本的完整性和相似度",
   "phase2_comment": "按批改要求的综合评价",
   "总评": "综合两阶段的整体评价"
 }}"""
@@ -602,7 +638,7 @@ def run_two_phase_grading(
 
     p1_score = float(merged.get("phase1_similarity", 0))
     p2_score = float(merged.get("phase2_criteria", 0))
-    total = round(p1_score * p2_score / 100, 1)
+    total = round((p1_score * p2_score) ** 0.5, 1)
     grade = _compute_grade(total)
 
     merged["grade"] = grade
