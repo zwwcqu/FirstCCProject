@@ -70,6 +70,7 @@ export default function TeacherDashboard() {
   // 查看作业弹窗
   const [reviewSid, setReviewSid] = useState<string | null>(null);
   const [reviewComment, setReviewComment] = useState("");
+  const [reviewGrade, setReviewGrade] = useState("");
 
   // 浮动图面板
   const [floatQid, setFloatQid] = useState<string | null>(null);
@@ -318,34 +319,37 @@ export default function TeacherDashboard() {
     if (!gradesView) return;
     const row = gradeData.find((r: any) => r["学号"] === sid);
     setReviewSid(sid);
+    setReviewGrade(row?.["成绩"] || "");
     setReviewComment(row?.["教师评语"] || "");
+    setSavedText("");
   };
 
-  const handleSaveComment = async () => {
+  const [saving, setSaving] = useState(false);
+  const [savedText, setSavedText] = useState("");
+
+  const handleSave = async () => {
     if (!gradesView || !reviewSid) return;
+    setSaving(true);
     try {
-      await editGrade(gradesView, reviewSid, { "教师评语": reviewComment });
+      const fields: Record<string, string> = {};
+      if (reviewGrade) fields["成绩"] = reviewGrade;
+      fields["教师评语"] = reviewComment;
+      await editGrade(gradesView, reviewSid, fields);
       setGradeData((prev) =>
-        prev.map((r: any) =>
-          r["学号"] === reviewSid ? { ...r, "教师评语": reviewComment } : r
-        )
+        prev.map((r: any) => {
+          if (r["学号"] !== reviewSid) return r;
+          const u = { ...r };
+          if (reviewGrade) u["成绩"] = reviewGrade;
+          u["教师评语"] = reviewComment;
+          return u;
+        })
       );
+      setSavedText("已保存");
+      setTimeout(() => setSavedText(""), 1500);
     } catch (e: any) {
       alert(e.message);
-    }
-  };
-
-  const handleGradeDropdown = async (sid: string, newGrade: string) => {
-    if (!gradesView) return;
-    try {
-      await editGrade(gradesView, sid, { "成绩": newGrade });
-      setGradeData((prev) =>
-        prev.map((r: any) =>
-          r["学号"] === sid ? { ...r, "成绩": newGrade } : r
-        )
-      );
-    } catch (e: any) {
-      alert(e.message);
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -1038,7 +1042,7 @@ export default function TeacherDashboard() {
           return (
             <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[65]"
               onClick={(e) => {
-                if (e.target === e.currentTarget) { handleSaveComment(); setReviewSid(null); }
+                if (e.target === e.currentTarget) setReviewSid(null);
               }}
               onMouseMove={(e) => {
                 if (!modalMoveRef.current) return;
@@ -1062,9 +1066,17 @@ export default function TeacherDashboard() {
                   <h3 className="text-lg font-semibold">
                     {row["姓名"]} ({row["学号"]}) 的作业
                   </h3>
-                  <button onClick={() => { handleSaveComment(); setReviewSid(null); }}
-                    onMouseDown={(e) => e.stopPropagation()}
-                    className="px-3 py-1 border rounded hover:bg-gray-50 text-sm">关闭</button>
+                  <div className="flex gap-2">
+                    <button onClick={handleSave} disabled={saving}
+                      onMouseDown={(e) => e.stopPropagation()}
+                      className="px-4 py-1 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50 text-sm">
+                      {saving ? "保存中…" : "保存"}
+                    </button>
+                    {savedText && <span className="text-xs text-green-600">{savedText}</span>}
+                    <button onClick={() => setReviewSid(null)}
+                      onMouseDown={(e) => e.stopPropagation()}
+                      className="px-3 py-1 border rounded hover:bg-gray-50 text-sm">关闭</button>
+                  </div>
                 </div>
 
 {isGraded ? (
@@ -1073,8 +1085,8 @@ export default function TeacherDashboard() {
                     <div className="flex items-center gap-3 bg-gray-50 rounded p-3">
                       <span className="text-gray-600">评级：</span>
                       <select
-                        value={row["成绩"] || ""}
-                        onChange={(e) => handleGradeDropdown(reviewSid, e.target.value)}
+                        value={reviewGrade}
+                        onChange={(e) => setReviewGrade(e.target.value)}
                         className="border rounded px-2 py-1 text-sm"
                       >
                         {GRADE_OPTIONS.map((g) => (
@@ -1114,7 +1126,6 @@ export default function TeacherDashboard() {
                       <textarea
                         value={reviewComment}
                         onChange={(e) => setReviewComment(e.target.value)}
-                        onBlur={handleSaveComment}
                         rows={4}
                         className="w-full border rounded px-3 py-2 text-sm"
                         placeholder="输入教师评语…"
