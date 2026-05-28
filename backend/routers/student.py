@@ -216,6 +216,7 @@ def _run_analyze(
     file_bytes: bytes | None, filename: str,
     is_test: bool,
     struct_tpl: Path, quant_tpl: Path,
+    knowledge: str = "",
 ):
     """后台线程：结构分析 → 量化分析 → 保存"""
     try:
@@ -223,14 +224,14 @@ def _run_analyze(
         if is_test:
             if not file_bytes:
                 raise RuntimeError("测试模式文件数据丢失，请重新上传")
-            structure = analyze_structure_bytes(file_bytes, filename, struct_tpl)
-            quantitative = analyze_quantitative_bytes(file_bytes, filename, quant_tpl, structure)
+            structure = analyze_structure_bytes(file_bytes, filename, struct_tpl, knowledge=knowledge)
+            quantitative = analyze_quantitative_bytes(file_bytes, filename, quant_tpl, structure, knowledge=knowledge)
         else:
             student_path = get_student_submission_path(qid, student_id, name)
             if student_path is None:
                 raise RuntimeError("学生提交文件不存在，请重新上传")
-            structure = analyze_structure(student_path, struct_tpl)
-            quantitative = analyze_quantitative(student_path, quant_tpl, structure)
+            structure = analyze_structure(student_path, struct_tpl, knowledge=knowledge)
+            quantitative = analyze_quantitative(student_path, quant_tpl, structure, knowledge=knowledge)
 
         analysis = {"structure": structure, "quantitative": quantitative}
         if not is_test:
@@ -287,9 +288,11 @@ async def start_analysis(
         student_fn = student_path.name
 
     def _task():
+        kn = get_question_files(qid).get("knowledge", "")
         _run_analyze(qid, name, student_id, file_bytes, student_fn, is_test,
                      CONFIG_DIR / "结构分析_学生.txt",
-                     CONFIG_DIR / "量化分析_学生.txt")
+                     CONFIG_DIR / "量化分析_学生.txt",
+                     knowledge=kn)
 
     enqueue(10, _task)
     return {"ok": True, "status": "processing"}
@@ -321,6 +324,7 @@ def _run_grade(
         files = get_question_files(qid)
         phase1_criteria = files.get("phase1_criteria", "")
         phase2_criteria = files.get("phase2_criteria", "")
+        knowledge = files.get("knowledge", "")
 
         qdir = _get_question_dir(qid)
         ref_pdf = qdir / "参考工程图.pdf"
@@ -338,9 +342,10 @@ def _run_grade(
                 phase1_criteria=phase1_criteria,
                 phase2_criteria=phase2_criteria,
                 ref_image_path=ref_pdf,
-                stu_image_path=Path("."),  # 占位，不会用到
+                stu_image_path=Path("."),
                 stu_data=stu_data,
                 stu_filename=stu_filename,
+                knowledge=knowledge,
             )
         else:
             student_path = get_student_submission_path(qid, student_id, name)
@@ -355,6 +360,7 @@ def _run_grade(
                 phase2_criteria=phase2_criteria,
                 ref_image_path=ref_pdf,
                 stu_image_path=student_path,
+                knowledge=knowledge,
             )
 
         grade = result.get("grade", "N/A")

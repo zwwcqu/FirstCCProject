@@ -15,6 +15,7 @@ import {
   getTeacherPreviewUrl,
   getStudentPreviewUrl,
 } from "../api";
+import FloatingImageViewer from "../components/FloatingImageViewer";
 
 interface Question {
   id: string;
@@ -108,6 +109,9 @@ export default function StudentPage() {
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const dragRef = useRef<{ x: number; y: number; px: number; py: number } | null>(null);
 
+  // 右侧浮动图面板
+  const [floatOpen, setFloatOpen] = useState(false);
+
   const openLightbox = (src: string) => { setLightboxSrc(src); setZoom(1); setPan({ x: 0, y: 0 }); };
   const closeLightbox = () => setLightboxSrc("");
 
@@ -125,6 +129,13 @@ export default function StudentPage() {
     setPan({ x: dragRef.current.px + (e.clientX - dragRef.current.x), y: dragRef.current.py + (e.clientY - dragRef.current.y) });
   };
   const onMouseUp = () => { dragRef.current = null; };
+
+  // 分析/评分结果出现时自动弹出浮动图
+  useEffect(() => {
+    if (selectedQid && studentFilename && (analysisData || result)) {
+      setFloatOpen(true);
+    }
+  }, [selectedQid, studentFilename, !!analysisData, !!result]);
 
   const loadData = async () => {
     try { setQuestions(await listQuestions()); } catch { /* ignore */ }
@@ -196,6 +207,7 @@ export default function StudentPage() {
     setUploaded(false);
     setUploading(false);
     setSubmitTs(0);
+    setFloatOpen(false);
     setError("");
     try {
       const q = await getQuestionDetail(qid);
@@ -442,19 +454,16 @@ export default function StudentPage() {
 
   return (
     <div className="min-h-screen bg-gray-50">
-      <header className="bg-blue-700 text-white p-4 shadow sticky top-0 z-10">
-        <div className="max-w-3xl mx-auto flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <button onClick={handleLogout} className="text-sm hover:underline">&larr; 退出登录</button>
-            <h1 className="text-lg font-bold">工程图批阅</h1>
-          </div>
-          <div className="text-sm">
+      <header className="bg-blue-700 text-white px-3 py-1.5 shadow sticky top-0 z-10">
+        <div className="max-w-3xl mx-auto flex items-center justify-between text-sm">
+          <button onClick={handleLogout} className="hover:underline opacity-70 hover:opacity-100">&larr;退出</button>
+          <div>
             {identity.isTest ? (
-              <span className="text-blue-200">测试模式</span>
+              <span>测试模式</span>
             ) : (
               <span>
                 {identity.name} ({identity.id})
-                {identity.className ? <span className="ml-2 text-blue-200">{identity.className}</span> : null}
+                {identity.className ? <span className="ml-2 opacity-70">{identity.className}</span> : null}
               </span>
             )}
           </div>
@@ -566,8 +575,8 @@ export default function StudentPage() {
               </div>
             )}
 
-            {/* 学生图预览（转换完成后显示） */}
-            {studentFilename && submitTs > 0 && selectedQid && (
+            {/* 学生图预览（提交后、分析前显示） */}
+            {studentFilename && submitTs > 0 && selectedQid && !analysisData && !result && (
               <div className="mb-4">
                 <p className="text-xs text-gray-500 mb-1">已上传的工程图（点击放大）</p>
                 <img src={getStudentPreviewUrl(selectedQid, studentFilename, submitTs)}
@@ -581,6 +590,8 @@ export default function StudentPage() {
                 className="bg-blue-600 text-white px-6 py-2 rounded hover:bg-blue-700 disabled:opacity-50">
                 {!uploaded ? "请先上传作业" : submitStatus ? "处理中…" : "开始分析"}
               </button>
+            ) : result ? (
+              <p className="text-green-600 font-medium text-sm">评分已完成</p>
             ) : (
               <button onClick={handleGrade} disabled={grading || !!submitStatus}
                 className="bg-green-600 text-white px-6 py-2 rounded hover:bg-green-700 disabled:opacity-50">
@@ -715,9 +726,29 @@ export default function StudentPage() {
               <h4 className="text-sm font-medium text-blue-700">总评</h4>
               <p className="text-sm mt-1 whitespace-pre-wrap">{result.总评 || "-"}</p>
             </div>
+
+            {(result as any)["教师评语"] ? (
+              <div className="bg-green-50 rounded p-3 border border-green-200">
+                <h4 className="text-sm font-medium text-green-700">教师评语</h4>
+                <p className="text-sm mt-1 whitespace-pre-wrap">{(result as any)["教师评语"]}</p>
+              </div>
+            ) : null}
           </div>
         )}
       </main>
+
+      {/* 右侧浮动图面板 */}
+      {floatOpen && studentFilename && selectedQid && (
+        <FloatingImageViewer
+          src={getStudentPreviewUrl(selectedQid, studentFilename, submitTs)}
+          title="我的作业"
+          visible={true}
+          onClose={() => setFloatOpen(false)}
+          initialWidth={320}
+          initialHeight={360}
+          zIndex={40}
+        />
+      )}
 
       {/* 图片浮动预览 */}
       {lightboxSrc && (

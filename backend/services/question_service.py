@@ -69,7 +69,9 @@ def get_question(qid: str) -> dict | None:
     return None
 
 
-def create_question(qid: str, title: str, description: str, phase1_criteria: str, phase2_criteria: str) -> dict:
+def create_question(qid: str, title: str, description: str,
+                    phase1_criteria: str, phase2_criteria: str,
+                    knowledge: str = "") -> dict:
     """创建题目：写索引 + 创建目录 + 写内容文件"""
     if not qid.isdigit():
         raise ValueError("题号必须为非负整数")
@@ -82,10 +84,10 @@ def create_question(qid: str, title: str, description: str, phase1_criteria: str
     qdir.mkdir(parents=True, exist_ok=True)
     get_student_dir(qid).mkdir(parents=True, exist_ok=True)
 
-    # 写入各内容文件
     (qdir / "题目内容.md").write_text(description, encoding="utf-8")
     (qdir / "阶段1评分标准.md").write_text(phase1_criteria, encoding="utf-8")
     (qdir / "阶段2评分标准.md").write_text(phase2_criteria, encoding="utf-8")
+    (qdir / "补充知识.md").write_text(knowledge, encoding="utf-8")
 
     entry = {"id": qid, "title": title}
     questions.append(entry)
@@ -94,7 +96,9 @@ def create_question(qid: str, title: str, description: str, phase1_criteria: str
     return entry
 
 
-def update_question(qid: str, title: str, description: str, phase1_criteria: str, phase2_criteria: str) -> dict | None:
+def update_question(qid: str, title: str, description: str,
+                    phase1_criteria: str, phase2_criteria: str,
+                    knowledge: str = "") -> dict | None:
     """编辑题目：更新索引 + 覆盖内容文件"""
     questions = read_questions_index()
     found = None
@@ -110,6 +114,7 @@ def update_question(qid: str, title: str, description: str, phase1_criteria: str
     (qdir / "题目内容.md").write_text(description, encoding="utf-8")
     (qdir / "阶段1评分标准.md").write_text(phase1_criteria, encoding="utf-8")
     (qdir / "阶段2评分标准.md").write_text(phase2_criteria, encoding="utf-8")
+    (qdir / "补充知识.md").write_text(knowledge, encoding="utf-8")
     write_questions_index(questions)
     logger.info(f"题目已更新: [{qid}] {title}")
     return found
@@ -163,6 +168,7 @@ def get_question_files(qid: str) -> dict:
         "description": "",
         "phase1_criteria": "",
         "phase2_criteria": "",
+        "knowledge": "",
         "images": [],
         "reference_pdf": None,
     }
@@ -178,6 +184,10 @@ def get_question_files(qid: str) -> dict:
     p2_file = qdir / "阶段2评分标准.md"
     if p2_file.exists():
         result["phase2_criteria"] = p2_file.read_text(encoding="utf-8")
+
+    kn_file = qdir / "补充知识.md"
+    if kn_file.exists():
+        result["knowledge"] = kn_file.read_text(encoding="utf-8")
 
     for f in sorted(qdir.iterdir()):
         if f.name.startswith("题目图片") and f.suffix.lower() in (".png", ".jpg", ".jpeg", ".gif", ".webp"):

@@ -69,13 +69,14 @@ def _run_reference_analysis(qid: str) -> None:
             logger.warning(f"[{qid}] 参考工程图不存在，跳过分析")
             return
 
+        kn = get_question_files(qid).get("knowledge", "")
         struct_tpl = CONFIG_DIR / "结构分析模版.txt"
         quant_tpl = CONFIG_DIR / "量化分析模版.txt"
 
         logger.info(f"[{qid}] 开始参考图结构分析…")
-        structure = analyze_structure(ref_pdf, struct_tpl)
+        structure = analyze_structure(ref_pdf, struct_tpl, knowledge=kn)
         logger.info(f"[{qid}] 参考图量化分析…")
-        quantitative = analyze_quantitative(ref_pdf, quant_tpl, structure)
+        quantitative = analyze_quantitative(ref_pdf, quant_tpl, structure, knowledge=kn)
 
         save_reference_analysis(qid, {"structure": structure, "quantitative": quantitative})
         logger.info(f"[{qid}] 参考图分析完成并已保存")
@@ -146,13 +147,14 @@ async def create_question_handler(
     description: str = Form(""),
     phase1_criteria: str = Form(""),
     phase2_criteria: str = Form(""),
+    knowledge: str = Form(""),
     image: Optional[UploadFile] = File(None),           # 题目附图（可选）
     reference_pdf: Optional[UploadFile] = File(None),   # 参考工程图（可选）
 ):
     """新增题目"""
     _require_auth(request)
     try:
-        entry = create_question(qid, title, description, phase1_criteria, phase2_criteria)
+        entry = create_question(qid, title, description, phase1_criteria, phase2_criteria, knowledge)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     if image and image.filename:
@@ -173,12 +175,13 @@ async def update_question_handler(
     description: str = Form(""),
     phase1_criteria: str = Form(""),
     phase2_criteria: str = Form(""),
+    knowledge: str = Form(""),
     image: Optional[UploadFile] = File(None),
     reference_pdf: Optional[UploadFile] = File(None),
 ):
     """编辑已有题目"""
     _require_auth(request)
-    entry = update_question(qid, title, description, phase1_criteria, phase2_criteria)
+    entry = update_question(qid, title, description, phase1_criteria, phase2_criteria, knowledge)
     if entry is None:
         raise HTTPException(status_code=404, detail="题目不存在")
     if image and image.filename:
@@ -304,6 +307,7 @@ async def batch_grade(request: Request, qid: str):
     files = get_question_files(qid)
     phase1_criteria = files.get("phase1_criteria", "")
     phase2_criteria = files.get("phase2_criteria", "")
+    knowledge = files.get("knowledge", "")
     qdir = get_question_dir(qid)
     ref_pdf = qdir / "参考工程图.pdf"
     struct_tpl = CONFIG_DIR / "结构分析_学生.txt"
@@ -325,8 +329,8 @@ async def batch_grade(request: Request, qid: str):
         if stu_analysis is None:
             try:
                 update_submission_record(qid, sid, name, student_path.stem, "analyzing")
-                structure = analyze_structure(student_path, struct_tpl)
-                quantitative = analyze_quantitative(student_path, quant_tpl, structure)
+                structure = analyze_structure(student_path, struct_tpl, knowledge=knowledge)
+                quantitative = analyze_quantitative(student_path, quant_tpl, structure, knowledge=knowledge)
                 stu_analysis = {"structure": structure, "quantitative": quantitative}
                 save_student_analysis(qid, sid, name, stu_analysis)
                 update_submission_record(qid, sid, name, student_path.stem, "analyzed")
@@ -348,6 +352,7 @@ async def batch_grade(request: Request, qid: str):
                 phase2_criteria=phase2_criteria,
                 ref_image_path=ref_pdf,
                 stu_image_path=student_path,
+                knowledge=knowledge,
             )
             grade = result.get("grade", "N/A")
             class_name = find_student_class(name, sid)

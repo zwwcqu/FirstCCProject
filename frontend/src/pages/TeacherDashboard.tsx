@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   checkLogin,
@@ -24,6 +24,7 @@ import {
   supplementSubmission,
   refreshGrades,
 } from "../api";
+import FloatingImageViewer from "../components/FloatingImageViewer";
 
 interface Question {
   id: string;
@@ -66,12 +67,35 @@ export default function TeacherDashboard() {
   const [supplementSubmitting, setSupplementSubmitting] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
 
+  // 查看作业弹窗
+  const [reviewSid, setReviewSid] = useState<string | null>(null);
+  const [reviewComment, setReviewComment] = useState("");
+
+  // 浮动图面板
+  const [floatQid, setFloatQid] = useState<string | null>(null);
+
+  // 窗口拖动（仅查看作业弹窗需要，浮动图已收归 FloatingImageViewer）
+  const reviewModalRef = useRef<HTMLDivElement>(null);
+  const [modalPos, setModalPos] = useState<{ x: number; y: number } | null>(null);
+  const modalMoveRef = useRef<{ mx: number; my: number; ox: number; oy: number } | null>(null);
+
+  // 展开分析结果时自动显示浮动图
+  useEffect(() => {
+    const active = Object.entries(expandedAnalysis).find(([, v]) => v);
+    if (active) {
+      setFloatQid(active[0]);
+    } else {
+      setFloatQid(null);
+    }
+  }, [expandedAnalysis]);
+
   // form fields
   const [qid, setQid] = useState("");
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [phase1Criteria, setPhase1Criteria] = useState("");
   const [phase2Criteria, setPhase2Criteria] = useState("");
+  const [knowledge, setKnowledge] = useState("");
   const [image, setImage] = useState<File | null>(null);
   const [refPdf, setRefPdf] = useState<File | null>(null);
 
@@ -124,6 +148,7 @@ export default function TeacherDashboard() {
     setDescription("");
     setPhase1Criteria("");
     setPhase2Criteria("");
+    setKnowledge("");
     setImage(null);
     setRefPdf(null);
     setEditingId(null);
@@ -137,13 +162,14 @@ export default function TeacherDashboard() {
     fd.append("description", description);
     fd.append("phase1_criteria", phase1Criteria);
     fd.append("phase2_criteria", phase2Criteria);
+    fd.append("knowledge", knowledge);
     if (image) fd.append("image", image);
     if (refPdf) fd.append("reference_pdf", refPdf);
     try {
       await createQuestion(fd);
       resetForm();
       loadQuestions();
-      if (refPdf) setAnalyzingQid(qid);  // 开始轮询分析结果
+      if (refPdf) setAnalyzingQid(qid);
     } catch (e: any) {
       alert(e.message);
     }
@@ -156,6 +182,7 @@ export default function TeacherDashboard() {
     fd.append("description", description);
     fd.append("phase1_criteria", phase1Criteria);
     fd.append("phase2_criteria", phase2Criteria);
+    fd.append("knowledge", knowledge);
     if (image) fd.append("image", image);
     if (refPdf) fd.append("reference_pdf", refPdf);
     try {
@@ -187,6 +214,7 @@ export default function TeacherDashboard() {
       setDescription(detail.files?.description || "");
       setPhase1Criteria(detail.files?.phase1_criteria || "");
       setPhase2Criteria(detail.files?.phase2_criteria || "");
+      setKnowledge(detail.files?.knowledge || "");
       setImage(null);
       setRefPdf(null);
       setShowForm(true);
@@ -284,9 +312,41 @@ export default function TeacherDashboard() {
     setEditingCell(null);
   };
 
-  const viewStudentDrawing = (sid: string) => {
+  const GRADE_OPTIONS = ["A+", "A", "B+", "B", "C+", "C", "D+", "D", "F"];
+
+  const handleOpenReview = (sid: string) => {
     if (!gradesView) return;
-    setPreviewImage(getTeacherStudentPreviewUrl(gradesView, sid));
+    const row = gradeData.find((r: any) => r["学号"] === sid);
+    setReviewSid(sid);
+    setReviewComment(row?.["教师评语"] || "");
+  };
+
+  const handleSaveComment = async () => {
+    if (!gradesView || !reviewSid) return;
+    try {
+      await editGrade(gradesView, reviewSid, { "教师评语": reviewComment });
+      setGradeData((prev) =>
+        prev.map((r: any) =>
+          r["学号"] === reviewSid ? { ...r, "教师评语": reviewComment } : r
+        )
+      );
+    } catch (e: any) {
+      alert(e.message);
+    }
+  };
+
+  const handleGradeDropdown = async (sid: string, newGrade: string) => {
+    if (!gradesView) return;
+    try {
+      await editGrade(gradesView, sid, { "成绩": newGrade });
+      setGradeData((prev) =>
+        prev.map((r: any) =>
+          r["学号"] === sid ? { ...r, "成绩": newGrade } : r
+        )
+      );
+    } catch (e: any) {
+      alert(e.message);
+    }
   };
 
   const loadClasses = async () => {
@@ -710,6 +770,16 @@ export default function TeacherDashboard() {
                   />
                 </div>
                 <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">补充知识（辅助大模型理解图纸）</label>
+                  <textarea
+                    value={knowledge}
+                    onChange={(e) => setKnowledge(e.target.value)}
+                    rows={4}
+                    className="w-full border rounded px-3 py-2"
+                    placeholder="例如：零件材料为HT200、表面粗糙度Ra6.3、未注倒角C1等"
+                  />
+                </div>
+                <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">题目附图</label>
                   <input type="file" accept="image/*" onChange={(e) => setImage(e.target.files?.[0] || null)} />
                 </div>
@@ -782,7 +852,7 @@ export default function TeacherDashboard() {
                       </th>
                       <th className="text-left p-2 w-10">#</th>
                       <th className="text-left p-2 whitespace-nowrap">状态</th>
-                      <th className="text-left p-2 whitespace-nowrap">工程图</th>
+                      <th className="text-left p-2 whitespace-nowrap">查看作业</th>
                       {gradeColumns.map((k) => (
                         <th key={k} className="text-left p-2 whitespace-nowrap">{k}</th>
                       ))}
@@ -821,8 +891,8 @@ export default function TeacherDashboard() {
                           </td>
                           <td className="p-2">
                             {filename ? (
-                              <button onClick={() => viewStudentDrawing(sid)}
-                                className="text-blue-600 hover:underline text-xs">查看</button>
+                              <button onClick={() => handleOpenReview(sid)}
+                                className="text-blue-600 hover:underline text-xs">查看作业</button>
                             ) : (
                               <span className="text-gray-300 text-xs">-</span>
                             )}
@@ -917,6 +987,36 @@ export default function TeacherDashboard() {
           </div>
         )}
 
+        {/* 参考图浮动面板 */}
+        {floatQid && (() => {
+          const q = questions.find((x) => x.id === floatQid);
+          if (!q?.files?.reference_pdf) return null;
+          return (
+            <FloatingImageViewer
+              src={getTeacherPreviewUrl(floatQid, q.files.reference_pdf, Date.now())}
+              title={`题${floatQid} 参考图`}
+              visible={true}
+              onClose={() => setFloatQid(null)}
+              initialWidth={320}
+              initialHeight={360}
+              zIndex={40}
+            />
+          );
+        })()}
+
+        {/* 查看作业浮动图 */}
+        {reviewSid && gradesView && (
+          <FloatingImageViewer
+            src={getTeacherStudentPreviewUrl(gradesView, reviewSid)}
+            title="学生工程图"
+            visible={true}
+            onClose={() => setReviewSid(null)}
+            initialWidth={340}
+            initialHeight={380}
+            zIndex={70}
+          />
+        )}
+
         {/* Student Drawing Preview */}
         {previewImage && (
           <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-[60]"
@@ -928,6 +1028,106 @@ export default function TeacherDashboard() {
               onClick={(e) => e.stopPropagation()} />
           </div>
         )}
+
+        {/* 查看作业弹窗 */}
+        {reviewSid && gradesView && (() => {
+          const row = gradeData.find((r: any) => r["学号"] === reviewSid);
+          if (!row) return null;
+          const isGraded = row["_status"] === "graded";
+          const DIMS = ["图样表达", "尺寸标注", "尺寸公差", "表面质量", "形位公差"];
+          return (
+            <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[65]"
+              onClick={(e) => {
+                if (e.target === e.currentTarget) { handleSaveComment(); setReviewSid(null); }
+              }}
+              onMouseMove={(e) => {
+                if (!modalMoveRef.current) return;
+                setModalPos({
+                  x: modalMoveRef.current.ox + (e.clientX - modalMoveRef.current.mx),
+                  y: modalMoveRef.current.oy + (e.clientY - modalMoveRef.current.my),
+                });
+              }}
+              onMouseUp={() => { modalMoveRef.current = null; }}>
+              <div ref={reviewModalRef}
+                className="bg-white rounded-lg shadow-xl p-6 w-full max-w-4xl mx-4 max-h-[90vh] overflow-auto"
+                style={modalPos ? { position: "fixed", left: modalPos.x, top: modalPos.y, margin: 0 } : {}}>
+                <div className="flex justify-between items-center mb-4 cursor-grab active:cursor-grabbing select-none"
+                  onMouseDown={(e) => {
+                    const el = reviewModalRef.current;
+                    if (!el) return;
+                    const rect = el.getBoundingClientRect();
+                    setModalPos({ x: rect.left, y: rect.top });
+                    modalMoveRef.current = { mx: e.clientX, my: e.clientY, ox: rect.left, oy: rect.top };
+                  }}>
+                  <h3 className="text-lg font-semibold">
+                    {row["姓名"]} ({row["学号"]}) 的作业
+                  </h3>
+                  <button onClick={() => { handleSaveComment(); setReviewSid(null); }}
+                    onMouseDown={(e) => e.stopPropagation()}
+                    className="px-3 py-1 border rounded hover:bg-gray-50 text-sm">关闭</button>
+                </div>
+
+{isGraded ? (
+                  <div className="space-y-4 text-sm">
+                    {/* 评级下拉 */}
+                    <div className="flex items-center gap-3 bg-gray-50 rounded p-3">
+                      <span className="text-gray-600">评级：</span>
+                      <select
+                        value={row["成绩"] || ""}
+                        onChange={(e) => handleGradeDropdown(reviewSid, e.target.value)}
+                        className="border rounded px-2 py-1 text-sm"
+                      >
+                        {GRADE_OPTIONS.map((g) => (
+                          <option key={g} value={g}>{g}</option>
+                        ))}
+                      </select>
+                      <span className="text-gray-400 text-xs ml-2">
+                        阶段1: {row["阶段1相似度"] || "-"}% × 阶段2: {row["阶段2评分"] || "-"}% = 总分: {row["总分"] || "-"}%
+                      </span>
+                    </div>
+
+                    {/* 阶段一评价 */}
+                    <div>
+                      <p className="font-medium text-gray-700">阶段一 · 相似度评价</p>
+                      <p className="text-gray-600 mt-1">{row["相似度评价"] || "-"}</p>
+                    </div>
+
+                    {/* 阶段二评价 */}
+                    <div>
+                      <p className="font-medium text-gray-700">阶段二 · 量化评分</p>
+                      <div className="grid grid-cols-2 gap-2 mt-1">
+                        {DIMS.map((dim) => (
+                          <div key={dim} className="bg-gray-50 rounded p-2">
+                            <span className="text-gray-500 text-xs">{dim}</span>
+                            <p className="text-gray-700 text-xs mt-0.5">{row[dim] || "-"}</p>
+                          </div>
+                        ))}
+                      </div>
+                      <p className="text-gray-600 mt-2">
+                        <span className="font-medium text-gray-700">阶段二总评：</span>{row["总评"] || "-"}
+                      </p>
+                    </div>
+
+                    {/* 教师评语 */}
+                    <div>
+                      <p className="font-medium text-gray-700 mb-1">教师评语</p>
+                      <textarea
+                        value={reviewComment}
+                        onChange={(e) => setReviewComment(e.target.value)}
+                        onBlur={handleSaveComment}
+                        rows={4}
+                        className="w-full border rounded px-3 py-2 text-sm"
+                        placeholder="输入教师评语…"
+                      />
+                    </div>
+                  </div>
+                ) : (
+                  <p className="text-gray-400 text-sm">该作业尚未评分</p>
+                )}
+              </div>
+            </div>
+          );
+        })()}
 
         {/* Roster Modal — 独立班级管理 */}
         {rosterView && (

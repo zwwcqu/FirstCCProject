@@ -33,6 +33,7 @@ FIELDNAMES = [
     "阶段1相似度", "阶段2评分", "总分",
     "相似度评价", "总评",
     "图样表达", "尺寸标注", "尺寸公差", "表面质量", "形位公差",
+    "教师评语",
 ]
 
 
@@ -80,6 +81,7 @@ def save_grade(qid: str, student_id: str, name: str, grade: str, comments: dict,
         "尺寸公差": comments.get("尺寸公差", ""),
         "表面质量": comments.get("表面质量", ""),
         "形位公差": comments.get("形位公差", ""),
+        "教师评语": comments.get("教师评语", ""),
     }
 
     # 确保文件存在

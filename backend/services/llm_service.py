@@ -367,7 +367,7 @@ def grade_submission(
 
 # ── 工程图预分析（参考图 / 学生图）────────────────────────
 
-def analyze_structure(image_path: Path, template_path: Path) -> dict:
+def analyze_structure(image_path: Path, template_path: Path, knowledge: str = "") -> dict:
     """
     对工程图进行结构分析。
     发送图片 + 结构分析模版 → LLM → 返回结构特征 JSON。
@@ -376,6 +376,8 @@ def analyze_structure(image_path: Path, template_path: Path) -> dict:
     client = _build_client()
     model = _get_model()
     prompt_text = template_path.read_text(encoding="utf-8")
+    if knowledge:
+        prompt_text = f"【补充知识】\n{knowledge}\n\n{prompt_text}"
     b64 = image_to_base64(image_path)
 
     content: list[dict] = [
@@ -391,11 +393,13 @@ def analyze_structure(image_path: Path, template_path: Path) -> dict:
     return result
 
 
-def analyze_structure_bytes(data: bytes, filename: str, template_path: Path) -> dict:
+def analyze_structure_bytes(data: bytes, filename: str, template_path: Path, knowledge: str = "") -> dict:
     """结构分析（bytes 版本，不读磁盘）。测试模式使用"""
     client = _build_client()
     model = _get_model()
     prompt_text = template_path.read_text(encoding="utf-8")
+    if knowledge:
+        prompt_text = f"【补充知识】\n{knowledge}\n\n{prompt_text}"
     b64 = bytes_to_base64(data, filename)
 
     content: list[dict] = [
@@ -409,12 +413,14 @@ def analyze_structure_bytes(data: bytes, filename: str, template_path: Path) -> 
         _parse_json_response)
 
 
-def analyze_quantitative_bytes(data: bytes, filename: str, template_path: Path, structure_json: dict) -> dict:
+def analyze_quantitative_bytes(data: bytes, filename: str, template_path: Path, structure_json: dict, knowledge: str = "") -> dict:
     """量化分析（bytes 版本，不读磁盘）。测试模式使用"""
     client = _build_client()
     model = _get_model()
     template_text = template_path.read_text(encoding="utf-8")
     prompt_text = template_text.replace("__STRUCTURE_JSON__", json.dumps(structure_json, ensure_ascii=False, indent=2))
+    if knowledge:
+        prompt_text = f"【补充知识】\n{knowledge}\n\n{prompt_text}"
     b64 = bytes_to_base64(data, filename)
 
     content: list[dict] = [
@@ -428,7 +434,7 @@ def analyze_quantitative_bytes(data: bytes, filename: str, template_path: Path, 
         _parse_json_response)
 
 
-def analyze_quantitative(image_path: Path, template_path: Path, structure_json: dict) -> dict:
+def analyze_quantitative(image_path: Path, template_path: Path, structure_json: dict, knowledge: str = "") -> dict:
     """
     对工程图进行量化分析（依赖结构分析结果）。
     将 __STRUCTURE_JSON__ 替换为实际结构 JSON → 发送图片 + 填充模版 → LLM → 返回量化 JSON。
@@ -437,8 +443,9 @@ def analyze_quantitative(image_path: Path, template_path: Path, structure_json: 
     client = _build_client()
     model = _get_model()
     template_text = template_path.read_text(encoding="utf-8")
-    # 替换占位符为上一轮结构分析的实际 JSON
     prompt_text = template_text.replace("__STRUCTURE_JSON__", json.dumps(structure_json, ensure_ascii=False, indent=2))
+    if knowledge:
+        prompt_text = f"【补充知识】\n{knowledge}\n\n{prompt_text}"
     b64 = image_to_base64(image_path)
 
     content: list[dict] = [
@@ -465,6 +472,7 @@ def grade_phase1(
     *,
     stu_data: bytes | None = None,
     stu_filename: str = "",
+    knowledge: str = "",
 ) -> dict:
     """
     阶段一：结构相似度评分（视觉对比）。
@@ -473,7 +481,8 @@ def grade_phase1(
     client = _build_client()
     model = _get_model()
 
-    prompt_text = f"""你是一位工程图批阅老师。请对比学生图和参考图的结构特征，评估图形相似度和画图质量。
+    kn_block = f"【补充知识】\n{knowledge}\n\n" if knowledge else ""
+    prompt_text = f"""{kn_block}你是一位工程图批阅老师。请对比学生图和参考图的结构特征，评估图形相似度和画图质量。
 
 【参考工程图结构分析】
 {json.dumps(ref_struct, ensure_ascii=False, indent=2)}
@@ -516,6 +525,8 @@ def grade_phase2(
     ref_quant: dict,
     stu_quant: dict,
     phase2_criteria: str,
+    *,
+    knowledge: str = "",
 ) -> dict:
     """
     阶段二：量化标注评分（纯文本对比，无需图片）。
@@ -526,12 +537,12 @@ def grade_phase2(
     client = _build_client()
     model = _get_model()
 
-    # 读取阶段二修正提示词（匹配规则：按数值而非ID）
     from config import CONFIG_DIR
     hint_path = CONFIG_DIR / "二阶段修正提示词.txt"
     phase2_hint = hint_path.read_text(encoding="utf-8") if hint_path.exists() else ""
 
-    prompt_text = f"""{phase2_hint}
+    kn_block = f"【补充知识】\n{knowledge}\n\n" if knowledge else ""
+    prompt_text = f"""{kn_block}{phase2_hint}
 
 你是一位机械检测工程师。请逐项对比两份量化分析数据，评估学生标注的完整性和正确性。
 
@@ -576,14 +587,16 @@ def run_two_phase_grading(
     *,
     stu_data: bytes | None = None,
     stu_filename: str = "",
+    knowledge: str = "",
 ) -> dict:
     """
     执行完整的两阶段评分流程。
     submit 模式传入 stu_image_path；test 模式传入 stu_data + stu_filename。
     """
     p1 = grade_phase1(ref_struct, stu_struct, phase1_criteria, ref_image_path,
-                      stu_image_path, stu_data=stu_data, stu_filename=stu_filename)
-    p2 = grade_phase2(ref_quant, stu_quant, phase2_criteria)
+                      stu_image_path, stu_data=stu_data, stu_filename=stu_filename,
+                      knowledge=knowledge)
+    p2 = grade_phase2(ref_quant, stu_quant, phase2_criteria, knowledge=knowledge)
 
     merged = {**p1, **p2}
 
