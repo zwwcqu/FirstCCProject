@@ -30,20 +30,34 @@ export function getQuestionDetail(qid: string) {
   return api(`/api/student/questions/${qid}`);
 }
 
-export function submitHomework(qid: string, name: string, studentId: string, file: File, mode: "test" | "submit" = "submit") {
-  const fd = new FormData();
-  fd.append("name", name);
-  fd.append("student_id", studentId);
-  fd.append("file", file);
-  fd.append("mode", mode);
-  return api(`/api/student/submit/${qid}`, { method: "POST", body: fd });
-}
-
 export function getStudentResult(qid: string, studentId: string) {
   return api(`/api/student/result/${qid}/${studentId}`);
 }
 
-// 新版：分步 analyze + grade
+// 身份校验
+export function checkRoster(name: string, studentId: string) {
+  return api("/api/student/check", {
+    method: "POST",
+    body: JSON.stringify({ name, student_id: studentId }),
+  });
+}
+
+// 学生个人提交历史
+export function getStudentSubmissions(name: string, studentId: string) {
+  return api(`/api/student/submissions?name=${encodeURIComponent(name)}&student_id=${encodeURIComponent(studentId)}`);
+}
+
+// 异步提交状态轮询
+export function getSubmitStatus(qid: string, name: string, studentId: string) {
+  return api(`/api/student/status/${qid}?name=${encodeURIComponent(name)}&student_id=${encodeURIComponent(studentId)}`);
+}
+
+// 获取分析结果（学生端，analyze 完成后的轮询目标）
+export function getStudentAnalysisResult(qid: string, name: string, studentId: string) {
+  return api(`/api/student/analysis/${qid}?name=${encodeURIComponent(name)}&student_id=${encodeURIComponent(studentId)}`);
+}
+
+// 新版：分步 analyze + grade（异步非阻塞，返回 {ok, status:"processing"}）
 export function analyzeSubmission(qid: string, name: string, studentId: string, file: File, mode: "test" | "submit" = "submit") {
   const fd = new FormData();
   fd.append("name", name);

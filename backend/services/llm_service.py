@@ -34,26 +34,41 @@ logger = logging.getLogger(__name__)
 _cached_model: str | None = None         # 用户明确指定后的模型缓存
 
 
-def _build_client() -> OpenAI:
-    """按当前 settings 创建 OpenAI 客户端"""
+def _get_active_config() -> dict:
+    """获取当前激活的模型配置"""
     settings = read_settings()
+    models = settings.get("models", [])
+    idx = settings.get("llm_active", 0)
+    if models and 0 <= idx < len(models):
+        return models[idx]
+    # 兼容旧格式
+    return {
+        "name": "默认",
+        "api_base": settings.get("llm_api_base", ""),
+        "api_key": settings.get("llm_api_key", ""),
+        "model": settings.get("llm_model", ""),
+        "concurrency": 1,
+    }
+
+
+def _build_client() -> OpenAI:
+    """按当前激活模型配置创建 OpenAI 客户端"""
+    cfg = _get_active_config()
     return OpenAI(
-        base_url=settings["llm_api_base"],
-        api_key=settings["llm_api_key"],
+        base_url=cfg["api_base"],
+        api_key=cfg["api_key"],
         timeout=120,
     )
 
 
 def _get_model() -> str:
-    """获取模型名称。已配置则直接用，否则从 LM Studio 自动检测"""
+    """获取当前激活的模型名称"""
     global _cached_model
-    settings = read_settings()
-    configured = settings.get("llm_model", "").strip()
+    configured = _get_active_config().get("model", "").strip()
     if configured:
         _cached_model = configured
         return _cached_model
 
-    # LM Studio 自动检测（每次查询，不缓存——远端可能自动切换模型）
     client = _build_client()
     models = client.models.list()
     if models.data:
@@ -65,7 +80,7 @@ def _get_model() -> str:
 
 
 # ── 图像处理 ─────────────────────────────────────────────
-MAX_IMAGE_SIZE = 1600                     # 长边最大像素数，超过则等比缩放
+MAX_IMAGE_SIZE = 3508                     # 长边最大像素数，超过则等比缩放
 
 
 def _resize_image(img: Image.Image) -> Image.Image:
@@ -101,6 +116,55 @@ def image_to_base64(path: Path) -> str:
         return base64.b64encode(buf.getvalue()).decode()
     else:
         raise ValueError(f"不支持的文件格式: {path.suffix}")
+
+
+def bytes_to_base64(data: bytes, filename: str) -> str:
+    """将内存中的 PDF/图片 bytes 直接转为 JPEG Base64，不落盘。测试模式使用"""
+    ext = Path(filename).suffix.lower()
+    if ext == ".pdf":
+        try:
+            from pdf2image import convert_from_bytes
+            images = convert_from_bytes(data, first_page=1, last_page=1, dpi=150)
+            img = _resize_image(images[0])
+            buf = BytesIO()
+            img.save(buf, format="JPEG", quality=85)
+            return base64.b64encode(buf.getvalue()).decode()
+        except ImportError:
+            raise RuntimeError("pdf2image 未安装，无法处理 PDF 工程图。请安装 poppler 和 pdf2image。")
+    elif ext in (".png", ".jpg", ".jpeg", ".gif", ".webp"):
+        img = Image.open(BytesIO(data))
+        if img.mode in ("RGBA", "P"):
+            img = img.convert("RGB")
+        img = _resize_image(img)
+        buf = BytesIO()
+        img.save(buf, format="JPEG", quality=85)
+        return base64.b64encode(buf.getvalue()).decode()
+    else:
+        raise ValueError(f"不支持的文件格式: {ext}")
+
+
+# ── LLM 调用 + JSON 解析（自动重试）─────────────────────
+
+def _call_and_parse(client, model, messages, parse_fn, temperature=0.1, max_tokens=4096, max_retries=1):
+    """调用 LLM → 解析 JSON。JSON 解析失败时自动重试一次"""
+    kwargs = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "extra_body": {"enable_thinking": False},
+    }
+    last_error = None
+    for attempt in range(max_retries + 1):
+        response = client.chat.completions.create(**kwargs)
+        raw_text = response.choices[0].message.content or ""
+        try:
+            return parse_fn(raw_text)
+        except ValueError as e:
+            last_error = e
+            if attempt < max_retries:
+                logger.warning(f"JSON 解析失败（第{attempt+1}次），重试: {e}")
+    raise last_error  # type: ignore
 
 
 # ── Prompt 构建 ──────────────────────────────────────────
@@ -141,33 +205,61 @@ A+≥93.75, A≥87.5, B+≥81.25, B≥75, C+≥68.75, C≥62.5, D+≥56.25, D≥
 
 # ── LLM 输出解析 ────────────────────────────────────────
 
-def _parse_json_response(text: str) -> dict:
-    """从 LLM 原始文本中提取 JSON 对象（通用版），容错尾随逗号和 markdown 代码块"""
-    text = text.strip()
-    # 去掉可能的 markdown 代码块包裹
-    if text.startswith("```"):
-        text = re.sub(r'^```(?:json)?\s*', '', text)
-        text = re.sub(r'\s*```$', '', text)
-    # 尝试匹配最外层的 { ... }
+def _repair_json_text(text: str) -> str:
+    """修复 LLM 常见的 JSON 格式错误"""
+    # 去掉 markdown 代码块
+    text = re.sub(r'^```(?:json)?\s*', '', text.strip())
+    text = re.sub(r'\s*```$', '', text)
+    # 提取最外层 {...}
     match = re.search(r'\{[\s\S]*\}', text, re.DOTALL)
     if match:
         text = match.group(0)
-    # 修复 JSON 尾随逗号（LLM 常见错误）
+    # 修复尾随逗号
     text = re.sub(r',\s*}', '}', text)
     text = re.sub(r',\s*]', ']', text)
-    return json.loads(text)
+    # 修复行末缺少逗号: "xxx"\n  "yyy" → "xxx",\n  "yyy"
+    text = re.sub(r'"\s*\n\s*"', '",\n  "', text)
+    # 修复值后缺少逗号: }\n  "key" → },\n  "key"
+    text = re.sub(r'}\s*\n\s*"', '},\n  "', text)
+    # 修复数字/布尔后缺少逗号
+    text = re.sub(r'(\d+|true|false|null)\s*\n\s*"', r'\1,\n  "', text)
+    return text
+
+
+def _parse_json_response(text: str) -> dict:
+    """从 LLM 输出中提取 JSON，容错常见格式错误（尾随逗号/缺逗号/markdown）"""
+    repaired = _repair_json_text(text)
+    try:
+        return json.loads(repaired)
+    except json.JSONDecodeError:
+        pass
+    # json.loads 失败，尝试 json5 宽松解析
+    try:
+        import json5
+        return json5.loads(repaired)
+    except Exception:
+        pass
+    # 仍失败则抛出带上下文的错误
+    raise ValueError(f"JSON 解析失败，原文前200字符: {repaired[:200]}")
 
 
 def _parse_llm_response(text: str) -> dict:
-    """从 LLM 原始文本中提取含 phase1_similarity 的 JSON 对象，容错尾随逗号"""
+    """从 LLM 输出中提取含 phase1_similarity 的 JSON 对象，容错解析"""
     text = text.strip()
     match = re.search(r'\{[\s\S]*"phase1_similarity"[\s\S]*\}', text, re.DOTALL)
     if match:
         text = match.group(0)
-    # 修复 JSON 尾随逗号（LLM 常见错误）
-    text = re.sub(r',\s*}', '}', text)
-    text = re.sub(r',\s*]', ']', text)
-    return json.loads(text)
+    repaired = _repair_json_text(text)
+    try:
+        return json.loads(repaired)
+    except json.JSONDecodeError:
+        pass
+    try:
+        import json5
+        return json5.loads(repaired)
+    except Exception:
+        pass
+    raise ValueError(f"评分 JSON 解析失败，原文前200字符: {repaired[:200]}")
 
 
 # ── 等级计算 ─────────────────────────────────────────────
@@ -231,15 +323,9 @@ def grade_submission(
     })
 
     logger.info(f"正在调用 LLM 批阅（模型: {model}）…")
-    response = client.chat.completions.create(
-        model=model,
-        messages=[{"role": "user", "content": content}],
-        temperature=0.1,
-        max_tokens=4096,
-    )
-
-    raw_text = response.choices[0].message.content or ""
-    result = _parse_llm_response(raw_text)
+    result = _call_and_parse(client, model,
+        [{"role": "user", "content": content}],
+        _parse_llm_response)
 
     # 计算总分和等级
     p1 = float(result.get("phase1_similarity", 0))
@@ -275,16 +361,48 @@ def analyze_structure(image_path: Path, template_path: Path) -> dict:
     ]
 
     logger.info(f"结构分析中（模型: {model}）…")
-    response = client.chat.completions.create(
-        model=model,
-        messages=[{"role": "user", "content": content}],
-        temperature=0.1,
-        max_tokens=4096,
-    )
-    raw_text = response.choices[0].message.content or ""
-    result = _parse_json_response(raw_text)
+    result = _call_and_parse(client, model,
+        [{"role": "user", "content": content}],
+        _parse_json_response)
     logger.info("结构分析完成")
     return result
+
+
+def analyze_structure_bytes(data: bytes, filename: str, template_path: Path) -> dict:
+    """结构分析（bytes 版本，不读磁盘）。测试模式使用"""
+    client = _build_client()
+    model = _get_model()
+    prompt_text = template_path.read_text(encoding="utf-8")
+    b64 = bytes_to_base64(data, filename)
+
+    content: list[dict] = [
+        {"type": "text", "text": prompt_text},
+        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+    ]
+
+    logger.info(f"结构分析中（模型: {model}）…")
+    return _call_and_parse(client, model,
+        [{"role": "user", "content": content}],
+        _parse_json_response)
+
+
+def analyze_quantitative_bytes(data: bytes, filename: str, template_path: Path, structure_json: dict) -> dict:
+    """量化分析（bytes 版本，不读磁盘）。测试模式使用"""
+    client = _build_client()
+    model = _get_model()
+    template_text = template_path.read_text(encoding="utf-8")
+    prompt_text = template_text.replace("__STRUCTURE_JSON__", json.dumps(structure_json, ensure_ascii=False, indent=2))
+    b64 = bytes_to_base64(data, filename)
+
+    content: list[dict] = [
+        {"type": "text", "text": prompt_text},
+        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+    ]
+
+    logger.info(f"量化分析中（模型: {model}）…")
+    return _call_and_parse(client, model,
+        [{"role": "user", "content": content}],
+        _parse_json_response)
 
 
 def analyze_quantitative(image_path: Path, template_path: Path, structure_json: dict) -> dict:
@@ -306,14 +424,9 @@ def analyze_quantitative(image_path: Path, template_path: Path, structure_json: 
     ]
 
     logger.info(f"量化分析中（模型: {model}）…")
-    response = client.chat.completions.create(
-        model=model,
-        messages=[{"role": "user", "content": content}],
-        temperature=0.1,
-        max_tokens=4096,
-    )
-    raw_text = response.choices[0].message.content or ""
-    result = _parse_json_response(raw_text)
+    result = _call_and_parse(client, model,
+        [{"role": "user", "content": content}],
+        _parse_json_response)
     logger.info("量化分析完成")
     return result
 
@@ -326,12 +439,13 @@ def grade_phase1(
     phase1_criteria: str,
     ref_image_path: Path,
     stu_image_path: Path,
+    *,
+    stu_data: bytes | None = None,
+    stu_filename: str = "",
 ) -> dict:
     """
     阶段一：结构相似度评分（视觉对比）。
-    Prompt = 主观对比指令 + 两份结构 JSON + 老师阶段一评分标准
-    Content = Prompt 文本 + 参考图 + 学生图
-    返回 {"phase1_similarity": int, "phase1_comment": str}
+    submit 模式用 stu_image_path；test 模式传 stu_data + stu_filename（不读磁盘）。
     """
     client = _build_client()
     model = _get_model()
@@ -354,7 +468,10 @@ def grade_phase1(
 }}"""
 
     ref_b64 = image_to_base64(ref_image_path)
-    stu_b64 = image_to_base64(stu_image_path)
+    if stu_data:
+        stu_b64 = bytes_to_base64(stu_data, stu_filename)
+    else:
+        stu_b64 = image_to_base64(stu_image_path)
 
     content: list[dict] = [
         {"type": "text", "text": prompt_text},
@@ -365,14 +482,9 @@ def grade_phase1(
     ]
 
     logger.info(f"阶段一评分中（模型: {model}）…")
-    response = client.chat.completions.create(
-        model=model,
-        messages=[{"role": "user", "content": content}],
-        temperature=0.1,
-        max_tokens=4096,
-    )
-    raw_text = response.choices[0].message.content or ""
-    result = _parse_json_response(raw_text)
+    result = _call_and_parse(client, model,
+        [{"role": "user", "content": content}],
+        _parse_json_response)
     logger.info(f"阶段一评分完成 → 相似度 {result.get('phase1_similarity', '?')}")
     return result
 
@@ -422,14 +534,9 @@ def grade_phase2(
 }}"""
 
     logger.info(f"阶段二评分中（模型: {model}）…")
-    response = client.chat.completions.create(
-        model=model,
-        messages=[{"role": "user", "content": prompt_text}],
-        temperature=0.1,
-        max_tokens=4096,
-    )
-    raw_text = response.choices[0].message.content or ""
-    result = _parse_json_response(raw_text)
+    result = _call_and_parse(client, model,
+        [{"role": "user", "content": prompt_text}],
+        _parse_json_response)
     logger.info(f"阶段二评分完成 → 评分 {result.get('phase2_criteria', '?')}")
     return result
 
@@ -443,19 +550,20 @@ def run_two_phase_grading(
     phase2_criteria: str,
     ref_image_path: Path,
     stu_image_path: Path,
+    *,
+    stu_data: bytes | None = None,
+    stu_filename: str = "",
 ) -> dict:
     """
-    执行完整的两阶段评分流程：
-    阶段一（视觉 + 结构 JSON） → 阶段二（纯文本量化对比） → 总分 + 等级。
-    返回完整评分结果 dict，包含 grade, total_score, 各维度评语等。
+    执行完整的两阶段评分流程。
+    submit 模式传入 stu_image_path；test 模式传入 stu_data + stu_filename。
     """
-    p1 = grade_phase1(ref_struct, stu_struct, phase1_criteria, ref_image_path, stu_image_path)
+    p1 = grade_phase1(ref_struct, stu_struct, phase1_criteria, ref_image_path,
+                      stu_image_path, stu_data=stu_data, stu_filename=stu_filename)
     p2 = grade_phase2(ref_quant, stu_quant, phase2_criteria)
 
-    # 合并两阶段结果
     merged = {**p1, **p2}
 
-    # 计算总分和等级
     p1_score = float(merged.get("phase1_similarity", 0))
     p2_score = float(merged.get("phase2_criteria", 0))
     total = round(p1_score * p2_score / 100, 1)

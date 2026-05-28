@@ -50,34 +50,30 @@ def _require_auth(request: Request) -> None:
 
 def _run_reference_analysis(qid: str) -> None:
     """
-    后台线程执行参考图分析：结构分析 → 量化分析 → 保存结果。
-    使用线程避免阻塞 HTTP 响应，学生端不需要实时等待。
+    教师参考图分析，通过任务队列以最高优先级执行。
     """
     from services.llm_service import analyze_structure, analyze_quantitative
+    from services.task_queue import enqueue
 
     def _task():
-        try:
-            qdir = get_question_dir(qid)
-            ref_pdf = qdir / "参考工程图.pdf"
-            if not ref_pdf.exists():
-                logger.warning(f"[{qid}] 参考工程图不存在，跳过分析")
-                return
+        qdir = get_question_dir(qid)
+        ref_pdf = qdir / "参考工程图.pdf"
+        if not ref_pdf.exists():
+            logger.warning(f"[{qid}] 参考工程图不存在，跳过分析")
+            return
 
-            struct_tpl = CONFIG_DIR / "结构分析模版.txt"
-            quant_tpl = CONFIG_DIR / "量化分析模版.txt"
+        struct_tpl = CONFIG_DIR / "结构分析模版.txt"
+        quant_tpl = CONFIG_DIR / "量化分析模版.txt"
 
-            logger.info(f"[{qid}] 开始参考图结构分析…")
-            structure = analyze_structure(ref_pdf, struct_tpl)
-            logger.info(f"[{qid}] 参考图量化分析…")
-            quantitative = analyze_quantitative(ref_pdf, quant_tpl, structure)
+        logger.info(f"[{qid}] 开始参考图结构分析…")
+        structure = analyze_structure(ref_pdf, struct_tpl)
+        logger.info(f"[{qid}] 参考图量化分析…")
+        quantitative = analyze_quantitative(ref_pdf, quant_tpl, structure)
 
-            save_reference_analysis(qid, {"structure": structure, "quantitative": quantitative})
-            logger.info(f"[{qid}] 参考图分析完成并已保存")
-        except Exception as e:
-            logger.error(f"[{qid}] 参考图分析失败: {e}")
+        save_reference_analysis(qid, {"structure": structure, "quantitative": quantitative})
+        logger.info(f"[{qid}] 参考图分析完成并已保存")
 
-    t = threading.Thread(target=_task, daemon=True)
-    t.start()
+    enqueue(0, _task)  # priority=0 教师最高
 
 
 # ── 登录 / 登出 ──────────────────────────────────────────
@@ -247,9 +243,8 @@ async def get_settings(request: Request):
     _require_auth(request)
     settings = read_settings()
     return {
-        "llm_api_base": settings.get("llm_api_base", ""),
-        "llm_model": settings.get("llm_model", ""),
-        "llm_api_key": settings.get("llm_api_key", ""),
+        "models": settings.get("models", []),
+        "llm_active": settings.get("llm_active", 0),
     }
 
 
@@ -260,12 +255,13 @@ async def update_settings(request: Request):
     body = await request.json()
     settings = read_settings()
 
-    if "llm_api_base" in body:
-        settings["llm_api_base"] = body["llm_api_base"]
-    if "llm_api_key" in body:
-        settings["llm_api_key"] = body["llm_api_key"]
-    if "llm_model" in body:
-        settings["llm_model"] = body["llm_model"]
+    if "models" in body:
+        models = body["models"]
+        for m in models:
+            m["concurrency"] = max(1, min(5, m.get("concurrency", 1)))
+        settings["models"] = models
+    if "llm_active" in body:
+        settings["llm_active"] = int(body["llm_active"])
 
     # 密码修改走哈希流程
     if "teacher_password" in body and body["teacher_password"]:
@@ -277,6 +273,37 @@ async def update_settings(request: Request):
     write_settings(settings)
     logger.info("系统设置已更新")
     return {"ok": True}
+
+
+@router.post("/settings/test")
+async def test_llm_connection(request: Request):
+    """测试大模型连接。body: {api_base, api_key, model}"""
+    _require_auth(request)
+    body = await request.json()
+    base_url = (body.get("api_base") or "").strip()
+    api_key = (body.get("api_key") or "").strip()
+    model = (body.get("model") or "").strip()
+
+    if not base_url:
+        return {"ok": False, "message": "请先填写 API 地址"}
+
+    try:
+        from openai import OpenAI
+        client = OpenAI(base_url=base_url, api_key=api_key, timeout=10)
+        if model:
+            client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": "Hi"}],
+                max_tokens=5,
+            )
+        else:
+            models = client.models.list()
+            if not models.data:
+                return {"ok": False, "message": "连接成功但未找到可用模型"}
+            model = models.data[0].id
+        return {"ok": True, "message": f"连接成功，模型: {model}"}
+    except Exception as e:
+        return {"ok": False, "message": f"连接失败: {str(e)}"}
 
 
 # ── 文件服务 ─────────────────────────────────────────────

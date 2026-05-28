@@ -31,11 +31,15 @@ logger = logging.getLogger("main")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """应用生命周期：启动时初始化数据目录"""
+    """应用生命周期：初始化数据目录 + 启动 LLM 任务队列"""
     logger.info("正在初始化数据目录…")
     _init_data_dir()
+    from services.task_queue import start as start_queue
+    start_queue()
     logger.info("应用启动完成")
     yield
+    from services.task_queue import stop as stop_queue
+    stop_queue()
     logger.info("应用关闭")
 
 
