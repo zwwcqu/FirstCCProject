@@ -52,12 +52,35 @@ export function getSubmitStatus(qid: string, name: string, studentId: string) {
   return api(`/api/student/status/${qid}?name=${encodeURIComponent(name)}&student_id=${encodeURIComponent(studentId)}`);
 }
 
+// 获取学生在该题的完整提交记录（文件、分析状态、成绩）
+export function getSubmissionRecord(qid: string, name: string, studentId: string) {
+  return api(`/api/student/submission-record/${qid}?name=${encodeURIComponent(name)}&student_id=${encodeURIComponent(studentId)}`);
+}
+
 // 获取分析结果（学生端，analyze 完成后的轮询目标）
 export function getStudentAnalysisResult(qid: string, name: string, studentId: string) {
   return api(`/api/student/analysis/${qid}?name=${encodeURIComponent(name)}&student_id=${encodeURIComponent(studentId)}`);
 }
 
-// 新版：分步 analyze + grade（异步非阻塞，返回 {ok, status:"processing"}）
+// 新版：分步 upload → analyze → grade
+
+export function uploadSubmission(qid: string, name: string, studentId: string, file: File, mode: "test" | "submit" = "submit") {
+  const fd = new FormData();
+  fd.append("name", name);
+  fd.append("student_id", studentId);
+  fd.append("file", file);
+  fd.append("mode", mode);
+  return api(`/api/student/upload/${qid}`, { method: "POST", body: fd });
+}
+
+export function startAnalysis(qid: string, name: string, studentId: string, mode: "test" | "submit" = "submit") {
+  const fd = new FormData();
+  fd.append("name", name);
+  fd.append("student_id", studentId);
+  fd.append("mode", mode);
+  return api(`/api/student/analyze/${qid}/start`, { method: "POST", body: fd });
+}
+
 export function analyzeSubmission(qid: string, name: string, studentId: string, file: File, mode: "test" | "submit" = "submit") {
   const fd = new FormData();
   fd.append("name", name);
@@ -116,6 +139,36 @@ export function updateSettings(data: Record<string, string>) {
 
 export function getGrades(qid: string) {
   return api(`/api/teacher/grades/${qid}`);
+}
+
+export function batchGrade(qid: string, studentIds: string[]) {
+  return api(`/api/teacher/grades/${qid}/batch-grade`, {
+    method: "POST",
+    body: JSON.stringify({ student_ids: studentIds }),
+  });
+}
+
+export function editGrade(qid: string, studentId: string, fields: Record<string, string>) {
+  return api(`/api/teacher/grades/${qid}/${studentId}`, {
+    method: "PUT",
+    body: JSON.stringify(fields),
+  });
+}
+
+export function supplementSubmission(qid: string, name: string, studentId: string, file: File) {
+  const fd = new FormData();
+  fd.append("name", name);
+  fd.append("student_id", studentId);
+  fd.append("file", file);
+  return api(`/api/teacher/grades/${qid}/supplement-submission`, { method: "POST", body: fd });
+}
+
+export function refreshGrades(qid: string) {
+  return api(`/api/teacher/grades/${qid}/refresh`, { method: "POST" });
+}
+
+export function getTeacherStudentPreviewUrl(qid: string, studentId: string): string {
+  return `${BASE}/api/teacher/student-preview/${qid}/${studentId}`;
 }
 
 // --- Roster (全局 StudentInfo) ---

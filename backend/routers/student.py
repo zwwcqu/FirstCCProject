@@ -30,7 +30,6 @@ from services.question_service import (
     list_questions,
     get_question,
     get_question_files,
-    save_student_submission,
     get_student_submission_path,
     get_question_dir,
     get_reference_analysis,
@@ -110,23 +109,39 @@ async def check_identity(request: Request):
 
 @router.get("/submissions")
 async def get_my_submissions(name: str, student_id: str):
-    """返回某学生所有题目的提交记录"""
+    """返回某学生所有题目的提交记录（含上传/分析/已评分各阶段）"""
+    from services.question_service import get_submission_record as _get_record
     questions = list_questions()
     results: list[dict] = []
     for q in questions:
         qid = q["id"]
-        row = get_student_grade(qid, student_id)
-        if row:
+        # 先查成绩 CSV
+        grade_row = get_student_grade(qid, student_id)
+        if grade_row:
             results.append({
                 "question_id": qid,
                 "question_title": q["title"],
-                "student_name": row.get("姓名", name),
-                "student_id": row.get("学号", student_id),
-                "grade": row.get("成绩", ""),
-                "total_score": row.get("总分", ""),
+                "student_name": grade_row.get("姓名", name),
+                "student_id": grade_row.get("学号", student_id),
+                "grade": grade_row.get("成绩", ""),
+                "total_score": grade_row.get("总分", ""),
                 "status": "completed",
-                "submitted_at": row.get("提交时间", ""),
+                "submitted_at": grade_row.get("提交时间", ""),
             })
+        else:
+            # 再查 submissions.json
+            rec = _get_record(qid, student_id)
+            if rec:
+                results.append({
+                    "question_id": qid,
+                    "question_title": q["title"],
+                    "student_name": rec.get("name", name),
+                    "student_id": student_id,
+                    "grade": rec.get("grade", ""),
+                    "total_score": rec.get("total_score", ""),
+                    "status": rec.get("status", "uploaded"),
+                    "submitted_at": rec.get("submitted_at", ""),
+                })
     return {"submissions": results}
 
 
@@ -150,50 +165,10 @@ async def get_analysis_result(qid: str, name: str, student_id: str):
     return {"ok": True, "analysis": analysis}
 
 
-# ── 第一步：图面分析（异步非阻塞）─────────────────────────
+# ── 第一步：上传作业（同步，不触发LLM）─────────────────
 
-def _run_analyze(
-    qid: str, name: str, student_id: str,
-    file_bytes: bytes, filename: str,
-    is_test: bool,
-    struct_tpl: Path, quant_tpl: Path,
-):
-    """后台线程：文件转换 → 结构分析 → 量化分析 → 保存"""
-    try:
-        # 阶段1：文件转换
-        set_status(qid, name, student_id, "analyze", "converting")
-        if is_test:
-            from services.llm_service import bytes_to_base64
-            bytes_to_base64(file_bytes, filename)  # 预热转换，确保不失败
-            set_status(qid, name, student_id, "analyze", "submitted")
-        else:
-            student_path = save_student_submission(qid, student_id, name, file_bytes, filename)
-            set_status(qid, name, student_id, "analyze", "submitted", student_filename=Path(student_path).name)
-
-        if is_test:
-            set_file_data(qid, name, student_id, file_bytes, filename)
-            set_status(qid, name, student_id, "analyze", "analyzing")
-            structure = analyze_structure_bytes(file_bytes, filename, struct_tpl)
-            quantitative = analyze_quantitative_bytes(file_bytes, filename, quant_tpl, structure)
-        else:
-            student_path_obj = Path(student_path)
-            set_status(qid, name, student_id, "analyze", "analyzing")
-            structure = analyze_structure(student_path_obj, struct_tpl)
-            quantitative = analyze_quantitative(student_path_obj, quant_tpl, structure)
-
-        analysis = {"structure": structure, "quantitative": quantitative}
-        if not is_test:
-            save_student_analysis(qid, student_id, name, analysis)
-
-        set_status(qid, name, student_id, "analyze", "done")
-        logger.info(f"[{qid}] 图面分析完成: {name}({student_id})")
-    except Exception as e:
-        logger.error(f"[{qid}] 图面分析失败: {e}")
-        set_status(qid, name, student_id, "analyze", "error", str(e))
-
-
-@router.post("/analyze/{qid}")
-async def analyze_submission(
+@router.post("/upload/{qid}")
+async def upload_submission(
     qid: str,
     request: Request,
     name: str = Form(...),
@@ -201,7 +176,7 @@ async def analyze_submission(
     file: UploadFile = File(...),
     mode: str = Form("submit"),
 ):
-    """上传作业 → 后台执行图面分析 → 立即返回"""
+    """上传作业文件，保存并转换图片，立即返回预览文件名"""
     _check_rate_limit(request)
 
     q = get_question(qid)
@@ -217,13 +192,106 @@ async def analyze_submission(
             raise HTTPException(status_code=403, detail=msg)
 
     file_bytes = await file.read()
+    fname = file.filename or "submission.pdf"
+    set_status(qid, name, student_id, "upload", "converting")
+
+    if is_test:
+        from services.llm_service import bytes_to_base64
+        bytes_to_base64(file_bytes, fname)
+        set_file_data(qid, name, student_id, file_bytes, fname)
+        set_status(qid, name, student_id, "upload", "done", student_filename=fname)
+        return {"ok": True, "student_filename": fname}
+    else:
+        from services.question_service import submit_student_work
+        saved_name = submit_student_work(qid, student_id, name, file_bytes, fname)
+        set_status(qid, name, student_id, "upload", "done", student_filename=saved_name)
+        logger.info(f"[{qid}] 文件已保存: {name}({student_id}) → {saved_name}")
+        return {"ok": True, "student_filename": saved_name}
+
+
+# ── 第二步：开始分析（异步非阻塞）─────────────────────────
+
+def _run_analyze(
+    qid: str, name: str, student_id: str,
+    file_bytes: bytes | None, filename: str,
+    is_test: bool,
+    struct_tpl: Path, quant_tpl: Path,
+):
+    """后台线程：结构分析 → 量化分析 → 保存"""
+    try:
+        set_status(qid, name, student_id, "analyze", "analyzing")
+        if is_test:
+            if not file_bytes:
+                raise RuntimeError("测试模式文件数据丢失，请重新上传")
+            structure = analyze_structure_bytes(file_bytes, filename, struct_tpl)
+            quantitative = analyze_quantitative_bytes(file_bytes, filename, quant_tpl, structure)
+        else:
+            student_path = get_student_submission_path(qid, student_id, name)
+            if student_path is None:
+                raise RuntimeError("学生提交文件不存在，请重新上传")
+            structure = analyze_structure(student_path, struct_tpl)
+            quantitative = analyze_quantitative(student_path, quant_tpl, structure)
+
+        analysis = {"structure": structure, "quantitative": quantitative}
+        if not is_test:
+            save_student_analysis(qid, student_id, name, analysis)
+            from services.question_service import update_submission_record
+            update_submission_record(qid, student_id, name,
+                                     Path(filename).stem, "analyzed")
+
+        set_status(qid, name, student_id, "analyze", "done")
+        logger.info(f"[{qid}] 图面分析完成: {name}({student_id})")
+    except Exception as e:
+        logger.error(f"[{qid}] 图面分析失败: {e}")
+        set_status(qid, name, student_id, "analyze", "error", str(e))
+
+
+@router.post("/analyze/{qid}/start")
+async def start_analysis(
+    qid: str,
+    request: Request,
+    name: str = Form(...),
+    student_id: str = Form(...),
+    mode: str = Form("submit"),
+):
+    """对已上传的作业启动 LLM 结构分析 + 量化分析"""
+    _check_rate_limit(request)
+
+    q = get_question(qid)
+    if q is None:
+        raise HTTPException(status_code=404, detail="题目不存在")
+
+    is_test = mode == "test"
+
+    file_bytes: bytes | None = None
+    student_fn = ""
+
+    if is_test:
+        # 测试模式：依赖内存状态
+        st = get_status(qid, name, student_id)
+        if st["step"] != "upload" or st["status"] != "done":
+            raise HTTPException(status_code=400, detail="请先上传作业文件")
+        file_bytes, _ = get_file_data(qid, name, student_id)
+        if not file_bytes:
+            raise HTTPException(status_code=400, detail="测试模式文件数据丢失，请重新上传")
+        student_fn = st.get("student_filename", "")
+    else:
+        # 正式模式：查 submissions.json + 磁盘文件
+        from services.question_service import get_submission_record as _get_record
+        rec = _get_record(qid, student_id)
+        if not rec or rec.get("status") not in ("uploaded", "analyzed"):
+            raise HTTPException(status_code=400, detail="请先上传作业文件")
+        student_path = get_student_submission_path(qid, student_id, name)
+        if student_path is None:
+            raise HTTPException(status_code=400, detail="提交文件丢失，请重新上传")
+        student_fn = student_path.name
 
     def _task():
-        _run_analyze(qid, name, student_id, file_bytes, file.filename or "submission.pdf", is_test,
-                     CONFIG_DIR / "结构分析_学生.txt", CONFIG_DIR / "量化分析_学生.txt")
+        _run_analyze(qid, name, student_id, file_bytes, student_fn, is_test,
+                     CONFIG_DIR / "结构分析_学生.txt",
+                     CONFIG_DIR / "量化分析_学生.txt")
 
-    enqueue(10, _task)  # priority=10 学生
-
+    enqueue(10, _task)
     return {"ok": True, "status": "processing"}
 
 
@@ -236,6 +304,11 @@ def _run_grade(
 ):
     """后台线程：读取分析结果 → 阶段一 + 阶段二评分 → 保存"""
     set_status(qid, name, student_id, "grade", "processing")
+    if not is_test:
+        from services.question_service import update_submission_record
+        update_submission_record(qid, student_id, name,
+                                 Path(stu_filename).stem if stu_filename else "",
+                                 "grading")
     try:
         ref_analysis = get_reference_analysis(qid)
         if ref_analysis is None:
@@ -287,16 +360,24 @@ def _run_grade(
         grade = result.get("grade", "N/A")
 
         if not is_test:
-            from services.question_service import find_student_class
+            from services.question_service import find_student_class, update_submission_record
             class_name = find_student_class(name, student_id)
             save_grade(qid, student_id, name, grade, result, class_name)
             save_result_json(qid, student_id, name, result)
+            update_submission_record(qid, student_id, name,
+                                     Path(stu_filename).stem if stu_filename else "",
+                                     "graded", grade=grade, total_score=str(result.get("total_score", "")))
 
         set_status(qid, name, student_id, "grade", "done")
         logger.info(f"[{qid}] 评分完成: {name}({student_id}) → {grade}")
     except Exception as e:
         logger.error(f"[{qid}] 评分失败: {e}")
         set_status(qid, name, student_id, "grade", "error", str(e))
+        if not is_test:
+            from services.question_service import update_submission_record
+            update_submission_record(qid, student_id, name,
+                                     Path(stu_filename).stem if stu_filename else "",
+                                     "grade_failed", error=str(e))
 
 
 @router.post("/grade/{qid}")
@@ -318,8 +399,25 @@ async def grade_submission_handler(
 
     stu_data: bytes | None = None
     stu_filename = ""
+
     if is_test:
         stu_data, stu_filename = get_file_data(qid, name, student_id)
+    else:
+        from services.question_service import get_submission_record as _get_record
+        rec = _get_record(qid, student_id)
+        if not rec:
+            raise HTTPException(status_code=400, detail="请先上传作业文件")
+        if rec.get("status") not in ("analyzed", "graded"):
+            raise HTTPException(status_code=400, detail="请先完成图面分析")
+        student_path = get_student_submission_path(qid, student_id, name)
+        if student_path is None:
+            raise HTTPException(status_code=400, detail="提交文件丢失，请重新上传")
+        stu_filename = student_path.name
+        # 检查分析结果是否存在
+        from services.question_service import get_student_analysis
+        stu_analysis = get_student_analysis(qid, student_id, name)
+        if stu_analysis is None:
+            raise HTTPException(status_code=400, detail="分析结果丢失，请重新进行分析")
 
     def _task():
         _run_grade(qid, name, student_id, is_test, stu_data, stu_filename)
@@ -340,6 +438,20 @@ async def get_result(qid: str, student_id: str):
     return row
 
 
+@router.get("/submission-record/{qid}")
+async def get_submission_record(qid: str, name: str, student_id: str):
+    """获取学生在该题目的提交记录（含文件、分析状态、成绩）"""
+    from services.question_service import get_submission_record as _get_record
+    record = _get_record(qid, student_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="无提交记录")
+    # 补充实际文件名（带后缀）
+    student_path = get_student_submission_path(qid, student_id, name)
+    resp = dict(record)
+    resp["student_filename"] = student_path.name if student_path else ""
+    return resp
+
+
 # ── 文件服务 ─────────────────────────────────────────────
 
 @router.get("/files/{qid}/{filename}")
@@ -355,17 +467,24 @@ async def serve_student_file(qid: str, filename: str):
 
 @router.get("/preview/{qid}/{filename}")
 async def serve_student_preview(qid: str, filename: str):
-    """将学生提交文件转为 JPEG 预览图"""
+    """返回学生提交文件的 PNG 预览图，优先取预生成的 PNG"""
     from services.question_service import get_student_dir
-    from services.llm_service import image_to_base64
-    import base64
-    from fastapi.responses import Response
+    from fastapi.responses import FileResponse
 
     sdir = get_student_dir(qid)
+    # 优先找预生成的 PNG
+    stem = Path(filename).stem
+    png_path = sdir / f"{stem}.png"
+    if png_path.exists():
+        return FileResponse(str(png_path), media_type="image/png")
+
+    # 回退：实时转换（兼容旧数据）
     filepath = sdir / filename
     if not filepath.exists() or not filepath.is_file():
         raise HTTPException(status_code=404)
-
+    from services.llm_service import image_to_base64
+    import base64
+    from fastapi.responses import Response
     b64 = image_to_base64(filepath)
     img_bytes = base64.b64decode(b64)
     return Response(content=img_bytes, media_type="image/jpeg")

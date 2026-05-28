@@ -118,6 +118,29 @@ def image_to_base64(path: Path) -> str:
         raise ValueError(f"不支持的文件格式: {path.suffix}")
 
 
+def save_as_png(input_path: Path, output_path: Path) -> Path:
+    """将 PDF/图片转换为 PNG 并保存到 output_path，返回输出路径"""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if input_path.suffix.lower() == ".pdf":
+        try:
+            from pdf2image import convert_from_path
+            images = convert_from_path(str(input_path), first_page=1, last_page=1, dpi=150)
+            img = _resize_image(images[0])
+            img.save(str(output_path), format="PNG")
+            return output_path
+        except ImportError:
+            raise RuntimeError("pdf2image 未安装，无法处理 PDF 工程图")
+    elif input_path.suffix.lower() in (".png", ".jpg", ".jpeg", ".gif", ".webp"):
+        img = Image.open(input_path)
+        if img.mode in ("RGBA", "P"):
+            img = img.convert("RGB")
+        img = _resize_image(img)
+        img.save(str(output_path), format="PNG")
+        return output_path
+    else:
+        raise ValueError(f"不支持的文件格式: {input_path.suffix}")
+
+
 def bytes_to_base64(data: bytes, filename: str) -> str:
     """将内存中的 PDF/图片 bytes 直接转为 JPEG Base64，不落盘。测试模式使用"""
     ext = Path(filename).suffix.lower()

@@ -45,6 +45,35 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="工程图批阅系统", lifespan=lifespan)
 
+# ── 请求超时中间件 ─────────────────────────────────────────
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import JSONResponse
+import asyncio
+
+_REQUEST_TIMEOUTS = {
+    "/api/student/upload": 120,     # 上传 + PNG 转换
+    "/api/teacher/questions": 120,  # 题目创建（含上传）
+    "/api/student/analyze": 10,     # 分析入队，应该很快
+    "/api/student/grade": 10,       # 评分入队，应该很快
+}
+_DEFAULT_TIMEOUT = 60
+
+
+class TimeoutMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        timeout = _DEFAULT_TIMEOUT
+        for prefix, t in _REQUEST_TIMEOUTS.items():
+            if request.url.path.startswith(prefix):
+                timeout = t
+                break
+        try:
+            return await asyncio.wait_for(call_next(request), timeout=timeout)
+        except asyncio.TimeoutError:
+            return JSONResponse({"detail": "请求超时，请重试"}, status_code=504)
+
+
+app.add_middleware(TimeoutMiddleware)
+
 # CORS 开放给内网使用
 app.add_middleware(
     CORSMiddleware,

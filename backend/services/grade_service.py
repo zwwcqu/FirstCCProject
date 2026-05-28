@@ -123,6 +123,26 @@ def get_student_grade(qid: str, student_id: str) -> dict | None:
     return None
 
 
+def remove_grade(qid: str, student_id: str) -> None:
+    """从成绩 CSV 中删除指定学生的记录"""
+    csv_path = get_grades_csv_path(qid)
+    if not csv_path.exists():
+        return
+    import fcntl
+    with open(csv_path, "r+", encoding="utf-8-sig", newline="") as f:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        try:
+            reader = csv.DictReader(f)
+            rows = [row for row in reader if row.get("学号") != student_id]
+            f.seek(0)
+            f.truncate()
+            writer = csv.DictWriter(f, fieldnames=FIELDNAMES)
+            writer.writeheader()
+            writer.writerows(rows)
+        finally:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
+
 def save_result_json(qid: str, student_id: str, name: str, result: dict) -> None:
     """将 LLM 原始批阅结果保存为 JSON（用于调试和归档）"""
     from services.question_service import _sanitize_filename_part

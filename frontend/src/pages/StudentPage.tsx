@@ -2,13 +2,15 @@ import { useState, useEffect, useRef } from "react";
 import {
   listQuestions,
   getQuestionDetail,
-  analyzeSubmission,
+  uploadSubmission,
+  startAnalysis,
   gradeSubmission,
   getStudentResult,
   getSubmitStatus,
   getStudentAnalysisResult,
   getStudentSubmissions,
   checkRoster,
+  getSubmissionRecord,
   getQuestionFileUrl,
   getTeacherPreviewUrl,
   getStudentPreviewUrl,
@@ -89,7 +91,9 @@ export default function StudentPage() {
   const [error, setError] = useState("");
 
   // 分步状态
-  const [submitStatus, setSubmitStatus] = useState("");   // converting / submitted / analyzing / done / error / grading
+  const [uploading, setUploading] = useState(false);       // 上传中（工程图读取中）
+  const [uploaded, setUploaded] = useState(false);          // 上传成功
+  const [submitStatus, setSubmitStatus] = useState("");     // analyzing / done / error / grading
   const [analysisData, setAnalysisData] = useState<any>(null);
   const [grading, setGrading] = useState(false);
   const [submitKey, setSubmitKey] = useState<{ name: string; id: string } | null>(null);
@@ -97,6 +101,30 @@ export default function StudentPage() {
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const clearPolling = () => { if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; } };
   useEffect(() => () => clearPolling(), []);
+
+  // 图片浮动预览
+  const [lightboxSrc, setLightboxSrc] = useState("");
+  const [zoom, setZoom] = useState(1);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const dragRef = useRef<{ x: number; y: number; px: number; py: number } | null>(null);
+
+  const openLightbox = (src: string) => { setLightboxSrc(src); setZoom(1); setPan({ x: 0, y: 0 }); };
+  const closeLightbox = () => setLightboxSrc("");
+
+  const onWheel = (e: React.WheelEvent) => {
+    e.preventDefault();
+    setZoom((z) => Math.min(5, Math.max(0.5, z - e.deltaY * 0.002)));
+  };
+
+  const onMouseDown = (e: React.MouseEvent) => {
+    if (zoom <= 1) return;
+    dragRef.current = { x: e.clientX, y: e.clientY, px: pan.x, py: pan.y };
+  };
+  const onMouseMove = (e: React.MouseEvent) => {
+    if (!dragRef.current) return;
+    setPan({ x: dragRef.current.px + (e.clientX - dragRef.current.x), y: dragRef.current.py + (e.clientY - dragRef.current.y) });
+  };
+  const onMouseUp = () => { dragRef.current = null; };
 
   const loadData = async () => {
     try { setQuestions(await listQuestions()); } catch { /* ignore */ }
@@ -165,15 +193,38 @@ export default function StudentPage() {
     setSubmitStatus("");
     setFile(null);
     setStudentFilename("");
+    setUploaded(false);
+    setUploading(false);
+    setSubmitTs(0);
     setError("");
     try {
       const q = await getQuestionDetail(qid);
       setQuestion(q);
       if (identity && !identity.isTest) {
+        // 通过提交记录恢复全部状态
         try {
-          const r = await getStudentResult(qid, identity.id);
-          setResult(r);
-        } catch { setResult(null); }
+          const rec = await getSubmissionRecord(qid, identity.name, identity.id);
+          setSubmitKey({ name: identity.name, id: identity.id });
+          if (rec.student_filename) {
+            setStudentFilename(rec.student_filename);
+            setUploaded(true);
+            setSubmitTs(Date.now());
+          }
+          // 有分析结果则恢复
+          if (rec.status === "analyzed" || rec.status === "graded") {
+            try {
+              const a = await getStudentAnalysisResult(qid, identity.name, identity.id);
+              if (a.analysis) setAnalysisData(a.analysis);
+            } catch { /* 分析结果文件丢失 */ }
+          }
+          // 有成绩则恢复
+          if (rec.status === "graded") {
+            try {
+              const r = await getStudentResult(qid, identity.id);
+              setResult(r);
+            } catch { setResult(null); }
+          }
+        } catch { /* 无提交记录 */ }
       }
     } catch { setError("加载题目失败"); }
   };
@@ -181,6 +232,8 @@ export default function StudentPage() {
   const getStatusBadge = (qid: string) => {
     const sub = submissions.find(s => s.question_id === qid);
     if (!sub) return <span className="text-xs text-gray-400 ml-2">未提交</span>;
+    if (sub.status === "uploaded") return <span className="text-xs text-blue-400 ml-2">已提交，待分析</span>;
+    if (sub.status === "analyzed") return <span className="text-xs text-orange-400 ml-2">待评分</span>;
     const g = sub.grade || "";
     const color =
       g === "A+" || g === "A" ? "text-green-600" :
@@ -189,28 +242,67 @@ export default function StudentPage() {
     return <span className={`text-xs ml-2 font-medium ${color}`}>{g} ({sub.total_score}分)</span>;
   };
 
-  // ── 步骤1：上传 + 分析 ────────────────────────────────
+  // ── 步骤1：上传文件 ──────────────────────────────────
 
-  const handleAnalyze = async () => {
-    if (!selectedQid) { setError("请选择题目"); return; }
-    if (!file) { setError("请上传工程图文件"); return; }
-    if (file.size > MAX_FILE_MB * 1024 * 1024) { setError(`文件过大（上限 ${MAX_FILE_MB}MB）`); return; }
-    if (!identity) { setError("请先登录"); return; }
+  const handleUpload = async (selectedFile: File) => {
+    if (!selectedQid || !identity) return;
+    if (selectedFile.size > MAX_FILE_MB * 1024 * 1024) {
+      setError(`文件过大（上限 ${MAX_FILE_MB}MB）`);
+      return;
+    }
 
     setError("");
     setAnalysisData(null);
     setResult(null);
-    setSubmitStatus("converting");
-    setSubmitTs(0);
+    setUploaded(false);
+    setUploading(true);
     setStudentFilename("");
+    setSubmitTs(0);
     clearPolling();
 
     const submitName = identity.isTest ? "测试" : identity.name;
-    const submitId = identity.isTest ? identity.id : identity.id;
+    const submitId = identity.id;
     setSubmitKey({ name: submitName, id: submitId });
 
+    // 捕获当前值，防止 identity 在 setTimeout 前变化
+    const capturedIdentity = identity;
+    const capturedQid = selectedQid;
+
     try {
-      const data = await analyzeSubmission(selectedQid, submitName, submitId, file, identity.isTest ? "test" : "submit");
+      const data = await uploadSubmission(capturedQid, submitName, submitId, selectedFile,
+        capturedIdentity.isTest ? "test" : "submit");
+      if (!data.ok) throw new Error("上传失败");
+      setStudentFilename(data.student_filename);
+
+      setTimeout(() => {
+        setUploading(false);
+        setUploaded(true);
+        setSubmitTs(Date.now());
+        if (capturedIdentity && !capturedIdentity.isTest) loadHistory(capturedIdentity.name, capturedIdentity.id);
+      }, 200);
+    } catch (e: any) {
+      setUploading(false);
+      setError(e.message);
+    }
+  };
+
+  // ── 步骤2：开始分析 ──────────────────────────────────
+
+  const handleStartAnalysis = async () => {
+    if (!selectedQid || !submitKey) return;
+
+    setError("");
+    setSubmitStatus("analyzing");
+    clearPolling();
+
+    // 捕获当前值，防止轮询中状态被清空
+    const capturedQid = selectedQid;
+    const capturedKey = submitKey;
+    const capturedIsTest = identity?.isTest ?? false;
+
+    try {
+      const data = await startAnalysis(capturedQid, capturedKey.name, capturedKey.id,
+        capturedIsTest ? "test" : "submit");
       if (!data.ok) throw new Error("提交失败");
 
       let elapsed = 0;
@@ -223,18 +315,12 @@ export default function StudentPage() {
           return;
         }
         try {
-          const s = await getSubmitStatus(selectedQid!, submitName, submitId);
+          const s = await getSubmitStatus(capturedQid, capturedKey.name, capturedKey.id);
           setSubmitStatus(s.status || "");
-
-          // 文件转换完成 → 更新预览图
-          if (s.student_filename && !studentFilename) {
-            setStudentFilename(s.student_filename);
-            setSubmitTs(Date.now());
-          }
 
           if (s.status === "done") {
             clearPolling();
-            const r = await getStudentAnalysisResult(selectedQid!, submitName, submitId);
+            const r = await getStudentAnalysisResult(capturedQid, capturedKey.name, capturedKey.id);
             setAnalysisData(r.analysis);
             setSubmitStatus("");
           } else if (s.status === "error") {
@@ -262,8 +348,15 @@ export default function StudentPage() {
     setSubmitStatus("grading");
     clearPolling();
 
+    // 捕获当前值，防止轮询中状态被清空
+    const capturedQid = selectedQid;
+    const capturedKey = submitKey;
+    const capturedIdentity = identity;
+    const capturedIsTest = identity?.isTest ?? false;
+
     try {
-      const data = await gradeSubmission(selectedQid, submitKey.name, submitKey.id, identity?.isTest ? "test" : "submit");
+      const data = await gradeSubmission(capturedQid, capturedKey.name, capturedKey.id,
+        capturedIsTest ? "test" : "submit");
       if (!data.ok) throw new Error("提交失败");
 
       let elapsed = 0;
@@ -277,21 +370,21 @@ export default function StudentPage() {
           return;
         }
         try {
-          const s = await getSubmitStatus(selectedQid!, submitKey!.name, submitKey!.id);
+          const s = await getSubmitStatus(capturedQid, capturedKey.name, capturedKey.id);
           if (s.status === "done") {
             clearPolling();
-            const r = await getStudentResult(selectedQid!, submitKey!.id);
+            const r = await getStudentResult(capturedQid, capturedKey.id);
             if (r) {
               setResult({
-                姓名: identity?.name || submitKey!.name,
-                学号: identity?.id || submitKey!.id,
+                姓名: capturedIdentity?.name || capturedKey.name,
+                学号: capturedIdentity?.id || capturedKey.id,
                 成绩: r.成绩,
                 ...r,
               });
             }
             setGrading(false);
             setSubmitStatus("");
-            if (identity && !identity.isTest) loadHistory(identity.name, identity.id);
+            if (capturedIdentity && !capturedIdentity.isTest) loadHistory(capturedIdentity.name, capturedIdentity.id);
           } else if (s.status === "error") {
             clearPolling();
             setGrading(false);
@@ -434,11 +527,31 @@ export default function StudentPage() {
             <div className="mb-4">
               <label className="block text-sm font-medium text-gray-700 mb-1">上传工程图 (PDF/图片)</label>
               <input type="file" accept=".pdf,.png,.jpg,.jpeg,.gif,.webp"
-                onChange={(e) => { setFile(e.target.files?.[0] || null); setAnalysisData(null); setSubmitKey(null); setResult(null); setSubmitStatus(""); }}
+                onChange={(e) => { const f = e.target.files?.[0]; if (f) { setFile(f); handleUpload(f); } }}
                 className="w-full" />
             </div>
 
-            {/* 状态提示 */}
+            {/* 上传中提示 */}
+            {uploading && (
+              <div className="mb-4 p-3 rounded bg-blue-50 border border-blue-200">
+                <div className="flex items-center gap-2">
+                  <svg className="animate-spin h-4 w-4 text-blue-600" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                  </svg>
+                  <span className="text-sm text-blue-700">工程图读取中…</span>
+                </div>
+              </div>
+            )}
+
+            {/* 提交成功提示 */}
+            {uploaded && !uploading && (
+              <div className="mb-4 p-3 rounded bg-green-50 border border-green-200">
+                <span className="text-sm text-green-700">提交成功</span>
+              </div>
+            )}
+
+            {/* 分析/评分状态提示 */}
             {submitStatus && (
               <div className="mb-4 p-3 rounded bg-blue-50 border border-blue-200">
                 <div className="flex items-center gap-2">
@@ -456,16 +569,17 @@ export default function StudentPage() {
             {/* 学生图预览（转换完成后显示） */}
             {studentFilename && submitTs > 0 && selectedQid && (
               <div className="mb-4">
-                <p className="text-xs text-gray-500 mb-1">已上传的工程图</p>
+                <p className="text-xs text-gray-500 mb-1">已上传的工程图（点击放大）</p>
                 <img src={getStudentPreviewUrl(selectedQid, studentFilename, submitTs)}
-                  alt="已上传工程图" className="max-w-full rounded border" style={{ maxHeight: "300px" }} />
+                  alt="已上传工程图" className="max-w-full rounded border cursor-pointer hover:opacity-90" style={{ maxHeight: "300px" }}
+                  onClick={() => openLightbox(getStudentPreviewUrl(selectedQid, studentFilename, submitTs))} />
               </div>
             )}
 
             {!analysisData ? (
-              <button onClick={handleAnalyze} disabled={!!submitStatus}
+              <button onClick={handleStartAnalysis} disabled={!uploaded || !!submitStatus}
                 className="bg-blue-600 text-white px-6 py-2 rounded hover:bg-blue-700 disabled:opacity-50">
-                {submitStatus ? "处理中…" : "上传并分析"}
+                {!uploaded ? "请先上传作业" : submitStatus ? "处理中…" : "开始分析"}
               </button>
             ) : (
               <button onClick={handleGrade} disabled={grading || !!submitStatus}
@@ -484,11 +598,13 @@ export default function StudentPage() {
                   <div className="grid grid-cols-2 gap-3 mb-3">
                     <div>
                       <p className="text-xs text-gray-500 mb-1">参考工程图</p>
-                      <img src={getTeacherPreviewUrl(selectedQid!, question.files.reference_pdf, submitTs)} alt="参考图" className="w-full rounded border" />
+                      <img src={getTeacherPreviewUrl(selectedQid!, question.files.reference_pdf, submitTs)} alt="参考图" className="w-full rounded border cursor-pointer hover:opacity-90"
+                        onClick={() => openLightbox(getTeacherPreviewUrl(selectedQid!, question.files.reference_pdf, submitTs))} />
                     </div>
                     <div>
                       <p className="text-xs text-gray-500 mb-1">你的作业</p>
-                      <img src={getStudentPreviewUrl(selectedQid!, studentFilename, submitTs)} alt="学生工程图" className="w-full rounded border" />
+                      <img src={getStudentPreviewUrl(selectedQid!, studentFilename, submitTs)} alt="学生工程图" className="w-full rounded border cursor-pointer hover:opacity-90"
+                        onClick={() => openLightbox(getStudentPreviewUrl(selectedQid!, studentFilename, submitTs))} />
                     </div>
                   </div>
                 )}
@@ -576,16 +692,16 @@ export default function StudentPage() {
                 }`}>{result.成绩}</div>
               </div>
               <div className="flex-1 text-center text-sm text-gray-500">
-                阶段1 相似度<br/><span className="text-lg font-bold text-gray-800">{(result as any).phase1_similarity}%</span>
+                阶段1 相似度<br/><span className="text-lg font-bold text-gray-800">{(result as any)["阶段1相似度"] || (result as any).phase1_similarity || "-"}%</span>
                 <span className="mx-2">×</span>
-                阶段2 评分<br/><span className="text-lg font-bold text-gray-800">{(result as any).phase2_criteria}%</span>
+                阶段2 评分<br/><span className="text-lg font-bold text-gray-800">{(result as any)["阶段2评分"] || (result as any).phase2_criteria || "-"}%</span>
                 <span className="mx-2">=</span>
-                总分<br/><span className="text-lg font-bold text-blue-600">{(result as any).total_score}%</span>
+                总分<br/><span className="text-lg font-bold text-blue-600">{(result as any)["总分"] || (result as any).total_score || "-"}%</span>
               </div>
             </div>
             <div className="bg-yellow-50 rounded p-3">
               <h4 className="text-sm font-medium text-yellow-700">阶段1：相似度评价</h4>
-              <p className="text-sm mt-1 whitespace-pre-wrap">{(result as any).phase1_comment || "-"}</p>
+              <p className="text-sm mt-1 whitespace-pre-wrap">{(result as any)["相似度评价"] || (result as any).phase1_comment || "-"}</p>
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
               {["图样表达", "尺寸标注", "尺寸公差", "表面质量", "形位公差"].map((key) => (
@@ -595,17 +711,35 @@ export default function StudentPage() {
                 </div>
               ))}
             </div>
-            <div className="bg-green-50 rounded p-3">
-              <h4 className="text-sm font-medium text-green-700">阶段2：综合评价</h4>
-              <p className="text-sm mt-1 whitespace-pre-wrap">{(result as any).phase2_comment || "-"}</p>
-            </div>
             <div className="bg-blue-50 rounded p-3">
               <h4 className="text-sm font-medium text-blue-700">总评</h4>
-              <p className="text-sm mt-1 whitespace-pre-wrap">{result.总评}</p>
+              <p className="text-sm mt-1 whitespace-pre-wrap">{result.总评 || "-"}</p>
             </div>
           </div>
         )}
       </main>
+
+      {/* 图片浮动预览 */}
+      {lightboxSrc && (
+        <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center"
+          onClick={closeLightbox}
+          onWheel={onWheel}
+          onMouseDown={onMouseDown}
+          onMouseMove={onMouseMove}
+          onMouseUp={onMouseUp}
+          onMouseLeave={onMouseUp}>
+          <button className="absolute top-4 right-4 text-white text-2xl hover:text-gray-300 z-10"
+            onClick={closeLightbox}>&times;</button>
+          <div className="absolute top-4 left-4 text-white text-sm bg-black/50 px-2 py-1 rounded z-10">
+            {Math.round(zoom * 100)}%
+          </div>
+          <img src={lightboxSrc} alt="预览"
+            className="max-w-[90vw] max-h-[90vh] object-contain select-none"
+            style={{ transform: `scale(${zoom}) translate(${pan.x / zoom}px, ${pan.y / zoom}px)`, cursor: zoom > 1 ? 'grab' : 'default' }}
+            draggable={false}
+            onClick={(e) => e.stopPropagation()} />
+        </div>
+      )}
     </div>
   );
 }

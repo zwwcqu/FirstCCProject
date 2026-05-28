@@ -205,26 +205,76 @@ def get_scoring_templates() -> dict:
 # ── 学生提交文件存取 ────────────────────────────────────
 
 def save_student_submission(qid: str, student_id: str, name: str, file_bytes: bytes, filename: str) -> str:
-    """保存学生上传的工程图文件。文件名经安全清洗后保存"""
+    """保存学生上传的工程图文件。非 PDF/PNG 图片统一转为 PNG。保存前校验文件格式有效。"""
+    from io import BytesIO
+
     student_dir = get_student_dir(qid)
     student_dir.mkdir(parents=True, exist_ok=True)
-    ext = Path(filename).suffix or ".pdf"
+    ext = Path(filename).suffix.lower()
     safe_name = _sanitize_filename_part(name)
     safe_id = _sanitize_filename_part(student_id)
+
+    if ext == ".pdf":
+        # 校验 PDF 有效（至少能渲染首页）
+        try:
+            from pdf2image import convert_from_bytes
+            images = convert_from_bytes(file_bytes, first_page=1, last_page=1, dpi=72)
+            if not images:
+                raise ValueError("PDF 无法渲染，可能已损坏")
+        except Exception as e:
+            raise ValueError(f"PDF 文件无效: {e}")
+
+    elif ext in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"):
+        # 校验图片可被 PIL 打开
+        try:
+            from PIL import Image
+            img = Image.open(BytesIO(file_bytes))
+            img.verify()  # 只校验结构，不加载像素数据
+        except Exception as e:
+            raise ValueError(f"图片文件无效: {e}")
+
+        # 非 PNG 格式统一转为 PNG
+        if ext != ".png":
+            img = Image.open(BytesIO(file_bytes))
+            if img.mode in ("RGBA", "P"):
+                img = img.convert("RGB")
+            buf = BytesIO()
+            img.save(buf, format="PNG")
+            file_bytes = buf.getvalue()
+            ext = ".png"
+    else:
+        raise ValueError(f"不支持的文件格式: {ext}，请上传 PDF 或图片文件")
+
     path = student_dir / f"{safe_name}_{safe_id}{ext}"
     path.write_bytes(file_bytes)
     return str(path)
 
 
+def submit_student_work(qid: str, student_id: str, name: str,
+                        file_bytes: bytes, filename: str) -> str:
+    """学生作业提交全流程：清除旧数据 → 保存文件 → PDF 生成 PNG 预览 → 写记录。返回保存的文件名。"""
+    stem = clear_student_data(qid, student_id, name)
+    student_path = save_student_submission(qid, student_id, name, file_bytes, filename)
+    saved_name = Path(student_path).name
+    file_stem = Path(saved_name).stem
+
+    if Path(saved_name).suffix.lower() == ".pdf":
+        from services.llm_service import save_as_png
+        save_as_png(Path(student_path), Path(student_path).with_suffix(".png"))
+
+    update_submission_record(qid, student_id, name, file_stem, "uploaded")
+    return saved_name
+
+
 def get_student_submission_path(qid: str, student_id: str, name: str) -> Path | None:
-    """查找学生已提交的文件路径（用于覆盖前检查），未找到返回 None"""
+    """查找学生已提交的文件路径（支持 PDF/PNG），未找到返回 None"""
     student_dir = get_student_dir(qid)
     if not student_dir.exists():
         return None
     safe_name = _sanitize_filename_part(name)
     safe_id = _sanitize_filename_part(student_id)
     for f in student_dir.iterdir():
-        if f.stem == f"{safe_name}_{safe_id}" and f.suffix.lower() in (".pdf", ".png", ".jpg", ".jpeg"):
+        if f.stem == f"{safe_name}_{safe_id}" and f.suffix.lower() in (".pdf", ".png"):
             return f
     return None
 
@@ -349,6 +399,85 @@ def get_reference_analysis(qid: str) -> dict | None:
     }
 
 
+# ── 提交记录（submissions.json）─────────────────────────
+
+def _get_submissions_path(qid: str) -> Path:
+    return get_question_dir(qid) / "submissions.json"
+
+
+def get_submissions(qid: str) -> dict:
+    """读取题目的所有提交记录"""
+    path = _get_submissions_path(qid)
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, ValueError):
+        return {}
+
+
+def _save_submissions(qid: str, data: dict) -> None:
+    """保存提交记录"""
+    path = _get_submissions_path(qid)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def get_submission_record(qid: str, student_id: str) -> dict | None:
+    """获取单个学生的提交记录"""
+    submissions = get_submissions(qid)
+    return submissions.get(student_id)
+
+
+def update_submission_record(qid: str, student_id: str, name: str,
+                              filename_stem: str, status: str, **extra) -> None:
+    """更新/新增一条提交记录；filename_stem 不含后缀"""
+    submissions = get_submissions(qid)
+    record = submissions.get(student_id, {})
+    record["name"] = name
+    record["filename"] = filename_stem
+    record["status"] = status
+    from datetime import datetime
+    record["submitted_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    record.update(extra)
+    submissions[student_id] = record
+    _save_submissions(qid, submissions)
+
+
+def clear_student_data(qid: str, student_id: str, name: str) -> str:
+    """
+    清除学生的旧提交数据（重新提交时调用）：
+    - 删除旧上传文件
+    - 删除分析 JSON
+    - 删除结果 JSON
+    - 从成绩 CSV 中移除
+    - 从 submissions.json 中移除
+    返回安全文件名前缀（name_id）
+    """
+    import glob as _glob
+    student_dir = get_student_dir(qid)
+    safe_name = _sanitize_filename_part(name)
+    safe_id = _sanitize_filename_part(student_id)
+    stem = f"{safe_name}_{safe_id}"
+
+    if student_dir.exists():
+        for f in student_dir.iterdir():
+            if f.stem == stem or f.stem.startswith(stem + "_"):
+                f.unlink()
+                logger.info(f"已删除旧文件: {f}")
+
+    # 清除成绩 CSV
+    from services.grade_service import remove_grade
+    remove_grade(qid, student_id)
+
+    # 清除提交记录
+    submissions = get_submissions(qid)
+    submissions.pop(student_id, None)
+    _save_submissions(qid, submissions)
+
+    return stem
+
+
 def save_student_analysis(qid: str, student_id: str, name: str, analysis: dict) -> None:
     """
     保存学生图的分析结果。
@@ -387,3 +516,56 @@ def _read_csv(path: Path) -> list[dict]:
     """读取 CSV 文件，返回字典列表（内部工具）"""
     with open(path, "r", encoding="utf-8-sig") as f:
         return list(csv.DictReader(f))
+
+
+def get_all_roster_students() -> list[dict]:
+    """返回所有班级名单中的学生 [{姓名, 学号, 班级}]"""
+    _ensure_student_info_dir()
+    students: list[dict] = []
+    for f in STUDENT_INFO_DIR.iterdir():
+        if f.suffix.lower() == ".csv" and f.stem != "_模版":
+            for row in _read_csv(f):
+                name = row.get("姓名", "").strip()
+                sid = row.get("学号", "").strip()
+                if name and sid:
+                    students.append({"姓名": name, "学号": sid, "班级": f.stem})
+    return students
+
+
+def sync_submissions_from_disk(qid: str) -> int:
+    """扫描 student 目录下的 PDF/PNG 文件，将名单中的学生自动注册到 submissions.json。返回新增数量。"""
+    student_dir = get_student_dir(qid)
+    if not student_dir.exists():
+        return 0
+
+    roster_students = get_all_roster_students()
+    roster_map: dict[str, dict] = {}
+    for s in roster_students:
+        safe_name = _sanitize_filename_part(s["姓名"])
+        safe_id = _sanitize_filename_part(s["学号"])
+        roster_map[f"{safe_name}_{safe_id}"] = s
+
+    submissions = get_submissions(qid)
+    added = 0
+
+    for f in student_dir.iterdir():
+        if not f.is_file() or f.suffix.lower() not in (".pdf", ".png"):
+            continue
+        stem = f.stem
+        student = roster_map.get(stem)
+        if student is None:
+            continue
+        sid = student["学号"]
+        if sid not in submissions:
+            submissions[sid] = {
+                "name": student["姓名"],
+                "filename": stem,
+                "status": "uploaded",
+                "submitted_at": "",
+            }
+            added += 1
+            logger.info(f"[{qid}] 自动发现提交: {student['姓名']}({sid}) ← {f.name}")
+
+    if added > 0:
+        _save_submissions(qid, submissions)
+    return added

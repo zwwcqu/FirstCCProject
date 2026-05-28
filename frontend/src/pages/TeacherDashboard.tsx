@@ -18,6 +18,11 @@ import {
   triggerAnalysis,
   getAnalysisResult,
   getTeacherPreviewUrl,
+  batchGrade,
+  editGrade,
+  getTeacherStudentPreviewUrl,
+  supplementSubmission,
+  refreshGrades,
 } from "../api";
 
 interface Question {
@@ -45,6 +50,21 @@ export default function TeacherDashboard() {
   const [analyzingQid, setAnalyzingQid] = useState<string | null>(null);
   const [analysisResults, setAnalysisResults] = useState<Record<string, any>>({});
   const [expandedAnalysis, setExpandedAnalysis] = useState<Record<string, boolean>>({});
+
+  // 成绩管理
+  const [selectedStudents, setSelectedStudents] = useState<Set<string>>(new Set());
+  const [batchGrading, setBatchGrading] = useState(false);
+  const [editingCell, setEditingCell] = useState<{ sid: string; col: string } | null>(null);
+  const [editValue, setEditValue] = useState("");
+  const [previewImage, setPreviewImage] = useState<string | null>(null);
+
+  // 补充提交弹窗
+  const [supplementModal, setSupplementModal] = useState(false);
+  const [supplementName, setSupplementName] = useState("");
+  const [supplementSid, setSupplementSid] = useState("");
+  const [supplementFile, setSupplementFile] = useState<File | null>(null);
+  const [supplementSubmitting, setSupplementSubmitting] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
 
   // form fields
   const [qid, setQid] = useState("");
@@ -181,9 +201,92 @@ export default function TeacherDashboard() {
       setGradeData(data.grades || []);
       setGradeColumns(data.columns || []);
       setGradesView(qid);
+      setSelectedStudents(new Set());
     } catch (e: any) {
       alert(e.message);
     }
+  };
+
+  const toggleSelect = (sid: string) => {
+    setSelectedStudents((prev) => {
+      const next = new Set(prev);
+      if (next.has(sid)) next.delete(sid); else next.add(sid);
+      return next;
+    });
+  };
+
+  const toggleSelectAll = () => {
+    const allIds = gradeData.map((r: any) => r["学号"]).filter(Boolean);
+    if (selectedStudents.size === allIds.length) {
+      setSelectedStudents(new Set());
+    } else {
+      setSelectedStudents(new Set(allIds));
+    }
+  };
+
+  const handleBatchGrade = async () => {
+    if (!gradesView || selectedStudents.size === 0) return;
+    setBatchGrading(true);
+    const ids = Array.from(selectedStudents);
+    try {
+      await batchGrade(gradesView, ids);
+      // 立即更新本地状态为"评分中"，不等刷新
+      setGradeData((prev) =>
+        prev.map((r: any) =>
+          ids.includes(r["学号"]) ? { ...r, _status: "grading" } : r
+        )
+      );
+      setSelectedStudents(new Set());
+    } catch (e: any) {
+      alert(e.message);
+    } finally {
+      setBatchGrading(false);
+    }
+  };
+
+  const handleSupplement = async () => {
+    if (!gradesView || !supplementName.trim() || !supplementSid.trim() || !supplementFile) {
+      alert("请填写姓名、学号并选择文件");
+      return;
+    }
+    setSupplementSubmitting(true);
+    try {
+      await supplementSubmission(gradesView, supplementName.trim(), supplementSid.trim(), supplementFile);
+      setSupplementModal(false);
+      setSupplementName("");
+      setSupplementSid("");
+      setSupplementFile(null);
+      handleViewGrades(gradesView); // 刷新成绩列表
+    } catch (e: any) {
+      alert(e.message);
+    } finally {
+      setSupplementSubmitting(false);
+    }
+  };
+
+  const startEdit = (sid: string, col: string, value: string) => {
+    setEditingCell({ sid, col });
+    setEditValue(value);
+  };
+
+  const saveEdit = async () => {
+    if (!editingCell || !gradesView) return;
+    try {
+      await editGrade(gradesView, editingCell.sid, { [editingCell.col]: editValue });
+      setGradeData((prev) =>
+        prev.map((r: any) =>
+          r["学号"] === editingCell.sid ? { ...r, [editingCell.col]: editValue } : r
+        )
+      );
+    } catch (e: any) {
+      alert(e.message);
+    }
+    setEditingCell(null);
+  };
+
+  const viewStudentDrawing = (sid: string) => {
+    if (!gradesView) return;
+    setPreviewImage(getTeacherStudentPreviewUrl(gradesView, sid));
   };
 
   const loadClasses = async () => {
@@ -631,10 +734,40 @@ export default function TeacherDashboard() {
         {/* Grades Modal */}
         {gradesView && (
           <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-            <div className="bg-white rounded-lg shadow-xl p-6 w-full max-w-4xl mx-4 max-h-[90vh] overflow-auto">
+            <div className="bg-white rounded-lg shadow-xl p-6 w-full max-w-5xl mx-4 max-h-[90vh] overflow-auto">
               <div className="flex justify-between items-center mb-4">
                 <h2 className="text-lg font-semibold">成绩列表 - {gradesView}</h2>
-                <button onClick={() => setGradesView(null)} className="px-3 py-1 border rounded hover:bg-gray-50">关闭</button>
+                <div className="flex gap-2">
+                  <button
+                    onClick={async () => {
+                      if (refreshing) return;
+                      setRefreshing(true);
+                      try {
+                        const data = await refreshGrades(gradesView!);
+                        setGradeData(data.grades || []);
+                        setGradeColumns(data.columns || []);
+                        setSelectedStudents(new Set());
+                      } catch (_) {}
+                      setTimeout(() => setRefreshing(false), 100);
+                    }}
+                    disabled={refreshing}
+                    className="px-3 py-1 border rounded hover:bg-gray-50 text-sm disabled:opacity-50"
+                  >{refreshing ? "刷新中…" : "刷新"}</button>
+                  <button
+                    onClick={() => { setSupplementModal(true); setSupplementName(""); setSupplementSid(""); setSupplementFile(null); }}
+                    className="px-3 py-1 bg-orange-500 text-white rounded hover:bg-orange-600 text-sm"
+                  >
+                    补充提交
+                  </button>
+                  <button
+                    onClick={handleBatchGrade}
+                    disabled={selectedStudents.size === 0 || batchGrading}
+                    className="px-4 py-1 bg-green-600 text-white rounded hover:bg-green-700 disabled:opacity-50 text-sm"
+                  >
+                    {batchGrading ? "提交中…" : `批量评分 (${selectedStudents.size})`}
+                  </button>
+                  <button onClick={() => { setGradesView(null); setEditingCell(null); }} className="px-3 py-1 border rounded hover:bg-gray-50">关闭</button>
+                </div>
               </div>
               {gradeData.length === 0 ? (
                 <p className="text-gray-400">暂无成绩</p>
@@ -642,23 +775,157 @@ export default function TeacherDashboard() {
                 <table className="w-full border-collapse text-sm">
                   <thead>
                     <tr className="bg-gray-50 border-b">
+                      <th className="text-left p-2 w-8">
+                        <input type="checkbox"
+                          checked={gradeData.filter((r: any) => r["学号"]).length > 0 && selectedStudents.size === gradeData.filter((r: any) => r["学号"]).length}
+                          onChange={toggleSelectAll} />
+                      </th>
+                      <th className="text-left p-2 w-10">#</th>
+                      <th className="text-left p-2 whitespace-nowrap">状态</th>
+                      <th className="text-left p-2 whitespace-nowrap">工程图</th>
                       {gradeColumns.map((k) => (
                         <th key={k} className="text-left p-2 whitespace-nowrap">{k}</th>
                       ))}
                     </tr>
                   </thead>
                   <tbody>
-                    {gradeData.map((row, i) => (
-                      <tr key={i} className="border-b hover:bg-gray-50">
-                        {gradeColumns.map((col, j) => (
-                          <td key={j} className="p-2 max-w-xs truncate">{row[col]}</td>
-                        ))}
-                      </tr>
-                    ))}
+                    {gradeData.map((row: any, i: number) => {
+                      const sid = row["学号"] || "";
+                      const status = row["_status"] || "";
+                      const filename = row["_filename"] || "";
+                      const isGraded = status === "graded";
+                      const isFailed = status === "grade_failed" || status === "analyze_failed";
+                      return (
+                        <tr key={i} className={`border-b hover:bg-gray-50 ${isFailed ? "bg-red-50/50" : !isGraded ? "bg-yellow-50/50" : ""}`}>
+                          <td className="p-2">
+                            <input type="checkbox" checked={selectedStudents.has(sid)}
+                              onChange={() => toggleSelect(sid)} />
+                          </td>
+                          <td className="p-2 text-gray-400">{i + 1}</td>
+                          <td className="p-2">
+                            {status === "graded" ? (
+                              <span className="text-green-600 text-xs font-medium">已评分</span>
+                            ) : status === "grading" ? (
+                              <span className="text-purple-500 text-xs font-medium">评分中</span>
+                            ) : status === "grade_failed" ? (
+                              <span className="text-red-500 text-xs font-medium" title={row["_error"] || ""}>评分失败</span>
+                            ) : status === "analyzing" ? (
+                              <span className="text-purple-400 text-xs font-medium">分析中</span>
+                            ) : status === "analyze_failed" ? (
+                              <span className="text-red-400 text-xs font-medium" title={row["_error"] || ""}>分析失败</span>
+                            ) : status === "analyzed" ? (
+                              <span className="text-orange-500 text-xs font-medium">待评分</span>
+                            ) : (
+                              <span className="text-blue-500 text-xs font-medium">提交未评</span>
+                            )}
+                          </td>
+                          <td className="p-2">
+                            {filename ? (
+                              <button onClick={() => viewStudentDrawing(sid)}
+                                className="text-blue-600 hover:underline text-xs">查看</button>
+                            ) : (
+                              <span className="text-gray-300 text-xs">-</span>
+                            )}
+                          </td>
+                          {gradeColumns.map((col: string, j: number) => {
+                            const isEditing = editingCell?.sid === sid && editingCell?.col === col;
+                            const editable = isGraded && ["成绩", "阶段1相似度", "阶段2评分", "总分"].includes(col);
+                            return (
+                              <td key={j} className="p-2 max-w-[120px] truncate"
+                                onDoubleClick={() => editable && startEdit(sid, col, row[col] || "")}>
+                                {isEditing ? (
+                                  <input
+                                    type="text"
+                                    value={editValue}
+                                    onChange={(e) => setEditValue(e.target.value)}
+                                    onBlur={saveEdit}
+                                    onKeyDown={(e) => { if (e.key === "Enter") saveEdit(); if (e.key === "Escape") setEditingCell(null); }}
+                                    className="w-20 border rounded px-1 py-0.5 text-xs"
+                                    autoFocus
+                                  />
+                                ) : (
+                                  <span className={editable ? "cursor-pointer hover:bg-gray-100 rounded px-1" : ""}
+                                    title={editable ? "双击编辑" : ""}>
+                                    {row[col]}
+                                  </span>
+                                )}
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               )}
             </div>
+          </div>
+        )}
+
+        {/* Supplement Submission Modal */}
+        {supplementModal && gradesView && (
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[70]">
+            <div className="bg-white rounded-lg shadow-xl p-6 w-full max-w-md mx-4">
+              <h3 className="text-lg font-semibold mb-4">补充提交 - 题{gradesView}</h3>
+              <div className="space-y-3">
+                <div>
+                  <label className="block text-sm text-gray-600 mb-1">姓名</label>
+                  <input
+                    type="text"
+                    value={supplementName}
+                    onChange={(e) => setSupplementName(e.target.value)}
+                    className="w-full border rounded px-3 py-2 text-sm"
+                    placeholder="学生姓名"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm text-gray-600 mb-1">学号</label>
+                  <input
+                    type="text"
+                    value={supplementSid}
+                    onChange={(e) => setSupplementSid(e.target.value)}
+                    className="w-full border rounded px-3 py-2 text-sm"
+                    placeholder="学生学号"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm text-gray-600 mb-1">作业文件</label>
+                  <input
+                    type="file"
+                    accept=".pdf,.png,.jpg,.jpeg,.gif,.webp"
+                    onChange={(e) => setSupplementFile(e.target.files?.[0] || null)}
+                    className="w-full text-sm"
+                  />
+                </div>
+              </div>
+              <div className="flex justify-end gap-2 mt-4">
+                <button
+                  onClick={() => setSupplementModal(false)}
+                  className="px-4 py-2 border rounded hover:bg-gray-50 text-sm"
+                >
+                  取消
+                </button>
+                <button
+                  onClick={handleSupplement}
+                  disabled={supplementSubmitting}
+                  className="px-4 py-2 bg-orange-500 text-white rounded hover:bg-orange-600 disabled:opacity-50 text-sm"
+                >
+                  {supplementSubmitting ? "提交中…" : "提交"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Student Drawing Preview */}
+        {previewImage && (
+          <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-[60]"
+            onClick={() => setPreviewImage(null)}>
+            <button className="absolute top-4 right-4 text-white text-2xl hover:text-gray-300 z-10"
+              onClick={() => setPreviewImage(null)}>&times;</button>
+            <img src={previewImage} alt="学生工程图"
+              className="max-w-[90vw] max-h-[90vh] object-contain"
+              onClick={(e) => e.stopPropagation()} />
           </div>
         )}
 

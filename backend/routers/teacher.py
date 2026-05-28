@@ -34,8 +34,15 @@ from services.question_service import (
     get_scoring_templates,
     save_reference_analysis,
     get_reference_analysis,
+    get_submissions,
+    get_submission_record,
+    get_student_submission_path,
+    get_student_analysis,
+    get_student_dir,
+    update_submission_record,
+    sync_submissions_from_disk,
 )
-from services.grade_service import read_all_grades, get_grades_csv_path, FIELDNAMES
+from services.grade_service import read_all_grades, get_grades_csv_path, FIELDNAMES, save_grade, get_student_grade, save_result_json
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/teacher", tags=["teacher"])
@@ -229,10 +236,272 @@ async def get_analysis_result(request: Request, qid: str):
 
 @router.get("/grades/{qid}")
 async def get_grades(request: Request, qid: str):
-    """查看某题所有学生成绩（含固定列顺序）"""
+    """查看某题所有学生成绩，含未评分但已提交的学生"""
     _require_auth(request)
-    rows = read_all_grades(qid)
-    return {"qid": qid, "grades": rows, "columns": FIELDNAMES}
+    # CSV 中已有成绩的学生
+    graded_rows = read_all_grades(qid)
+    graded_ids = {r.get("学号", "") for r in graded_rows}
+
+    # submissions.json 中已提交但无成绩的学生
+    submissions = get_submissions(qid)
+    ungraded_rows: list[dict] = []
+    for sid, rec in submissions.items():
+        if sid not in graded_ids:
+            student_path = get_student_submission_path(qid, sid, rec.get("name", ""))
+            ungraded_rows.append({
+                "班级": "",
+                "姓名": rec.get("name", ""),
+                "学号": sid,
+                "提交时间": rec.get("submitted_at", ""),
+                "成绩": "",
+                "阶段1相似度": "",
+                "阶段2评分": "",
+                "总分": "",
+                "相似度评价": "",
+                "总评": "",
+                "图样表达": "",
+                "尺寸标注": "",
+                "尺寸公差": "",
+                "表面质量": "",
+                "形位公差": "",
+                "_status": rec.get("status", "uploaded"),
+                "_filename": student_path.name if student_path else "",
+                "_error": rec.get("error", ""),
+            })
+
+    # 给已评分行补上 _status、_filename、_error
+    for row in graded_rows:
+        sid = row.get("学号", "")
+        name = row.get("姓名", "")
+        rec = get_submission_record(qid, sid)
+        row["_status"] = rec.get("status", "graded") if rec else "graded"
+        row["_error"] = rec.get("error", "") if rec else ""
+        # 有 record 用 record 中的名字查文件，否则用 CSV 中的名字查
+        lookup_name = rec.get("name", "") if rec else name
+        student_path = get_student_submission_path(qid, sid, lookup_name)
+        row["_filename"] = student_path.name if student_path else ""
+
+    all_rows = graded_rows + ungraded_rows
+    return {"qid": qid, "grades": all_rows, "columns": FIELDNAMES}
+
+
+@router.post("/grades/{qid}/batch-grade")
+async def batch_grade(request: Request, qid: str):
+    """批量评分：对选中的学生启动后台评分任务"""
+    _require_auth(request)
+    body = await request.json()
+    student_ids: list[str] = body.get("student_ids", [])
+    if not student_ids:
+        raise HTTPException(status_code=400, detail="请选择至少一名学生")
+
+    from services.llm_service import run_two_phase_grading, analyze_structure, analyze_quantitative
+    from services.task_queue import enqueue
+
+    ref_analysis = get_reference_analysis(qid)
+    if ref_analysis is None:
+        raise HTTPException(status_code=400, detail="参考图尚未完成分析，请先分析参考图")
+
+    files = get_question_files(qid)
+    phase1_criteria = files.get("phase1_criteria", "")
+    phase2_criteria = files.get("phase2_criteria", "")
+    qdir = get_question_dir(qid)
+    ref_pdf = qdir / "参考工程图.pdf"
+    struct_tpl = CONFIG_DIR / "结构分析_学生.txt"
+    quant_tpl = CONFIG_DIR / "量化分析_学生.txt"
+
+    def _grade_one(sid: str):
+        from services.question_service import find_student_class, update_submission_record, save_student_analysis
+
+        rec = get_submission_record(qid, sid)
+        if not rec:
+            return
+        name = rec.get("name", "")
+        student_path = get_student_submission_path(qid, sid, name)
+        if student_path is None:
+            return
+
+        # 如果还没有分析，先跑分析
+        stu_analysis = get_student_analysis(qid, sid, name)
+        if stu_analysis is None:
+            try:
+                update_submission_record(qid, sid, name, student_path.stem, "analyzing")
+                structure = analyze_structure(student_path, struct_tpl)
+                quantitative = analyze_quantitative(student_path, quant_tpl, structure)
+                stu_analysis = {"structure": structure, "quantitative": quantitative}
+                save_student_analysis(qid, sid, name, stu_analysis)
+                update_submission_record(qid, sid, name, student_path.stem, "analyzed")
+            except Exception as e:
+                logger.error(f"[{qid}] 自动分析失败 {name}({sid}): {e}")
+                update_submission_record(qid, sid, name, student_path.stem,
+                                         "analyze_failed", error=str(e))
+                return
+
+        # 标记评分中
+        update_submission_record(qid, sid, name, student_path.stem, "grading")
+        try:
+            result = run_two_phase_grading(
+                ref_struct=ref_analysis["structure"],
+                ref_quant=ref_analysis["quantitative"],
+                stu_struct=stu_analysis["structure"],
+                stu_quant=stu_analysis["quantitative"],
+                phase1_criteria=phase1_criteria,
+                phase2_criteria=phase2_criteria,
+                ref_image_path=ref_pdf,
+                stu_image_path=student_path,
+            )
+            grade = result.get("grade", "N/A")
+            class_name = find_student_class(name, sid)
+            save_grade(qid, sid, name, grade, result, class_name)
+            save_result_json(qid, sid, name, result)
+            update_submission_record(qid, sid, name, student_path.stem,
+                                     "graded", grade=grade,
+                                     total_score=str(result.get("total_score", "")))
+            logger.info(f"[{qid}] 批量评分完成: {name}({sid}) → {grade}")
+        except Exception as e:
+            logger.error(f"[{qid}] 批量评分失败 {name}({sid}): {e}")
+            update_submission_record(qid, sid, name, student_path.stem,
+                                     "grade_failed", error=str(e))
+
+    def _batch_task():
+        for sid in student_ids:
+            _grade_one(sid)
+
+    enqueue(5, _batch_task)
+    return {"ok": True, "count": len(student_ids)}
+
+
+@router.post("/grades/{qid}/supplement-submission")
+async def supplement_submission(
+    request: Request,
+    qid: str,
+    name: str = Form(...),
+    student_id: str = Form(...),
+    file: UploadFile = File(...),
+):
+    """教师补充提交学生作业，需校验名单"""
+    _require_auth(request)
+
+    from services.question_service import check_roster
+    ok, msg = check_roster(name, student_id)
+    if not ok:
+        raise HTTPException(status_code=400, detail=msg)
+
+    file_bytes = await file.read()
+    fname = file.filename or "submission.pdf"
+
+    from services.question_service import submit_student_work
+    saved_name = submit_student_work(qid, student_id, name, file_bytes, fname)
+    logger.info(f"[{qid}] 教师补充提交: {name}({student_id}) → {saved_name}")
+    return {"ok": True, "student_filename": saved_name}
+
+
+@router.post("/grades/{qid}/refresh")
+async def refresh_grades(request: Request, qid: str):
+    """扫描磁盘文件，自动发现名单中学生的提交，同步返回最新成绩列表"""
+    _require_auth(request)
+
+    added = sync_submissions_from_disk(qid)
+
+    # 复用成绩查询逻辑
+    graded_rows = read_all_grades(qid)
+    graded_ids = {r.get("学号", "") for r in graded_rows}
+
+    submissions = get_submissions(qid)
+    ungraded_rows: list[dict] = []
+    for sid, rec in submissions.items():
+        if sid not in graded_ids:
+            student_path = get_student_submission_path(qid, sid, rec.get("name", ""))
+            ungraded_rows.append({
+                "班级": "",
+                "姓名": rec.get("name", ""),
+                "学号": sid,
+                "提交时间": rec.get("submitted_at", ""),
+                "成绩": "",
+                "阶段1相似度": "",
+                "阶段2评分": "",
+                "总分": "",
+                "相似度评价": "",
+                "总评": "",
+                "图样表达": "",
+                "尺寸标注": "",
+                "尺寸公差": "",
+                "表面质量": "",
+                "形位公差": "",
+                "_status": rec.get("status", "uploaded"),
+                "_filename": student_path.name if student_path else "",
+                "_error": rec.get("error", ""),
+            })
+
+    for row in graded_rows:
+        sid = row.get("学号", "")
+        name = row.get("姓名", "")
+        rec = get_submission_record(qid, sid)
+        row["_status"] = rec.get("status", "graded") if rec else "graded"
+        row["_error"] = rec.get("error", "") if rec else ""
+        lookup_name = rec.get("name", "") if rec else name
+        student_path = get_student_submission_path(qid, sid, lookup_name)
+        row["_filename"] = student_path.name if student_path else ""
+
+    all_rows = graded_rows + ungraded_rows
+    return {"qid": qid, "grades": all_rows, "columns": FIELDNAMES, "added": added}
+
+
+@router.put("/grades/{qid}/{student_id}")
+async def edit_grade(request: Request, qid: str, student_id: str):
+    """修改单个学生的成绩字段"""
+    _require_auth(request)
+    body = await request.json()
+    row = get_student_grade(qid, student_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="未找到该学生成绩")
+
+    # 更新指定字段
+    for key in body:
+        if key in FIELDNAMES or key in ("成绩", "阶段1相似度", "阶段2评分", "总分",
+                                         "总评", "图样表达", "尺寸标注", "尺寸公差",
+                                         "表面质量", "形位公差", "相似度评价"):
+            row[key] = str(body[key]) if body[key] is not None else ""
+
+    from services.question_service import find_student_class
+    class_name = find_student_class(row.get("姓名", ""), student_id)
+    save_grade(qid, student_id, row.get("姓名", ""), row.get("成绩", ""),
+               {k: row.get(k, "") for k in ("phase1_similarity", "phase2_criteria",
+                "total_score", "phase1_comment", "总评", "图样表达",
+                "尺寸标注", "尺寸公差", "表面质量", "形位公差")},
+               class_name)
+    return {"ok": True}
+
+
+@router.get("/student-preview/{qid}/{student_id}")
+async def teacher_student_preview(request: Request, qid: str, student_id: str):
+    """教师查看学生提交的工程图预览（优先 PNG，回退实时转换）"""
+    _require_auth(request)
+    from fastapi.responses import FileResponse
+
+    rec = get_submission_record(qid, student_id)
+    if not rec:
+        raise HTTPException(status_code=404, detail="该学生未提交作业")
+    name = rec.get("name", "")
+
+    # 优先找预生成的 PNG
+    from services.question_service import get_student_dir, _sanitize_filename_part
+    sdir = get_student_dir(qid)
+    safe_name = _sanitize_filename_part(name)
+    safe_id = _sanitize_filename_part(student_id)
+    png_path = sdir / f"{safe_name}_{safe_id}.png"
+    if png_path.exists():
+        return FileResponse(str(png_path), media_type="image/png")
+
+    # 回退：实时转换
+    student_path = get_student_submission_path(qid, student_id, name)
+    if student_path is None:
+        raise HTTPException(status_code=404, detail="提交文件不存在")
+    from services.llm_service import image_to_base64
+    import base64
+    from fastapi.responses import Response
+    b64 = image_to_base64(student_path)
+    img_bytes = base64.b64decode(b64)
+    return Response(content=img_bytes, media_type="image/jpeg")
 
 
 # ── 系统设置 ─────────────────────────────────────────────
