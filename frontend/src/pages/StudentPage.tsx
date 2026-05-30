@@ -85,7 +85,7 @@ export default function StudentPage() {
   const [question, setQuestion] = useState<Question | null>(null);
 
   // 提交
-  const [file, setFile] = useState<File | null>(null);
+  const [_file, setFile] = useState<File | null>(null);
   const [result, setResult] = useState<GradeResult | null>(null);
   const [studentFilename, setStudentFilename] = useState("");
   const [submitTs, setSubmitTs] = useState(0);
@@ -609,8 +609,8 @@ export default function StudentPage() {
                   <div className="grid grid-cols-2 gap-3 mb-3">
                     <div>
                       <p className="text-xs text-gray-500 mb-1">参考工程图</p>
-                      <img src={getTeacherPreviewUrl(selectedQid!, question.files.reference_pdf, submitTs)} alt="参考图" className="w-full rounded border cursor-pointer hover:opacity-90"
-                        onClick={() => openLightbox(getTeacherPreviewUrl(selectedQid!, question.files.reference_pdf, submitTs))} />
+                      <img src={getTeacherPreviewUrl(selectedQid!, question.files?.reference_pdf || "", submitTs)} alt="参考图" className="w-full rounded border cursor-pointer hover:opacity-90"
+                        onClick={() => openLightbox(getTeacherPreviewUrl(selectedQid!, question.files?.reference_pdf || "", submitTs))} />
                     </div>
                     <div>
                       <p className="text-xs text-gray-500 mb-1">你的作业</p>

@@ -9,7 +9,7 @@
 Session 存储：
 - 内存优先（快速路径），文件后备（多 worker 共享）
 - 文件位置：DATA_DIR/.sessions/{token}.json
-- 超时时间：4 小时
+- 超时时间：30 秒无操作断开
 """
 
 from __future__ import annotations
@@ -25,9 +25,14 @@ from config import read_settings, write_settings, DATA_DIR
 
 logger = logging.getLogger(__name__)
 
-# ── Session 配置 ──────────────────────────────────────────
-_sessions: dict[str, datetime] = {}          # 内存缓存：token → 创建时间
-SESSION_TIMEOUT = timedelta(hours=4)          # 超时 4 小时
+# ── 教师 Session 配置 ──────────────────────────────────────
+_teacher_sessions: dict[str, datetime] = {}    # 内存缓存：token → 最后活跃时间
+TEACHER_SESSION_TIMEOUT = timedelta(minutes=30)  # 30分钟无操作自动断开
+
+# ── 学生 Session 配置 ──────────────────────────────────────
+_student_sessions: dict[str, datetime] = {}    # 内存缓存：token → 最后活跃时间
+STUDENT_SESSION_TIMEOUT = timedelta(minutes=1)  # 1分钟无操作自动断开
+
 _SESSIONS_DIR = DATA_DIR / ".sessions"        # 持久化目录
 
 # 过期文件清理间隔（秒），避免每次请求都扫描目录
@@ -123,32 +128,45 @@ def _cleanup_expired_sessions() -> None:
 # ── Session 公开接口 ─────────────────────────────────────
 
 def create_session() -> str:
-    """创建新 session，写入内存和文件"""
+    """创建教师 session，写入内存和文件"""
     _cleanup_expired_sessions()
     token = secrets.token_hex(32)
     now = datetime.now()
-    _sessions[token] = now
+    _teacher_sessions[token] = now
 
     _SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
     _session_file(token).write_text(
-        json.dumps({"created_at": now.isoformat()}), encoding="utf-8"
+        json.dumps({"created_at": now.isoformat(), "type": "teacher"}), encoding="utf-8"
     )
-    logger.info(f"Session 已创建: {token[:8]}…")
+    logger.info(f"教师 Session 已创建: {token[:8]}…")
     return token
 
 
 def validate_session(token: str) -> bool:
-    """校验 session 是否有效。内存优先，文件后备（多 worker 共享）。"""
-    # 1. 内存命中（快速路径，单 worker 场景）
-    if token in _sessions:
-        if datetime.now() - _sessions[token] > SESSION_TIMEOUT:
-            del _sessions[token]
+    """校验教师 session 是否有效"""
+    return _validate(token, _teacher_sessions, TEACHER_SESSION_TIMEOUT)
+
+
+def destroy_session(token: str) -> None:
+    """销毁 session（内存 + 文件）"""
+    _teacher_sessions.pop(token, None)
+    _student_sessions.pop(token, None)
+    _session_file(token).unlink(missing_ok=True)
+    logger.info(f"Session 已销毁: {token[:8]}…")
+
+
+def _validate(token: str, store: dict[str, datetime], timeout: timedelta) -> bool:
+    """校验 session。内存优先，文件后备"""
+    # 1. 内存命中
+    if token in store:
+        if datetime.now() - store[token] > timeout:
+            del store[token]
             _session_file(token).unlink(missing_ok=True)
             return False
-        _sessions[token] = datetime.now()  # 续期
+        store[token] = datetime.now()  # 续期
         return True
 
-    # 2. 内存未命中，尝试从文件加载（多 worker 共享 session）
+    # 2. 文件后备
     sf = _session_file(token)
     if not sf.exists():
         return False
@@ -158,17 +176,42 @@ def validate_session(token: str) -> bool:
     except Exception:
         return False
 
-    if datetime.now() - created > SESSION_TIMEOUT:
+    if datetime.now() - created > timeout:
         sf.unlink(missing_ok=True)
         return False
 
-    # 加载到内存，避免下次再读文件
-    _sessions[token] = datetime.now()
+    store[token] = datetime.now()
     return True
 
 
-def destroy_session(token: str) -> None:
-    """销毁 session（内存 + 文件）"""
-    _sessions.pop(token, None)
-    _session_file(token).unlink(missing_ok=True)
-    logger.info(f"Session 已销毁: {token[:8]}…")
+# ── 学生 Session ───────────────────────────────────────────
+
+def create_student_session(name: str, student_id: str) -> str:
+    """创建学生 session，关联姓名和学号"""
+    _cleanup_expired_sessions()
+    token = secrets.token_hex(32)
+    now = datetime.now()
+    _student_sessions[token] = now
+
+    _SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+    _session_file(token).write_text(
+        json.dumps({"created_at": now.isoformat(), "type": "student", "name": name, "student_id": student_id}), encoding="utf-8"
+    )
+    logger.info(f"学生 Session 已创建: {name}({student_id}) → {token[:8]}…")
+    return token
+
+
+def validate_student_session(token: str) -> bool:
+    """校验学生 session 是否有效"""
+    return _validate(token, _student_sessions, STUDENT_SESSION_TIMEOUT)
+
+
+def get_student_session(token: str) -> dict | None:
+    """获取学生 session 关联的姓名和学号"""
+    sf = _session_file(token)
+    if not sf.exists():
+        return None
+    try:
+        return json.loads(sf.read_text(encoding="utf-8"))
+    except Exception:
+        return None

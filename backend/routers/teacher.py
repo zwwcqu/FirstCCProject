@@ -82,7 +82,9 @@ def _run_reference_analysis(qid: str) -> None:
         save_reference_analysis(qid, {"structure": structure, "quantitative": quantitative})
         logger.info(f"[{qid}] 参考图分析完成并已保存")
 
-    enqueue(0, _task)  # priority=0 教师最高
+    enqueue(0, _task,
+            task_key=f"ref_analyze:{qid}",
+            task_info={"type": "ref_analyze", "qid": qid})
 
 
 # ── 登录 / 登出 ──────────────────────────────────────────
@@ -262,12 +264,14 @@ async def get_grades(request: Request, qid: str):
                 "阶段2评分": "",
                 "总分": "",
                 "相似度评价": "",
+                "阶段2评语": "",
                 "总评": "",
                 "图样表达": "",
                 "尺寸标注": "",
                 "尺寸公差": "",
                 "表面质量": "",
                 "形位公差": "",
+                "技术要求": "",
                 "_status": rec.get("status", "uploaded"),
                 "_filename": student_path.name if student_path else "",
                 "_error": rec.get("error", ""),
@@ -372,8 +376,9 @@ async def batch_grade(request: Request, qid: str):
         for sid in student_ids:
             _grade_one(sid)
 
-    enqueue(5, _batch_task)
-    return {"ok": True, "count": len(student_ids)}
+    enqueue(5, _batch_task,
+            task_key=f"batch_grade:{qid}",
+            task_info={"type": "batch_grade", "qid": qid, "count": len(student_ids)})
 
 
 @router.post("/grades/{qid}/batch-clear")
@@ -459,12 +464,14 @@ async def refresh_grades(request: Request, qid: str):
                 "阶段2评分": "",
                 "总分": "",
                 "相似度评价": "",
+                "阶段2评语": "",
                 "总评": "",
                 "图样表达": "",
                 "尺寸标注": "",
                 "尺寸公差": "",
                 "表面质量": "",
                 "形位公差": "",
+                "技术要求": "",
                 "_status": rec.get("status", "uploaded"),
                 "_filename": student_path.name if student_path else "",
                 "_error": rec.get("error", ""),
@@ -495,19 +502,50 @@ async def edit_grade(request: Request, qid: str, student_id: str):
 
     # 更新指定字段
     for key in body:
-        if key in FIELDNAMES or key in ("成绩", "阶段1相似度", "阶段2评分", "总分",
-                                         "总评", "图样表达", "尺寸标注", "尺寸公差",
-                                         "表面质量", "形位公差", "相似度评价"):
+        if key in FIELDNAMES:
             row[key] = str(body[key]) if body[key] is not None else ""
 
     from services.question_service import find_student_class
     class_name = find_student_class(row.get("姓名", ""), student_id)
+    # 通过 CSV 列名反向映射回 comments dict
+    comments = {
+        "phase1_similarity": row.get("阶段1相似度", ""),
+        "phase2_criteria": row.get("阶段2评分", ""),
+        "total_score": row.get("总分", ""),
+        "phase1_comment": row.get("相似度评价", ""),
+        "phase2_comment": row.get("阶段2评语", ""),
+        "总评": row.get("总评", ""),
+        "图样表达": row.get("图样表达", ""),
+        "尺寸标注": row.get("尺寸标注", ""),
+        "尺寸公差": row.get("尺寸公差", ""),
+        "表面质量": row.get("表面质量", ""),
+        "形位公差": row.get("形位公差", ""),
+        "技术要求": row.get("技术要求", ""),
+        "教师评语": row.get("教师评语", ""),
+    }
     save_grade(qid, student_id, row.get("姓名", ""), row.get("成绩", ""),
-               {k: row.get(k, "") for k in ("phase1_similarity", "phase2_criteria",
-                "total_score", "phase1_comment", "总评", "图样表达",
-                "尺寸标注", "尺寸公差", "表面质量", "形位公差")},
-               class_name)
+               comments, class_name)
     return {"ok": True}
+
+
+@router.get("/student-analysis/{qid}/{student_id}")
+async def teacher_student_analysis(request: Request, qid: str, student_id: str, name: str = ""):
+    """教师查看学生的图面分析结果（结构分析 + 量化分析）"""
+    _require_auth(request)
+    from services.question_service import get_student_analysis, get_submission_record
+
+    # 尝试从提交记录中获取姓名
+    if not name:
+        rec = get_submission_record(qid, student_id)
+        if rec:
+            name = rec.get("name", "")
+    if not name:
+        raise HTTPException(status_code=400, detail="无法确定学生姓名")
+
+    analysis = get_student_analysis(qid, student_id, name)
+    if analysis is None:
+        return {"ok": True, "ready": False, "analysis": None}
+    return {"ok": True, "ready": True, "analysis": analysis}
 
 
 @router.get("/student-preview/{qid}/{student_id}")
@@ -611,6 +649,129 @@ async def test_llm_connection(request: Request):
         return {"ok": True, "message": f"连接成功，模型: {model}"}
     except Exception as e:
         return {"ok": False, "message": f"连接失败: {str(e)}"}
+
+
+@router.post("/settings/change-password")
+async def change_password_handler(request: Request):
+    """修改密码：需验证当前密码正确后才允许修改"""
+    _require_auth(request)
+    body = await request.json()
+    current = (body.get("current_password") or "").strip()
+    new = (body.get("new_password") or "").strip()
+
+    if not current:
+        raise HTTPException(status_code=400, detail="请输入当前密码")
+    if not new:
+        raise HTTPException(status_code=400, detail="请输入新密码")
+
+    if not verify_password(current):
+        raise HTTPException(status_code=403, detail="当前密码错误")
+
+    change_password(new)
+    logger.info("教师密码已通过验证后修改")
+    return {"ok": True}
+
+
+@router.post("/settings/query-model")
+async def query_current_model(request: Request):
+    """查询当前激活模型的详细信息。读取 settings 中的当前配置，向 API 查询模型详情并验证可用性"""
+    _require_auth(request)
+    settings = read_settings()
+    models = settings.get("models", [])
+    idx = settings.get("llm_active", 0)
+    if not models or idx >= len(models):
+        return {"ok": False, "message": "没有激活的模型配置"}
+    cfg = models[idx]
+    base_url = (cfg.get("api_base") or "").strip()
+    api_key = (cfg.get("api_key") or "").strip()
+    model_id = (cfg.get("model") or "").strip()
+
+    if not base_url:
+        return {"ok": False, "message": "当前模型未配置 API 地址"}
+
+    from openai import OpenAI
+    client = OpenAI(base_url=base_url, api_key=api_key, timeout=10)
+
+    model_info = None
+    source = "unknown"
+
+    # 尝试获取模型详情
+    if model_id:
+        try:
+            info = client.models.retrieve(model_id)
+            model_info = {"id": info.id, "owned_by": getattr(info, "owned_by", ""), "created": getattr(info, "created", None)}
+            source = "retrieve"
+        except Exception:
+            pass
+
+    # retrieve 失败则尝试从列表中匹配
+    if model_info is None:
+        try:
+            all_models = client.models.list()
+            for m in all_models.data:
+                if model_id and m.id == model_id:
+                    model_info = {"id": m.id, "owned_by": getattr(m, "owned_by", ""), "created": getattr(m, "created", None)}
+                    source = "list"
+                    break
+            if model_info is None and all_models.data:
+                source = "list"
+                if not model_id:
+                    model_id = all_models.data[0].id
+                    model_info = {"id": model_id, "owned_by": "", "created": None}
+        except Exception:
+            pass
+
+    # 验证可用性
+    available = False
+    test_error = ""
+    if model_id:
+        try:
+            client.chat.completions.create(
+                model=model_id,
+                messages=[{"role": "user", "content": "Hi"}],
+                max_tokens=5,
+            )
+            available = True
+        except Exception as e:
+            test_error = str(e)
+
+    return {
+        "ok": True,
+        "model": model_id or "(自动检测)",
+        "api_base": base_url,
+        "model_info": model_info,
+        "available": available,
+        "test_error": test_error if not available else "",
+        "source": source,
+    }
+
+
+@router.get("/settings/queue-status")
+async def get_queue_status(request: Request):
+    """查询 LLM 任务队列状态（活跃任务列表 + 去重信息）"""
+    _require_auth(request)
+    from services.task_queue import get_queue_info
+    info = get_queue_info()
+    return {"ok": True, **info}
+
+
+@router.post("/settings/queue-clear")
+async def clear_queue_handler(request: Request):
+    """清空任务队列中所有等待中的任务（不影响正在执行的）"""
+    _require_auth(request)
+    from services.task_queue import clear_queue
+    count = clear_queue()
+    logger.info(f"教师手动清空队列，移除 {count} 个等待任务")
+    return {"ok": True, "cleared": count}
+
+
+@router.post("/settings/restart")
+async def restart_service(request: Request):
+    """重启后端服务（利用 uvicorn --reload 自动重启）"""
+    _require_auth(request)
+    import sys
+    logger.info("收到重启指令，服务即将重启…")
+    sys.exit(3)  # uvicorn reloader 检测到 exit code 3 会重启 worker
 
 
 # ── 文件服务 ─────────────────────────────────────────────

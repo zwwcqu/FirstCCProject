@@ -178,6 +178,10 @@ export function getTeacherStudentPreviewUrl(qid: string, studentId: string): str
   return `${BASE}/api/teacher/student-preview/${qid}/${studentId}`;
 }
 
+export function getStudentAnalysis(qid: string, studentId: string, name: string) {
+  return api(`/api/teacher/student-analysis/${qid}/${studentId}?name=${encodeURIComponent(name)}`);
+}
+
 // --- Roster (全局 StudentInfo) ---
 export function getClasses() {
   return api("/api/teacher/roster/classes");
@@ -209,6 +213,29 @@ export function triggerAnalysis(qid: string) {
 
 export function getAnalysisResult(qid: string) {
   return api(`/api/teacher/questions/${qid}/analysis`);
+}
+
+export function restartService() {
+  return api("/api/teacher/settings/restart", { method: "POST" });
+}
+
+export function queryCurrentModel() {
+  return api("/api/teacher/settings/query-model", { method: "POST" });
+}
+
+export function changePassword(currentPassword: string, newPassword: string) {
+  return api("/api/teacher/settings/change-password", {
+    method: "POST",
+    body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
+  });
+}
+
+export function getQueueStatus() {
+  return api("/api/teacher/settings/queue-status");
+}
+
+export function clearQueue() {
+  return api("/api/teacher/settings/queue-clear", { method: "POST" });
 }
 
 export function downloadRosterTemplate() {

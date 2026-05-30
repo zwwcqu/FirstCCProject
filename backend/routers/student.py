@@ -25,6 +25,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Request, UploadFile, File, Form
 from fastapi.responses import FileResponse
 
+from auth import create_student_session, validate_student_session, get_student_session
 from config import CONFIG_DIR, get_question_dir as _get_question_dir
 from services.question_service import (
     list_questions,
@@ -103,6 +104,38 @@ async def check_identity(request: Request):
         return {"ok": False, "message": msg}
     class_name = find_student_class(name, student_id)
     return {"ok": True, "message": "", "class_name": class_name}
+
+
+@router.post("/login")
+async def student_login(request: Request):
+    """学生登录：验证姓名+学号，返回 session token（1分钟超时）"""
+    body = await request.json()
+    name = (body.get("name") or "").strip()
+    student_id = (body.get("student_id") or "").strip()
+    if not name or not student_id:
+        raise HTTPException(status_code=400, detail="姓名和学号不能为空")
+    from services.question_service import check_roster, find_student_class
+    ok, msg = check_roster(name, student_id)
+    if not ok:
+        raise HTTPException(status_code=401, detail=msg)
+    token = create_student_session(name, student_id)
+    class_name = find_student_class(name, student_id)
+    return {"ok": True, "token": token, "class_name": class_name}
+
+
+def _require_student_login(request: Request, expected_name: str = "", expected_sid: str = "") -> dict:
+    """校验学生 session token，从 Cookie 或 Authorization header 中提取"""
+    token = request.cookies.get("student_token") or ""
+    if not token:
+        auth = request.headers.get("Authorization", "")
+        if auth.startswith("Bearer "):
+            token = auth[7:]
+    if not token or not validate_student_session(token):
+        raise HTTPException(status_code=401, detail="登录已过期，请重新输入姓名学号")
+    info = get_student_session(token)
+    if info is None:
+        raise HTTPException(status_code=401, detail="登录已过期")
+    return info
 
 
 # ── 学生个人提交历史 ────────────────────────────────────
@@ -294,7 +327,9 @@ async def start_analysis(
                      CONFIG_DIR / "量化分析_学生.txt",
                      knowledge=kn)
 
-    enqueue(10, _task)
+    enqueue(10, _task,
+            task_key=f"analyze:{qid}:{student_id}",
+            task_info={"type": "analyze", "qid": qid, "name": name, "student_id": student_id})
     return {"ok": True, "status": "processing"}
 
 
@@ -428,7 +463,9 @@ async def grade_submission_handler(
     def _task():
         _run_grade(qid, name, student_id, is_test, stu_data, stu_filename)
 
-    enqueue(10, _task)  # priority=10 学生
+    enqueue(10, _task,
+            task_key=f"grade:{qid}:{student_id}",
+            task_info={"type": "grade", "qid": qid, "name": name, "student_id": student_id})
 
     return {"ok": True, "status": "processing"}
 

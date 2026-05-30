@@ -1,5 +1,49 @@
 # CHANGELOG
 
+## 2026-05-30 ~ 2026-05-31 — 教师端系统设置与任务队列优化
+
+### 模型配置增强（SettingsPage）
+
+- **添加/删除模型** — 支持自由增删改大模型配置（可为 0 个），首模型自动激活，删当前模型自动切到第一个
+- **API Key 掩码** — 默认只显示后 5 位（`••••••••f5c3`），聚焦或点「显示」查看完整，失焦自动掩码
+- **查询当前模型** — 新增 `POST /api/teacher/settings/query-model` 端点，调 API 获取模型详情（ID/提供方/创建时间）、验证可用性
+- **启用即保存** — 点「启用」自动保存到后端 settings.json，无需额外操作
+- **原子写入** — settings.json 改为先写 `.tmp` 再 `os.replace` 原子替换，防进程中断损坏配置
+- **并发数改后提示重启** — 当前模型并发数修改后保存时弹窗确认，自动重启服务
+
+### 密码页独立（PasswordPage）
+
+- 密码修改从 SettingsPage 拆分为独立页面 `/teacher/settings/password`
+- 新增 `POST /api/teacher/settings/change-password` — 必须验证当前密码正确后才允许修改
+- 两个页面 header 选项卡导航：[模型配置] [修改密码]
+
+### 任务队列增强（task_queue）
+
+- **任务去重** — `enqueue()` 新增 `task_key` 参数，相同 key 不会重复入队
+  - 学生分析 `analyze:{qid}:{sid}` / 学生评分 `grade:{qid}:{sid}`
+  - 教师参考图分析 `ref_analyze:{qid}` / 批量评分 `batch_grade:{qid}`
+- **队列状态查询** — `GET /api/teacher/settings/queue-status` 返回活跃任务列表
+- **执行中/排队区分** — `_status: "queued" | "running"`，UI 绿点闪烁 vs 灰点
+- **清空队列** — `POST /api/teacher/settings/queue-clear`，仅清除排队任务，不影响执行中的
+- 系统管理区域每 5 秒自动刷新队列状态
+
+### 查看作业弹窗（TeacherDashboard）
+
+- **参考图分析 → 弹窗** — 分析结果从题目列表下方内联展开改为居中弹窗，浮动图 zIndex 升至 75 避免被遮挡
+- **学生图面分析** — 查看作业弹窗新增学生工程图的结构分析 + 量化分析（在评分内容上方），新增 `GET /api/teacher/student-analysis/{qid}/{sid}` 端点
+- **打印功能** — 参考图分析弹窗、查看作业弹窗均新增「打印」按钮，自动展开折叠详情，使用克隆+body 直挂策略支持完整多页打印
+
+### 文件改动
+
+| 后端 | 前端 |
+|------|------|
+| `auth.py` — Session 30min，学生 session，自动迁移 | `App.tsx` — 新增 `/teacher/settings/password` 路由 |
+| `config.py` — 原子写入 + .tmp 清理 | `api.ts` — queryCurrentModel / changePassword / getQueueStatus / clearQueue / getStudentAnalysis |
+| `routers/student.py` — enqueue 传入 task_key + task_info | `SettingsPage.tsx` — 增删模型、Key 掩码、队列状态、启用即保存、选项卡导航 |
+| `routers/teacher.py` — query-model / change-password / queue-status / queue-clear / student-analysis 5 个新端点 | `PasswordPage.tsx` — **新建**，双密码验证 |
+| `services/task_queue.py` — 去重 / 状态追踪 / 队列清空 / 执行排队区分 | `TeacherDashboard.tsx` — 分析弹窗、学生分析、打印、层级修复 |
+
+
 ## 2026-05-27（二）— 评分流水线重构：预分析 + 分步评分 + UI 改造
 
 ### 架构变更：从一次调用到四步流水线

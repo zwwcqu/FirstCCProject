@@ -57,6 +57,12 @@ def _init_data_dir() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     STUDENT_INFO_DIR.mkdir(parents=True, exist_ok=True)
 
+    # 清理残留的临时文件（写入时崩溃可能导致）
+    tmp_file = SETTINGS_FILE.with_suffix(".tmp")
+    if tmp_file.exists():
+        tmp_file.unlink()
+        logger.info("已清理残留的 settings.tmp")
+
     if not SETTINGS_FILE.exists():
         example = CONFIG_DIR / "settings.example.json"
         if example.exists():
@@ -83,9 +89,11 @@ def read_settings() -> dict:
 
 
 def write_settings(data: dict) -> None:
-    """写入系统设置 JSON"""
-    with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+    """写入系统设置 JSON（原子写入：先写临时文件再替换，防止中断导致数据丢失）"""
+    tmp_path = SETTINGS_FILE.with_suffix(".tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+    tmp_path.replace(SETTINGS_FILE)  # os.replace 在 Unix 上是原子操作
 
 
 # ── 题目索引读写 ────────────────────────────────────────
