@@ -113,13 +113,13 @@ def _cleanup_expired_sessions() -> None:
     _last_cleanup = now
     if not _SESSIONS_DIR.exists():
         return
-    cutoff = datetime.now() - SESSION_TIMEOUT
     for f in _SESSIONS_DIR.iterdir():
         try:
             if f.suffix == ".json":
                 data = json.loads(f.read_text(encoding="utf-8"))
                 created = datetime.fromisoformat(data["created_at"])
-                if created < cutoff:
+                timeout = STUDENT_SESSION_TIMEOUT if data.get("type") == "student" else TEACHER_SESSION_TIMEOUT
+                if datetime.now() - created > timeout:
                     f.unlink(missing_ok=True)
         except Exception:
             pass

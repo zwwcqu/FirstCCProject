@@ -81,15 +81,6 @@ export function startAnalysis(qid: string, name: string, studentId: string, mode
   return api(`/api/student/analyze/${qid}/start`, { method: "POST", body: fd });
 }
 
-export function analyzeSubmission(qid: string, name: string, studentId: string, file: File, mode: "test" | "submit" = "submit") {
-  const fd = new FormData();
-  fd.append("name", name);
-  fd.append("student_id", studentId);
-  fd.append("file", file);
-  fd.append("mode", mode);
-  return api(`/api/student/analyze/${qid}`, { method: "POST", body: fd });
-}
-
 export function gradeSubmission(qid: string, name: string, studentId: string, mode: "test" | "submit" = "submit") {
   const fd = new FormData();
   fd.append("name", name);
@@ -133,7 +124,7 @@ export function getSettings() {
   return api("/api/teacher/settings");
 }
 
-export function updateSettings(data: Record<string, string>) {
+export function updateSettings(data: Record<string, unknown>) {
   return api("/api/teacher/settings", { method: "PUT", body: JSON.stringify(data) });
 }
 
@@ -168,6 +159,10 @@ export function supplementSubmission(qid: string, name: string, studentId: strin
   fd.append("student_id", studentId);
   fd.append("file", file);
   return api(`/api/teacher/grades/${qid}/supplement-submission`, { method: "POST", body: fd });
+}
+
+export function lookupRoster(name: string, studentId: string) {
+  return api(`/api/teacher/roster/lookup?name=${encodeURIComponent(name)}&student_id=${encodeURIComponent(studentId)}`);
 }
 
 export function refreshGrades(qid: string) {
@@ -242,12 +237,14 @@ export function downloadRosterTemplate() {
   window.open(`${BASE}/api/teacher/roster/template`, "_blank");
 }
 
-export function getQuestionFileUrl(qid: string, filename: string): string {
-  return `${BASE}/api/teacher/files/${qid}/${filename}`;
+export function getQuestionFileUrl(qid: string, filename: string, ts?: number): string {
+  const t = ts ? `?t=${ts}` : "";
+  return `${BASE}/api/teacher/files/${qid}/${filename}${t}`;
 }
 
-export function getStudentFileUrl(qid: string, filename: string): string {
-  return `${BASE}/api/student/files/${qid}/${filename}`;
+export function getStudentFileUrl(qid: string, filename: string, ts?: number): string {
+  const t = ts ? `?t=${ts}` : "";
+  return `${BASE}/api/student/files/${qid}/${filename}${t}`;
 }
 
 export function getTeacherPreviewUrl(qid: string, filename: string, ts?: number): string {

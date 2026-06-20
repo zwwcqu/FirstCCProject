@@ -85,9 +85,9 @@ export default function StudentPage() {
   const [question, setQuestion] = useState<Question | null>(null);
 
   // 提交
-  const [_file, setFile] = useState<File | null>(null);
   const [result, setResult] = useState<GradeResult | null>(null);
   const [studentFilename, setStudentFilename] = useState("");
+  const [questionTs, setQuestionTs] = useState(0);  // 题目附图缓存破坏
   const [submitTs, setSubmitTs] = useState(0);
   const [error, setError] = useState("");
 
@@ -185,7 +185,6 @@ export default function StudentPage() {
     setSubmissions([]);
     setSelectedQid(null);
     setQuestion(null);
-    setFile(null);
     setResult(null);
     setAnalysisData(null);
     setSubmitKey(null);
@@ -202,7 +201,6 @@ export default function StudentPage() {
     setAnalysisData(null);
     setSubmitKey(null);
     setSubmitStatus("");
-    setFile(null);
     setStudentFilename("");
     setUploaded(false);
     setUploading(false);
@@ -212,6 +210,7 @@ export default function StudentPage() {
     try {
       const q = await getQuestionDetail(qid);
       setQuestion(q);
+      setQuestionTs(Date.now());
       if (identity && !identity.isTest) {
         // 通过提交记录恢复全部状态
         try {
@@ -228,6 +227,16 @@ export default function StudentPage() {
               const a = await getStudentAnalysisResult(qid, identity.name, identity.id);
               if (a.analysis) setAnalysisData(a.analysis);
             } catch { /* 分析结果文件丢失 */ }
+          } else if (rec.status === "uploaded" && rec.student_filename) {
+            // 文件已上传但分析可能正在进行中，检查后台状态并恢复轮询
+            try {
+              const s = await getSubmitStatus(qid, identity.name, identity.id);
+              if (s.step === "analyze" && (s.status === "queued" || s.status === "analyzing")) {
+                setSubmitKey({ name: identity.name, id: identity.id });
+                // 恢复轮询，等待分析完成
+                resumeAnalysisPolling(qid, identity);
+              }
+            } catch { /* 状态查询失败，忽略 */ }
           }
           // 有成绩则恢复
           if (rec.status === "graded") {
@@ -298,6 +307,45 @@ export default function StudentPage() {
     }
   };
 
+  // ── 步骤2：恢复分析轮询（selectQuestion 时复用）─────────
+
+  const resumeAnalysisPolling = (qid: string, ident: Identity) => {
+    const capturedQid = qid;
+    const capturedKey = { name: ident.name, id: ident.id };
+    const capturedIsTest = ident.isTest;
+
+    setSubmitStatus("analyzing");
+    clearPolling();
+
+    let elapsed = 0;
+    pollRef.current = setInterval(async () => {
+      elapsed += POLL_INTERVAL;
+      if (elapsed > POLL_TIMEOUT) {
+        clearPolling();
+        setSubmitStatus("");
+        setError("分析超时，请重试");
+        return;
+      }
+      try {
+        const s = await getSubmitStatus(capturedQid, capturedKey.name, capturedKey.id);
+        if (s.step === "analyze") {
+          setSubmitStatus(s.status || "");
+        }
+        if (s.step === "analyze" && s.status === "done") {
+          clearPolling();
+          const r = await getStudentAnalysisResult(capturedQid, capturedKey.name, capturedKey.id);
+          setAnalysisData(r.analysis);
+          setSubmitStatus("");
+          if (!capturedIsTest) loadHistory(capturedKey.name, capturedKey.id);
+        } else if (s.step === "analyze" && s.status === "error") {
+          clearPolling();
+          setSubmitStatus("");
+          setError(s.error_message || "处理失败");
+        }
+      } catch { /* 继续轮询 */ }
+    }, POLL_INTERVAL);
+  };
+
   // ── 步骤2：开始分析 ──────────────────────────────────
 
   const handleStartAnalysis = async () => {
@@ -328,14 +376,18 @@ export default function StudentPage() {
         }
         try {
           const s = await getSubmitStatus(capturedQid, capturedKey.name, capturedKey.id);
-          setSubmitStatus(s.status || "");
+          // 只在当前步骤匹配时才更新 UI 状态，避免读到上一步的旧 done
+          if (s.step === "analyze") {
+            setSubmitStatus(s.status || "");
+          }
 
-          if (s.status === "done") {
+          if (s.step === "analyze" && s.status === "done") {
             clearPolling();
             const r = await getStudentAnalysisResult(capturedQid, capturedKey.name, capturedKey.id);
             setAnalysisData(r.analysis);
             setSubmitStatus("");
-          } else if (s.status === "error") {
+            if (capturedIdentity && !capturedIsTest) loadHistory(capturedIdentity.name, capturedIdentity.id);
+          } else if (s.step === "analyze" && s.status === "error") {
             clearPolling();
             setSubmitStatus("");
             setError(s.error_message || "处理失败");
@@ -383,7 +435,11 @@ export default function StudentPage() {
         }
         try {
           const s = await getSubmitStatus(capturedQid, capturedKey.name, capturedKey.id);
-          if (s.status === "done") {
+          // 只在当前步骤匹配时才更新 UI 状态，避免读到上一步的旧 done
+          if (s.step === "grade") {
+            setSubmitStatus(s.status || "");
+          }
+          if (s.step === "grade" && s.status === "done") {
             clearPolling();
             const r = await getStudentResult(capturedQid, capturedKey.id);
             if (r) {
@@ -397,13 +453,11 @@ export default function StudentPage() {
             setGrading(false);
             setSubmitStatus("");
             if (capturedIdentity && !capturedIdentity.isTest) loadHistory(capturedIdentity.name, capturedIdentity.id);
-          } else if (s.status === "error") {
+          } else if (s.step === "grade" && s.status === "error") {
             clearPolling();
             setGrading(false);
             setSubmitStatus("");
             setError(s.error_message || "评分失败");
-          } else {
-            setSubmitStatus(s.status || "");
           }
         } catch { /* 继续轮询 */ }
       }, POLL_INTERVAL);
@@ -517,7 +571,7 @@ export default function StudentPage() {
               <p className="whitespace-pre-wrap text-gray-800">{question.files?.description}</p>
             </div>
             {question.files?.images.map((img) => (
-              <img key={img} src={getQuestionFileUrl(question.id, img)}
+              <img key={img} src={getQuestionFileUrl(question.id, img, questionTs)}
                 alt="题目附图" className="max-w-full rounded border my-2" />
             ))}
             {question.files?.reference_pdf && (
@@ -536,7 +590,7 @@ export default function StudentPage() {
             <div className="mb-4">
               <label className="block text-sm font-medium text-gray-700 mb-1">上传工程图 (PDF/图片)</label>
               <input type="file" accept=".pdf,.png,.jpg,.jpeg,.gif,.webp"
-                onChange={(e) => { const f = e.target.files?.[0]; if (f) { setFile(f); handleUpload(f); } }}
+                onChange={(e) => { const f = e.target.files?.[0]; if (f) { handleUpload(f); } }}
                 className="w-full" />
             </div>
 
@@ -712,14 +766,11 @@ export default function StudentPage() {
               </div>
             </div>
             <div className="bg-yellow-50 rounded p-3">
-              <h4 className="text-sm font-medium text-yellow-700">阶段1：相似度评价</h4>
+              <h4 className="text-sm font-medium text-yellow-700">相似度评价</h4>
               <p className="text-sm mt-1 whitespace-pre-wrap">{(result as any)["相似度评价"] || (result as any).phase1_comment || "-"}</p>
             </div>
-            <div className="bg-blue-50 rounded p-3">
-              <h4 className="text-sm font-medium text-blue-700">阶段2：量化评分评语</h4>
-              <p className="text-sm mt-1 whitespace-pre-wrap">{(result as any)["阶段2评语"] || (result as any).phase2_comment || "-"}</p>
-            </div>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <h4 className="text-sm font-medium text-gray-700 mt-2">量化评价</h4>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-1">
               {["图样表达", "尺寸标注", "尺寸公差", "表面质量", "形位公差", "技术要求"].map((key) => (
                 <div key={key} className="bg-gray-50 rounded p-3">
                   <h4 className="text-sm font-medium text-gray-500">{key}</h4>

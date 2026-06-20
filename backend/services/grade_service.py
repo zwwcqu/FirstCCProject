@@ -132,7 +132,6 @@ def remove_grade(qid: str, student_id: str) -> None:
     csv_path = get_grades_csv_path(qid)
     if not csv_path.exists():
         return
-    import fcntl
     with open(csv_path, "r+", encoding="utf-8-sig", newline="") as f:
         fcntl.flock(f.fileno(), fcntl.LOCK_EX)
         try:

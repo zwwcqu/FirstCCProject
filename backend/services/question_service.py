@@ -142,9 +142,15 @@ def delete_question(qid: str) -> bool:
 # ── 题目文件（附图 / 参考工程图）─────────────────────────
 
 def save_question_image(qid: str, file_bytes: bytes, filename: str) -> str:
-    """保存题目附图，固定命名为 题目图片.* """
+    """保存题目附图，固定命名为 题目图片.*（写入前清除所有旧图，避免不同扩展名残留）"""
     qdir = get_question_dir(qid)
     qdir.mkdir(parents=True, exist_ok=True)
+    # 删除已有的所有题目图片（可能扩展名不同）
+    for old in qdir.glob("题目图片.*"):
+        try:
+            old.unlink()
+        except OSError:
+            pass
     ext = Path(filename).suffix or ".png"
     path = qdir / f"题目图片{ext}"
     path.write_bytes(file_bytes)

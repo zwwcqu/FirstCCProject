@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   checkLogin,
@@ -25,6 +25,7 @@ import {
   getStudentAnalysis,
   supplementSubmission,
   refreshGrades,
+  lookupRoster,
 } from "../api";
 import FloatingImageViewer from "../components/FloatingImageViewer";
 
@@ -60,14 +61,36 @@ export default function TeacherDashboard() {
   const [batchClearing, setBatchClearing] = useState(false);
   const [editingCell, setEditingCell] = useState<{ sid: string; col: string } | null>(null);
   const [editValue, setEditValue] = useState("");
-  const [previewImage, setPreviewImage] = useState<string | null>(null);
-
   // 补充提交弹窗
   const [supplementModal, setSupplementModal] = useState(false);
-  const [supplementName, setSupplementName] = useState("");
-  const [supplementSid, setSupplementSid] = useState("");
   const [supplementFile, setSupplementFile] = useState<File | null>(null);
+  const [supplementParsed, setSupplementParsed] = useState<{ name: string; sid: string; className: string } | null>(null);
+  const [supplementParsing, setSupplementParsing] = useState(false);
   const [supplementSubmitting, setSupplementSubmitting] = useState(false);
+
+  // 从文件名提取学号+姓名
+  const parseFilename = (fname: string): { name: string; sid: string } | null => {
+    const stem = fname.replace(/\.[^.]+$/, "");  // 去扩展名
+    // 尝试分隔符拆分
+    const parts = stem.split(/[_\-\s,，、]+/).filter(Boolean);
+    const tryClassify = (a: string, b: string) => {
+      const isIdLike = (s: string) => /^\d{4,15}$/.test(s) || (/\d/.test(s) && s.replace(/\D/g, "").length / s.length >= 0.7);
+      const isNameLike = (s: string) => /[一-鿿]/.test(s) || (!/\d/.test(s) && s.length >= 2 && s.length <= 6);
+      if (isIdLike(a) && isNameLike(b)) return { sid: a, name: b };
+      if (isNameLike(a) && isIdLike(b)) return { sid: b, name: a };
+      return null;
+    };
+    if (parts.length >= 2) {
+      const r = tryClassify(parts[0], parts[1]);
+      if (r) return r;
+    }
+    // 无分隔符：正则切分
+    let m = stem.match(/^(\d+)([一-鿿].*)$/);
+    if (m) return { sid: m[1], name: m[2] };
+    m = stem.match(/^([一-鿿].*?)(\d+)$/);
+    if (m) return { sid: m[2], name: m[1] };
+    return null;
+  };
   const [refreshing, setRefreshing] = useState(false);
 
   // 查看作业弹窗
@@ -102,6 +125,11 @@ export default function TeacherDashboard() {
   const [knowledge, setKnowledge] = useState("");
   const [image, setImage] = useState<File | null>(null);
   const [refPdf, setRefPdf] = useState<File | null>(null);
+  const [existingImages, setExistingImages] = useState<string[]>([]);
+  const [existingRefPdf, setExistingRefPdf] = useState<string | null>(null);
+
+  const imagePreviewUrl = useMemo(() => (image ? URL.createObjectURL(image) : null), [image]);
+  useEffect(() => () => { if (imagePreviewUrl) URL.revokeObjectURL(imagePreviewUrl); }, [imagePreviewUrl]);
 
   const loadQuestions = useCallback(async () => {
     try {
@@ -155,6 +183,8 @@ export default function TeacherDashboard() {
     setKnowledge("");
     setImage(null);
     setRefPdf(null);
+    setExistingImages([]);
+    setExistingRefPdf(null);
     setEditingId(null);
     setShowForm(false);
   };
@@ -221,6 +251,8 @@ export default function TeacherDashboard() {
       setKnowledge(detail.files?.knowledge || "");
       setImage(null);
       setRefPdf(null);
+      setExistingImages(detail.files?.images || []);
+      setExistingRefPdf(detail.files?.reference_pdf || null);
       setShowForm(true);
     } catch (e: any) {
       alert(e.message);
@@ -298,19 +330,42 @@ export default function TeacherDashboard() {
     }
   };
 
+  // 选择文件后解析文件名并查询班级
+  const handleSupplementFile = async (file: File) => {
+    setSupplementFile(file);
+    setSupplementParsed(null);
+    setSupplementParsing(true);
+    try {
+      const parsed = parseFilename(file.name);
+      if (!parsed) {
+        setSupplementParsing(false);
+        return;  // 无法解析，让教师在下方手动输入
+      }
+      const res = await lookupRoster(parsed.name, parsed.sid);
+      setSupplementParsed({
+        name: parsed.name,
+        sid: parsed.sid,
+        className: (res as any).found ? (res as any).class : "",
+      });
+    } catch {
+      // 查询失败，仍然显示解析结果（无班级）
+    } finally {
+      setSupplementParsing(false);
+    }
+  };
+
   const handleSupplement = async () => {
-    if (!gradesView || !supplementName.trim() || !supplementSid.trim() || !supplementFile) {
-      alert("请填写姓名、学号并选择文件");
+    if (!gradesView || !supplementFile || !supplementParsed) {
+      alert("请选择文件并确认学生信息");
       return;
     }
     setSupplementSubmitting(true);
     try {
-      await supplementSubmission(gradesView, supplementName.trim(), supplementSid.trim(), supplementFile);
+      await supplementSubmission(gradesView, supplementParsed.name, supplementParsed.sid, supplementFile);
       setSupplementModal(false);
-      setSupplementName("");
-      setSupplementSid("");
       setSupplementFile(null);
-      handleViewGrades(gradesView); // 刷新成绩列表
+      setSupplementParsed(null);
+      handleViewGrades(gradesView);
     } catch (e: any) {
       alert(e.message);
     } finally {
@@ -811,10 +866,30 @@ export default function TeacherDashboard() {
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">题目附图</label>
                   <input type="file" accept="image/*" onChange={(e) => setImage(e.target.files?.[0] || null)} />
+                  <div className="mt-2">
+                    {image && imagePreviewUrl ? (
+                      <img src={imagePreviewUrl} alt="题目附图预览" className="w-full rounded border" />
+                    ) : existingImages.length > 0 ? (
+                      <img src={getTeacherPreviewUrl(editingId!, existingImages[0])} alt="题目附图" className="w-full rounded border" />
+                    ) : (
+                      <p className="text-xs text-gray-400 py-4 text-center border rounded bg-gray-50">请提交文件</p>
+                    )}
+                  </div>
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">参考工程图 (PDF)</label>
                   <input type="file" accept=".pdf" onChange={(e) => setRefPdf(e.target.files?.[0] || null)} />
+                  <div className="mt-2">
+                    {refPdf ? (
+                      <div className="text-xs text-blue-600 py-3 px-3 bg-blue-50 rounded border border-blue-200">
+                        已选择新文件：{refPdf.name}（保存后生效）
+                      </div>
+                    ) : existingRefPdf ? (
+                      <img src={getTeacherPreviewUrl(editingId!, existingRefPdf)} alt="参考工程图" className="w-full rounded border" />
+                    ) : (
+                      <p className="text-xs text-gray-400 py-4 text-center border rounded bg-gray-50">请提交文件</p>
+                    )}
+                  </div>
                 </div>
               </div>
               <div className="flex justify-end gap-3 mt-6">
@@ -853,7 +928,7 @@ export default function TeacherDashboard() {
                     className="px-3 py-1 border rounded hover:bg-gray-50 text-sm disabled:opacity-50"
                   >{refreshing ? "刷新中…" : "刷新"}</button>
                   <button
-                    onClick={() => { setSupplementModal(true); setSupplementName(""); setSupplementSid(""); setSupplementFile(null); }}
+                    onClick={() => { setSupplementModal(true); setSupplementFile(null); setSupplementParsed(null); }}
                     className="px-3 py-1 bg-orange-500 text-white rounded hover:bg-orange-600 text-sm"
                   >
                     补充提交
@@ -975,48 +1050,63 @@ export default function TeacherDashboard() {
               <h3 className="text-lg font-semibold mb-4">补充提交 - 题{gradesView}</h3>
               <div className="space-y-3">
                 <div>
-                  <label className="block text-sm text-gray-600 mb-1">姓名</label>
-                  <input
-                    type="text"
-                    value={supplementName}
-                    onChange={(e) => setSupplementName(e.target.value)}
-                    className="w-full border rounded px-3 py-2 text-sm"
-                    placeholder="学生姓名"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm text-gray-600 mb-1">学号</label>
-                  <input
-                    type="text"
-                    value={supplementSid}
-                    onChange={(e) => setSupplementSid(e.target.value)}
-                    className="w-full border rounded px-3 py-2 text-sm"
-                    placeholder="学生学号"
-                  />
-                </div>
-                <div>
                   <label className="block text-sm text-gray-600 mb-1">作业文件</label>
                   <input
                     type="file"
                     accept=".pdf,.png,.jpg,.jpeg,.gif,.webp"
-                    onChange={(e) => setSupplementFile(e.target.files?.[0] || null)}
+                    onChange={(e) => {
+                      const f = e.target.files?.[0];
+                      if (f) handleSupplementFile(f);
+                      else { setSupplementFile(null); setSupplementParsed(null); }
+                    }}
                     className="w-full text-sm"
                   />
+                  <p className="text-xs text-gray-400 mt-1">文件名需包含学号和姓名，如 2024001_张三.pdf 或 张三-2024001.png</p>
                 </div>
+
+                {/* 解析结果确认面板 */}
+                {supplementParsing && (
+                  <div className="text-sm text-blue-600 py-2">正在识别学生信息…</div>
+                )}
+                {supplementFile && !supplementParsing && !supplementParsed && (
+                  <div className="bg-yellow-50 rounded p-3 text-sm text-yellow-700">
+                    无法从文件名自动识别学号和姓名，请确保文件名包含学号和姓名（如 2024001_张三.pdf）。
+                  </div>
+                )}
+                {supplementParsed && (
+                  <div className="bg-green-50 rounded p-3 space-y-1.5 text-sm">
+                    <div className="flex justify-between">
+                      <span className="text-gray-500">班别</span>
+                      <span className="font-medium">{supplementParsed.className || "未找到"}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-500">学号</span>
+                      <span className="font-medium font-mono">{supplementParsed.sid}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-500">姓名</span>
+                      <span className="font-medium">{supplementParsed.name}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-500">文件</span>
+                      <span className="text-gray-600 truncate max-w-[200px]">{supplementFile.name}</span>
+                    </div>
+                  </div>
+                )}
               </div>
               <div className="flex justify-end gap-2 mt-4">
                 <button
-                  onClick={() => setSupplementModal(false)}
+                  onClick={() => { setSupplementModal(false); setSupplementFile(null); setSupplementParsed(null); }}
                   className="px-4 py-2 border rounded hover:bg-gray-50 text-sm"
                 >
                   取消
                 </button>
                 <button
                   onClick={handleSupplement}
-                  disabled={supplementSubmitting}
+                  disabled={supplementSubmitting || !supplementParsed}
                   className="px-4 py-2 bg-orange-500 text-white rounded hover:bg-orange-600 disabled:opacity-50 text-sm"
                 >
-                  {supplementSubmitting ? "提交中…" : "提交"}
+                  {supplementSubmitting ? "提交中…" : "确认提交"}
                 </button>
               </div>
             </div>
@@ -1051,18 +1141,6 @@ export default function TeacherDashboard() {
             initialHeight={380}
             zIndex={70}
           />
-        )}
-
-        {/* Student Drawing Preview */}
-        {previewImage && (
-          <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-[60]"
-            onClick={() => setPreviewImage(null)}>
-            <button className="absolute top-4 right-4 text-white text-2xl hover:text-gray-300 z-10"
-              onClick={() => setPreviewImage(null)}>&times;</button>
-            <img src={previewImage} alt="学生工程图"
-              className="max-w-[90vw] max-h-[90vh] object-contain"
-              onClick={(e) => e.stopPropagation()} />
-          </div>
         )}
 
         {/* 查看作业弹窗 */}
@@ -1113,6 +1191,16 @@ export default function TeacherDashboard() {
                       onMouseDown={(e) => e.stopPropagation()}
                       className="px-3 py-1 border rounded hover:bg-gray-50 text-sm">关闭</button>
                   </div>
+                </div>
+
+                {/* 学生工程图 */}
+                <div className="border rounded-lg overflow-hidden bg-gray-100 mb-4">
+                  <img
+                    src={getTeacherStudentPreviewUrl(gradesView, reviewSid)}
+                    alt="学生工程图"
+                    className="w-full"
+                    onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }}
+                  />
                 </div>
 
                 {/* 学生图面分析结果 */}

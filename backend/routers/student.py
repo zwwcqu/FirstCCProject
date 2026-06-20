@@ -327,6 +327,8 @@ async def start_analysis(
                      CONFIG_DIR / "量化分析_学生.txt",
                      knowledge=kn)
 
+    # 在任务入队前立即更新状态，避免前端轮询读到上一步的旧状态
+    set_status(qid, name, student_id, "analyze", "queued")
     enqueue(10, _task,
             task_key=f"analyze:{qid}:{student_id}",
             task_info={"type": "analyze", "qid": qid, "name": name, "student_id": student_id})
@@ -463,6 +465,8 @@ async def grade_submission_handler(
     def _task():
         _run_grade(qid, name, student_id, is_test, stu_data, stu_filename)
 
+    # 在任务入队前立即更新状态，避免前端轮询读到上一步的旧状态
+    set_status(qid, name, student_id, "grade", "queued")
     enqueue(10, _task,
             task_key=f"grade:{qid}:{student_id}",
             task_info={"type": "grade", "qid": qid, "name": name, "student_id": student_id})

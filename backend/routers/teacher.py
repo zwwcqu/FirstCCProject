@@ -372,13 +372,14 @@ async def batch_grade(request: Request, qid: str):
             update_submission_record(qid, sid, name, student_path.stem,
                                      "grade_failed", error=str(e))
 
-    def _batch_task():
-        for sid in student_ids:
-            _grade_one(sid)
-
-    enqueue(5, _batch_task,
-            task_key=f"batch_grade:{qid}",
-            task_info={"type": "batch_grade", "qid": qid, "count": len(student_ids)})
+    # 每个学生独立入队，实现真正的多 worker 并发（单学生内 3 步骤仍顺序执行）
+    for sid in student_ids:
+        rec = get_submission_record(qid, sid)
+        name = rec.get("name", "") if rec else ""
+        # 注意：lambda s=sid 捕获当前值，避免 Python 闭包延迟绑定陷阱
+        enqueue(5, (lambda s: lambda: _grade_one(s))(sid),
+                task_key=f"grade:{qid}:{sid}",
+                task_info={"type": "grade", "qid": qid, "sid": sid, "name": name})
 
 
 @router.post("/grades/{qid}/batch-clear")
@@ -414,6 +415,9 @@ async def batch_clear_grades(request: Request, qid: str):
             cleared += 1
 
     return {"ok": True, "cleared": cleared}
+
+
+@router.post("/grades/{qid}/supplement-submission")
 async def supplement_submission(
     request: Request,
     qid: str,
@@ -859,3 +863,15 @@ async def download_roster_template():
         media_type="text/csv",
         filename="学生名单模版.csv",
     )
+
+
+@router.get("/roster/lookup")
+async def lookup_student(request: Request, name: str = "", student_id: str = ""):
+    """根据姓名+学号查询学生班级"""
+    _require_auth(request)
+    from services.question_service import find_student_class, check_roster
+    ok, _ = check_roster(name.strip(), student_id.strip())
+    if not ok:
+        return {"found": False, "class": ""}
+    class_name = find_student_class(name.strip(), student_id.strip())
+    return {"found": True, "class": class_name}
