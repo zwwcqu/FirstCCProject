@@ -922,8 +922,11 @@ async def restart_service(request: Request):
 # ── 文件服务 ─────────────────────────────────────────────
 
 @router.get("/files/{qid}/{filename}")
-async def serve_question_file(qid: str, filename: str):
-    """直接下载题目目录下的原始文件"""
+async def serve_question_file(qid: str, filename: str, request: Request):
+    """直接下载题目目录下的原始文件（参考工程图需登录）"""
+    # 参考工程图不允许未登录访问（防止学生复制答案）
+    if "参考" in filename or "reference" in filename.lower():
+        _require_auth(request)
     qdir = get_question_dir(qid)
     filepath = qdir / filename
     if not filepath.exists() or not filepath.is_file():
@@ -933,8 +936,11 @@ async def serve_question_file(qid: str, filename: str):
 
 
 @router.get("/preview/{qid}/{filename}")
-async def serve_question_preview(qid: str, filename: str):
-    """将题目 PDF/图片转为 JPEG 预览图（用于前端缩略展示）"""
+async def serve_question_preview(qid: str, filename: str, request: Request):
+    """将题目 PDF/图片转为 JPEG 预览图（用于前端缩略展示，参考工程图需登录）"""
+    # 参考工程图不允许未登录访问（防止学生复制答案）
+    if "参考" in filename or "reference" in filename.lower():
+        _require_auth(request)
     from services.llm_service import image_to_base64
     import base64
     from io import BytesIO

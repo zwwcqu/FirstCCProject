@@ -12,7 +12,6 @@ import {
   checkRoster,
   getSubmissionRecord,
   getQuestionFileUrl,
-  getTeacherPreviewUrl,
   getStudentPreviewUrl,
 } from "../api";
 import FloatingImageViewer from "../components/FloatingImageViewer";
@@ -21,7 +20,7 @@ import FileButton from "../components/FileButton";
 interface Question {
   id: string;
   title: string;
-  files?: { description: string; phase1_criteria: string; phase2_criteria: string; images: string[]; reference_pdf: string | null };
+  files?: { description: string; phase1_criteria: string; phase2_criteria: string; images: string[] };
 }
 
 interface GradeResult {
@@ -582,9 +581,6 @@ export default function StudentPage() {
               <img key={img} src={getQuestionFileUrl(question.id, img, questionTs)}
                 alt="题目附图" className="max-w-full rounded border my-2" />
             ))}
-            {question.files?.reference_pdf && (
-              <p className="text-sm text-gray-500 mt-2">参考工程图已上传（提交后将与参考图对比批阅）</p>
-            )}
           </div>
         )}
 
@@ -669,18 +665,11 @@ export default function StudentPage() {
 {analysisData && (
               <div className="mt-4 border rounded p-3 bg-gray-50 text-xs">
                 <h3 className="text-sm font-semibold mb-3 text-green-700">图面分析完成</h3>
-                {question?.files?.reference_pdf && studentFilename && (
-                  <div className="grid grid-cols-2 gap-3 mb-3">
-                    <div>
-                      <p className="text-xs text-gray-500 mb-1">参考工程图</p>
-                      <img src={getTeacherPreviewUrl(selectedQid!, question.files?.reference_pdf || "", submitTs)} alt="参考图" className="w-full rounded border cursor-pointer hover:opacity-90"
-                        onClick={() => openLightbox(getTeacherPreviewUrl(selectedQid!, question.files?.reference_pdf || "", submitTs))} />
-                    </div>
-                    <div>
-                      <p className="text-xs text-gray-500 mb-1">你的作业</p>
-                      <img src={getStudentPreviewUrl(selectedQid!, studentFilename, submitTs)} alt="学生工程图" className="w-full rounded border cursor-pointer hover:opacity-90"
-                        onClick={() => openLightbox(getStudentPreviewUrl(selectedQid!, studentFilename, submitTs))} />
-                    </div>
+                {studentFilename && (
+                  <div className="mb-3">
+                    <p className="text-xs text-gray-500 mb-1">你的作业</p>
+                    <img src={getStudentPreviewUrl(selectedQid!, studentFilename, submitTs)} alt="学生工程图" className="max-w-full rounded border cursor-pointer hover:opacity-90" style={{ maxHeight: "300px" }}
+                      onClick={() => openLightbox(getStudentPreviewUrl(selectedQid!, studentFilename, submitTs))} />
                   </div>
                 )}
 

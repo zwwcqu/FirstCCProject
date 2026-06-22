@@ -85,6 +85,7 @@ async def get_question_detail(qid: str):
     if q is None:
         raise HTTPException(status_code=404, detail="题目不存在")
     files = get_question_files(qid)
+    files.pop("reference_pdf", None)  # 不向学生暴露参考工程图，防止被复制
     q["files"] = files
     return q
 
