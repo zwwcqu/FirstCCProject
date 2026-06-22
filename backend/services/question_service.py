@@ -278,7 +278,10 @@ def submit_student_work(qid: str, student_id: str, name: str,
         from services.llm_service import save_as_png
         save_as_png(Path(student_path), Path(student_path).with_suffix(".png"))
 
-    update_submission_record(qid, student_id, name, file_stem, "uploaded")
+    # 提交时即记录班级信息
+    class_name = find_student_class(name, student_id)
+    update_submission_record(qid, student_id, name, file_stem, "uploaded",
+                             class_name=class_name)
     return saved_name
 
 
@@ -548,9 +551,12 @@ def reject_if_fake(qid: str, student_id: str, name: str, file_path: Path,
         return False
 
     logger.warning(f"[{qid}] 虚假作业: {name}({student_id}) — {reason}")
+    # 从提交记录读取班级（上传时已记录）
+    rec = get_submission_record(qid, student_id)
+    class_name = rec.get("class_name", "") if rec else ""
     save_grade(qid, student_id, name, "F", {
         "总评": "作业不符合提交规范，请重新提交。",
-    })
+    }, class_name=class_name)
     if filename_stem:
         update_submission_record(qid, student_id, name, filename_stem,
                                  "graded", grade="F", total_score="0")

@@ -259,7 +259,7 @@ async def get_grades(request: Request, qid: str):
         if sid not in graded_ids:
             student_path = get_student_submission_path(qid, sid, rec.get("name", ""))
             ungraded_rows.append({
-                "班级": "",
+                "班级": rec.get("class_name", ""),
                 "姓名": rec.get("name", ""),
                 "学号": sid,
                 "提交时间": rec.get("submitted_at", ""),
@@ -281,13 +281,15 @@ async def get_grades(request: Request, qid: str):
                 "_error": rec.get("error", ""),
             })
 
-    # 给已评分行补上 _status、_filename、_error
+    # 给已评分行补上 _status、_filename、_error，班级空时从记录补
     for row in graded_rows:
         sid = row.get("学号", "")
         name = row.get("姓名", "")
         rec = get_submission_record(qid, sid)
         row["_status"] = rec.get("status", "graded") if rec else "graded"
         row["_error"] = rec.get("error", "") if rec else ""
+        if not row.get("班级", "") and rec:
+            row["班级"] = rec.get("class_name", "")
         # 有 record 用 record 中的名字查文件，否则用 CSV 中的名字查
         lookup_name = rec.get("name", "") if rec else name
         student_path = get_student_submission_path(qid, sid, lookup_name)
@@ -308,6 +310,10 @@ async def batch_grade(request: Request, qid: str):
 
     from services.llm_service import run_two_phase_grading, analyze_structure, analyze_quantitative
     from services.task_queue import enqueue
+
+    # 先同步磁盘文件到 submissions.json（补充提交的学生可能不在记录中）
+    from services.question_service import sync_submissions_from_disk
+    sync_submissions_from_disk(qid)
 
     ref_analysis = get_reference_analysis(qid)
     if ref_analysis is None:
@@ -471,7 +477,7 @@ async def refresh_grades(request: Request, qid: str):
         if sid not in graded_ids:
             student_path = get_student_submission_path(qid, sid, rec.get("name", ""))
             ungraded_rows.append({
-                "班级": "",
+                "班级": rec.get("class_name", ""),
                 "姓名": rec.get("name", ""),
                 "学号": sid,
                 "提交时间": rec.get("submitted_at", ""),
@@ -499,6 +505,8 @@ async def refresh_grades(request: Request, qid: str):
         rec = get_submission_record(qid, sid)
         row["_status"] = rec.get("status", "graded") if rec else "graded"
         row["_error"] = rec.get("error", "") if rec else ""
+        if not row.get("班级", "") and rec:
+            row["班级"] = rec.get("class_name", "")
         lookup_name = rec.get("name", "") if rec else name
         student_path = get_student_submission_path(qid, sid, lookup_name)
         row["_filename"] = student_path.name if student_path else ""

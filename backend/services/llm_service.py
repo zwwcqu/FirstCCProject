@@ -202,7 +202,12 @@ def check_if_photo(image_path: Path) -> tuple[bool, str]:
         if any(s in software.lower() for s in photo_software):
             return True, f"检测到修图软件: {software}"
 
-    # 2. 色彩分布检测：缩略图采样统计
+    # 2. 宽高比检测：工程图应符合标准纸张比例
+    ratio = w / h if w > h else h / w
+    if not (1.39 < ratio < 1.43):
+        return True, f"宽高比异常（{ratio:.3f}），标准工程图应为A4/A3纸张比例（1.39~1.43）"
+
+    # 3. 色彩分布检测：缩略图采样统计
     small = img.convert("RGB").resize((200, 200))
     colored = 0
     pure_white = 0
@@ -215,7 +220,7 @@ def check_if_photo(image_path: Path) -> tuple[bool, str]:
 
         if max_diff > 18:
             colored += 1
-        if gray > 240:
+        if gray > 250:
             pure_white += 1
 
     color_rate = colored / total_small
