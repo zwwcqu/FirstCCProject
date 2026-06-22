@@ -534,6 +534,29 @@ def _read_csv(path: Path) -> list[dict]:
         return list(csv.DictReader(f))
 
 
+def reject_if_fake(qid: str, student_id: str, name: str, file_path: Path,
+                   filename_stem: str = "") -> bool:
+    """
+    虚假作业检测 + 自动标 F。
+    学生端和教师端共用。返回 True 表示已拦截并标F，调用方应终止后续流程。
+    """
+    from services.llm_service import check_if_photo
+    from services.grade_service import save_grade
+
+    is_photo, reason = check_if_photo(file_path)
+    if not is_photo:
+        return False
+
+    logger.warning(f"[{qid}] 虚假作业: {name}({student_id}) — {reason}")
+    save_grade(qid, student_id, name, "F", {
+        "总评": "作业不符合提交规范，请重新提交。",
+    })
+    if filename_stem:
+        update_submission_record(qid, student_id, name, filename_stem,
+                                 "graded", grade="F", total_score="0")
+    return True
+
+
 def get_all_roster_students() -> list[dict]:
     """返回所有班级名单中的学生 [{姓名, 学号, 班级}]"""
     _ensure_student_info_dir()

@@ -36,6 +36,7 @@ from services.question_service import (
     get_reference_analysis,
     save_student_analysis,
     get_student_analysis,
+    reject_if_fake,
 )
 from services.llm_service import (
     analyze_structure,
@@ -226,6 +227,11 @@ async def upload_submission(
 
     file_bytes = await file.read()
     fname = file.filename or "submission.pdf"
+
+    # 校验是否为真实 PDF（检查文件头 %PDF）
+    if not file_bytes.startswith(b"%PDF"):
+        raise HTTPException(status_code=400, detail="仅支持 PDF 格式文件，请上传真实的 PDF 文件")
+
     set_status(qid, name, student_id, "upload", "converting")
 
     if is_test:
@@ -263,8 +269,19 @@ def _run_analyze(
             student_path = get_student_submission_path(qid, student_id, name)
             if student_path is None:
                 raise RuntimeError("学生提交文件不存在，请重新上传")
+
+            # 虚假作业判别
+            if reject_if_fake(qid, student_id, name, student_path,
+                              Path(filename).stem if not is_test else ""):
+                set_status(qid, name, student_id, "analyze", "done")
+                return
+
             structure = analyze_structure(student_path, struct_tpl, knowledge=knowledge)
             quantitative = analyze_quantitative(student_path, quant_tpl, structure, knowledge=knowledge)
+
+        # 校验：结构分析结果不能是空的（0视图+0特征表示LLM未真正读图）
+        if len(structure.get("views", [])) == 0 and len(structure.get("features", [])) == 0:
+            raise RuntimeError("结构分析结果为空（0视图、0特征），模型可能未能正确识读图片，请稍后重试")
 
         analysis = {"structure": structure, "quantitative": quantitative}
         if not is_test:

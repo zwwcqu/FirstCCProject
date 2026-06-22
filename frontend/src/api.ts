@@ -218,6 +218,13 @@ export function queryCurrentModel() {
   return api("/api/teacher/settings/query-model", { method: "POST" });
 }
 
+export function testVision(cfg: { api_base: string; api_key: string; model: string }) {
+  return api("/api/teacher/settings/test-vision", {
+    method: "POST",
+    body: JSON.stringify(cfg),
+  });
+}
+
 export function changePassword(currentPassword: string, newPassword: string) {
   return api("/api/teacher/settings/change-password", {
     method: "POST",

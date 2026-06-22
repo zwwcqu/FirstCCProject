@@ -76,6 +76,10 @@ def _run_reference_analysis(qid: str) -> None:
 
         logger.info(f"[{qid}] 开始参考图结构分析…")
         structure = analyze_structure(ref_pdf, struct_tpl, knowledge=kn)
+        # 校验：结构分析结果不能为空
+        if len(structure.get("views", [])) == 0 and len(structure.get("features", [])) == 0:
+            logger.error(f"[{qid}] 参考图结构分析结果为空（0视图、0特征），请检查模型是否支持图像识别")
+            return
         logger.info(f"[{qid}] 参考图量化分析…")
         quantitative = analyze_quantitative(ref_pdf, quant_tpl, structure, knowledge=kn)
 
@@ -319,7 +323,7 @@ async def batch_grade(request: Request, qid: str):
     quant_tpl = CONFIG_DIR / "量化分析_学生.txt"
 
     def _grade_one(sid: str):
-        from services.question_service import find_student_class, update_submission_record, save_student_analysis
+        from services.question_service import find_student_class, update_submission_record, save_student_analysis, reject_if_fake
 
         rec = get_submission_record(qid, sid)
         if not rec:
@@ -333,6 +337,10 @@ async def batch_grade(request: Request, qid: str):
         stu_analysis = get_student_analysis(qid, sid, name)
         if stu_analysis is None:
             try:
+                # 虚假作业判别
+                if reject_if_fake(qid, sid, name, student_path, student_path.stem):
+                    return
+
                 update_submission_record(qid, sid, name, student_path.stem, "analyzing")
                 structure = analyze_structure(student_path, struct_tpl, knowledge=knowledge)
                 quantitative = analyze_quantitative(student_path, quant_tpl, structure, knowledge=knowledge)
@@ -436,6 +444,10 @@ async def supplement_submission(
     file_bytes = await file.read()
     fname = file.filename or "submission.pdf"
 
+    # 校验是否为真实 PDF
+    if not file_bytes.startswith(b"%PDF"):
+        raise HTTPException(status_code=400, detail="仅支持 PDF 格式文件，请上传真实的 PDF 文件")
+
     from services.question_service import submit_student_work
     saved_name = submit_student_work(qid, student_id, name, file_bytes, fname)
     logger.info(f"[{qid}] 教师补充提交: {name}({student_id}) → {saved_name}")
@@ -536,13 +548,27 @@ async def edit_grade(request: Request, qid: str, student_id: str):
 async def teacher_student_analysis(request: Request, qid: str, student_id: str, name: str = ""):
     """教师查看学生的图面分析结果（结构分析 + 量化分析）"""
     _require_auth(request)
-    from services.question_service import get_student_analysis, get_submission_record
+    from services.question_service import get_student_analysis, get_submission_record, get_student_dir, _sanitize_filename_part
 
     # 尝试从提交记录中获取姓名
     if not name:
         rec = get_submission_record(qid, student_id)
         if rec:
             name = rec.get("name", "")
+
+    # 回退：扫描 student 目录，从分析文件名中提取姓名
+    if not name:
+        sdir = get_student_dir(qid)
+        safe_id = _sanitize_filename_part(student_id)
+        if sdir.exists():
+            for f in sdir.iterdir():
+                if f.suffix.lower() == ".json" and f"_{safe_id}" in f.stem:
+                    # 文件名格式：{name}_{id}.json 或 {name}_{id}_结构分析.json 等
+                    idx = f.stem.find(f"_{safe_id}")
+                    if idx > 0:
+                        name = f.stem[:idx]
+                        break
+
     if not name:
         raise HTTPException(status_code=400, detail="无法确定学生姓名")
 
@@ -556,32 +582,45 @@ async def teacher_student_analysis(request: Request, qid: str, student_id: str, 
 async def teacher_student_preview(request: Request, qid: str, student_id: str):
     """教师查看学生提交的工程图预览（优先 PNG，回退实时转换）"""
     _require_auth(request)
-    from fastapi.responses import FileResponse
-
-    rec = get_submission_record(qid, student_id)
-    if not rec:
-        raise HTTPException(status_code=404, detail="该学生未提交作业")
-    name = rec.get("name", "")
-
-    # 优先找预生成的 PNG
+    from fastapi.responses import FileResponse, Response
     from services.question_service import get_student_dir, _sanitize_filename_part
-    sdir = get_student_dir(qid)
-    safe_name = _sanitize_filename_part(name)
-    safe_id = _sanitize_filename_part(student_id)
-    png_path = sdir / f"{safe_name}_{safe_id}.png"
-    if png_path.exists():
-        return FileResponse(str(png_path), media_type="image/png")
-
-    # 回退：实时转换
-    student_path = get_student_submission_path(qid, student_id, name)
-    if student_path is None:
-        raise HTTPException(status_code=404, detail="提交文件不存在")
-    from services.llm_service import image_to_base64
     import base64
-    from fastapi.responses import Response
-    b64 = image_to_base64(student_path)
-    img_bytes = base64.b64decode(b64)
-    return Response(content=img_bytes, media_type="image/jpeg")
+
+    sdir = get_student_dir(qid)
+    safe_id = _sanitize_filename_part(student_id)
+
+    # 先尝试从提交记录获取姓名，构造精确文件名
+    rec = get_submission_record(qid, student_id)
+    if rec:
+        name = rec.get("name", "")
+        safe_name = _sanitize_filename_part(name)
+        png_path = sdir / f"{safe_name}_{safe_id}.png"
+        if png_path.exists():
+            return FileResponse(str(png_path), media_type="image/png")
+        student_path = get_student_submission_path(qid, student_id, name)
+        if student_path is not None:
+            from services.llm_service import image_to_base64
+            b64 = image_to_base64(student_path)
+            img_bytes = base64.b64decode(b64)
+            return Response(content=img_bytes, media_type="image/jpeg")
+
+    # 回退：没有提交记录，直接在 student 目录搜索匹配学号的文件
+    if sdir.exists():
+        # 优先 PNG
+        for f in sorted(sdir.iterdir()):
+            if f.suffix.lower() == ".png" and f.stem.endswith(f"_{safe_id}"):
+                return FileResponse(str(f), media_type="image/png")
+        # 再试 PDF
+        for f in sorted(sdir.iterdir()):
+            if f.suffix.lower() == ".pdf" and f.stem.endswith(f"_{safe_id}"):
+                from services.llm_service import image_to_base64
+                b64 = image_to_base64(f)
+                img_bytes = base64.b64decode(b64)
+                return Response(content=img_bytes, media_type="image/jpeg")
+
+    if rec:
+        raise HTTPException(status_code=404, detail="提交文件不存在")
+    raise HTTPException(status_code=404, detail="该学生未提交作业")
 
 
 # ── 系统设置 ─────────────────────────────────────────────
@@ -653,6 +692,66 @@ async def test_llm_connection(request: Request):
         return {"ok": True, "message": f"连接成功，模型: {model}"}
     except Exception as e:
         return {"ok": False, "message": f"连接失败: {str(e)}"}
+
+
+@router.post("/settings/test-vision")
+async def test_vision_capability(request: Request):
+    """测试大模型读图能力。body: {api_base, api_key, model}。使用 config/DrawingForCheck.png 作为测试图"""
+    _require_auth(request)
+    body = await request.json()
+    base_url = (body.get("api_base") or "").strip()
+    api_key = (body.get("api_key") or "").strip()
+    model = (body.get("model") or "").strip()
+
+    if not base_url:
+        return {"ok": False, "message": "请先填写 API 地址"}
+
+    # 读取测试图
+    test_image_path = Path(__file__).parent.parent.parent / "config" / "DrawingForCheck.png"
+    if not test_image_path.exists():
+        return {"ok": False, "message": f"测试图不存在: {test_image_path}"}
+
+    try:
+        from services.llm_service import image_to_base64
+        b64 = image_to_base64(test_image_path)
+    except Exception as e:
+        return {"ok": False, "message": f"读取测试图失败: {str(e)}"}
+
+    # 发请求给模型，用最简单的二选一问题验证读图能力
+    try:
+        from openai import OpenAI
+        client = OpenAI(base_url=base_url, api_key=api_key, timeout=60)
+        response = client.chat.completions.create(
+            model=model,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "这是不是一个机械工程图，请回答是或者不是，不添加任何说明，只需回答是，不是两种选择。",
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
+                    },
+                ],
+            }],
+            max_tokens=50,
+        )
+        reply = response.choices[0].message.content or ""
+
+        # 判断：回复包含"是"且不包含"不是"即为通过
+        passed = "是" in reply and "不是" not in reply
+
+        return {
+            "ok": True,
+            "passed": passed,
+            "message": "读图通过" if passed else "读图未通过",
+            "reply": reply[:200],
+            "hint": None if passed else "模型未能识别图片为机械工程图，可能不支持图像识别（vision）能力。建议使用 qwen-vl 或 gpt-4o 等多模态模型。",
+        }
+    except Exception as e:
+        return {"ok": False, "message": f"请求失败: {str(e)}", "passed": False}
 
 
 @router.post("/settings/change-password")
@@ -739,6 +838,37 @@ async def query_current_model(request: Request):
         except Exception as e:
             test_error = str(e)
 
+    # 读图能力测试
+    vision_ok = False
+    vision_reply = ""
+    vision_hint = ""
+    if available and model_id:
+        test_image_path = Path(__file__).parent.parent.parent / "config" / "DrawingForCheck.png"
+        if test_image_path.exists():
+            try:
+                from services.llm_service import image_to_base64
+                import base64 as _base64
+                b64 = image_to_base64(test_image_path)
+                vr = client.chat.completions.create(
+                    model=model_id,
+                    messages=[{
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "这是不是一个机械工程图，请回答是或者不是，不添加任何说明，只需回答是，不是两种选择。"},
+                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+                        ],
+                    }],
+                    max_tokens=50,
+                    timeout=30,
+                )
+                reply = vr.choices[0].message.content or ""
+                vision_reply = reply[:200]
+                vision_ok = "是" in reply and "不是" not in reply
+                if not vision_ok:
+                    vision_hint = "模型未能识别图片为机械工程图，可能不支持图像识别（vision）能力"
+            except Exception as ve:
+                vision_hint = f"读图测试失败: {str(ve)}"
+
     return {
         "ok": True,
         "model": model_id or "(自动检测)",
@@ -747,6 +877,9 @@ async def query_current_model(request: Request):
         "available": available,
         "test_error": test_error if not available else "",
         "source": source,
+        "vision_ok": vision_ok,
+        "vision_reply": vision_reply,
+        "vision_hint": vision_hint,
     }
 
 

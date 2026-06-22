@@ -16,6 +16,7 @@ import {
   getStudentPreviewUrl,
 } from "../api";
 import FloatingImageViewer from "../components/FloatingImageViewer";
+import FileButton from "../components/FileButton";
 
 interface Question {
   id: string;
@@ -269,6 +270,13 @@ export default function StudentPage() {
     if (!selectedQid || !identity) return;
     if (selectedFile.size > MAX_FILE_MB * 1024 * 1024) {
       setError(`文件过大（上限 ${MAX_FILE_MB}MB）`);
+      return;
+    }
+
+    // 校验是否为真实 PDF（检查文件头 %PDF）
+    const header = await selectedFile.slice(0, 4).text();
+    if (header !== "%PDF") {
+      setError("仅支持 PDF 格式文件，请上传真实的 PDF 文件");
       return;
     }
 
@@ -588,10 +596,14 @@ export default function StudentPage() {
             </h2>
 
             <div className="mb-4">
-              <label className="block text-sm font-medium text-gray-700 mb-1">上传工程图 (PDF/图片)</label>
-              <input type="file" accept=".pdf,.png,.jpg,.jpeg,.gif,.webp"
-                onChange={(e) => { const f = e.target.files?.[0]; if (f) { handleUpload(f); } }}
-                className="w-full" />
+              <label className="block text-sm font-medium text-gray-700 mb-1">上传工程图 (PDF)</label>
+              <FileButton
+                accept=".pdf"
+                onChange={(file) => handleUpload(file)}
+                label="选择文件"
+                fileName={studentFilename || undefined}
+              />
+              {error && <p className="text-red-500 mt-2 text-sm">{error}</p>}
             </div>
 
             {/* 上传中提示 */}
@@ -652,8 +664,6 @@ export default function StudentPage() {
                 {grading || submitStatus ? "处理中…" : "提交评分"}
               </button>
             )}
-            {error && <p className="text-red-500 mt-2 text-sm">{error}</p>}
-
             {/* 图面分析结果 */}
 
 {analysisData && (

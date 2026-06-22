@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import { getSettings, updateSettings, checkLogin, restartService, queryCurrentModel, getQueueStatus, clearQueue } from "../api";
+import { getSettings, updateSettings, checkLogin, restartService, queryCurrentModel, testVision, getQueueStatus, clearQueue } from "../api";
 
 interface ModelConfig {
   name: string;
@@ -35,6 +35,9 @@ function ModelCard({ cfg, active, onActivate, onChange, onSave, onDelete, saving
 }) {
   const [testing, setTesting] = useState(false);
   const [result, setResult] = useState("");
+  const [visionTesting, setVisionTesting] = useState(false);
+  const [visionResult, setVisionResult] = useState("");
+  const [visionReply, setVisionReply] = useState("");
   const [showKey, setShowKey] = useState(false);
 
   const set = (k: keyof ModelConfig, v: string | number) => onChange({ ...cfg, [k]: v });
@@ -100,7 +103,7 @@ function ModelCard({ cfg, active, onActivate, onChange, onSave, onDelete, saving
               className="w-full border rounded px-3 py-1.5 text-sm" />
           </div>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           <button onClick={onSave} disabled={saving}
             className="bg-blue-600 text-white px-3 py-1 rounded hover:bg-blue-700 disabled:opacity-50 text-xs">
             {saving ? "保存中…" : "保存"}
@@ -110,8 +113,36 @@ function ModelCard({ cfg, active, onActivate, onChange, onSave, onDelete, saving
             className="bg-gray-100 text-gray-600 px-3 py-1 rounded hover:bg-gray-200 disabled:opacity-50 text-xs">
             {testing ? "检测中…" : "测试连接"}
           </button>
+          <button onClick={async () => {
+            setVisionTesting(true); setVisionResult(""); setVisionReply("");
+            try {
+              const r = await testVision(cfg);
+              if (r.ok) {
+                setVisionResult(r.passed ? "✓ 读图通过" : "✗ 读图失败");
+                setVisionReply(r.reply || "");
+              } else {
+                setVisionResult("✗ " + (r.message || "测试失败"));
+              }
+            } catch (e: any) {
+              setVisionResult("✗ 请求失败: " + e.message);
+            }
+            setVisionTesting(false);
+          }}
+            disabled={visionTesting}
+            className="bg-orange-100 text-orange-700 px-3 py-1 rounded hover:bg-orange-200 disabled:opacity-50 text-xs">
+            {visionTesting ? "测试中…" : "测试读图"}
+          </button>
           {result && <span className={`text-xs ${result.startsWith("✓") ? "text-green-600" : "text-red-500"}`}>{result}</span>}
         </div>
+        {visionResult && (
+          <div className={`text-xs rounded p-2 mt-1 ${visionResult.includes("通过") ? "bg-green-50 text-green-700" : "bg-red-50 text-red-600"}`}>
+            <p className="font-medium">{visionResult}</p>
+            {visionReply && <p className="mt-1 text-gray-600 line-clamp-3">{visionReply}</p>}
+            {visionResult.includes("失败") && !visionReply && (
+              <p className="mt-1 text-gray-500">该模型可能不支持图像识别（vision），建议使用 qwen-vl 或 gpt-4o 等多模态模型</p>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -305,6 +336,11 @@ export default function SettingsPage() {
                 <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${modelQuery.available ? "bg-green-200 text-green-800" : "bg-red-200 text-red-800"}`}>
                   {modelQuery.available ? "可用" : "不可用"}
                 </span>
+                {modelQuery.vision_ok !== undefined && (
+                  <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${modelQuery.vision_ok ? "bg-green-200 text-green-800" : "bg-yellow-200 text-yellow-800"}`}>
+                    {modelQuery.vision_ok ? "可读图" : "不支持读图"}
+                  </span>
+                )}
               </div>
               <div className="text-gray-600 grid grid-cols-2 gap-x-4 gap-y-1">
                 <div><span className="text-gray-400">API 地址：</span>{modelQuery.api_base}</div>
@@ -318,6 +354,15 @@ export default function SettingsPage() {
               </div>
               {!modelQuery.available && modelQuery.test_error && (
                 <div className="text-red-600 mt-1">错误：{modelQuery.test_error}</div>
+              )}
+              {modelQuery.vision_reply && (
+                <div className="mt-2 pt-2 border-t border-green-200">
+                  <span className="text-gray-400">读图测试回复：</span>
+                  <p className="text-gray-600 mt-1 line-clamp-3">{modelQuery.vision_reply}</p>
+                </div>
+              )}
+              {modelQuery.vision_hint && (
+                <div className="text-yellow-700 mt-1">⚠️ {modelQuery.vision_hint}</div>
               )}
             </div>
           )}

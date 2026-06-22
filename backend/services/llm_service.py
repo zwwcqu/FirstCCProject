@@ -166,6 +166,79 @@ def bytes_to_base64(data: bytes, filename: str) -> str:
         raise ValueError(f"不支持的文件格式: {ext}")
 
 
+# ── 拍照图判别（本地图像特征，不调大模型）────────────────
+
+def check_if_photo(image_path: Path) -> tuple[bool, str]:
+    """
+    检测图片是否为手机/相机拍摄的实物照片（非正版工程图）。
+    基于 EXIF 信息、四角采样、宽高比、色彩分布等特征综合判断。
+    支持 PDF（取首页渲染）和图片格式。
+    返回 (is_photo: bool, reason: str)
+    """
+    # PDF 先转图片（用较高 DPI 保留线条细节）
+    if image_path.suffix.lower() == ".pdf":
+        try:
+            from pdf2image import convert_from_path
+            images = convert_from_path(str(image_path), first_page=1, last_page=1, dpi=120)
+            if not images:
+                return False, ""
+            img = images[0]
+        except ImportError:
+            return False, ""
+    else:
+        img = Image.open(image_path)
+    w, h = img.size
+
+    # 1. EXIF 检测：有相机品牌/型号则强判为拍照
+    exif = img.getexif()
+    if exif:
+        make = exif.get(0x010F, "")  # Make
+        model = exif.get(0x0110, "")  # Model
+        software = exif.get(0x0131, "")  # Software
+        if make or model:
+            return True, f"检测到相机信息: {make} {model}".strip()
+        # 常见手机修图软件也视为拍照
+        photo_software = ["snapseed", "lightroom", "meitu", "美图", "vsco", "picsart"]
+        if any(s in software.lower() for s in photo_software):
+            return True, f"检测到修图软件: {software}"
+
+    # 2. 色彩分布检测：缩略图采样统计
+    small = img.convert("RGB").resize((200, 200))
+    colored = 0
+    pure_white = 0
+    total_small = 200 * 200
+
+    for px in small.getdata():
+        r, g, b = px[0], px[1], px[2]
+        gray = (r + g + b) / 3
+        max_diff = max(abs(r - g), abs(g - b), abs(r - b))
+
+        if max_diff > 18:
+            colored += 1
+        if gray > 240:
+            pure_white += 1
+
+    color_rate = colored / total_small
+
+    if color_rate > 0.05:
+        return True, f"检测到彩色噪点（{color_rate:.1%}），疑似拍照或截图。"
+    if pure_white / total_small < 0.75:
+        return True, f"白色背景比例偏低（纯白仅 {pure_white/total_small:.1%}），疑似截图或扫描件。标准工程图纯白背景应在75%以上。"
+
+    return False, ""
+
+
+def _pixel_similarity(img1: Image.Image, img2: Image.Image, threshold: int = 20) -> float:
+    """两图逐像素相似度 (0-100)。threshold 为单通道容差"""
+    p1 = list(img1.getdata())
+    p2 = list(img2.getdata())
+    diff = sum(1 for i in range(len(p1))
+               if abs(p1[i][0] - p2[i][0]) > threshold
+               or abs(p1[i][1] - p2[i][1]) > threshold
+               or abs(p1[i][2] - p2[i][2]) > threshold)
+    return (1 - diff / len(p1)) * 100
+
+
 # ── LLM 调用 + JSON 解析（自动重试）─────────────────────
 
 def _call_and_parse(client, model, messages, parse_fn, temperature=0.1, max_tokens=4096, max_retries=1):

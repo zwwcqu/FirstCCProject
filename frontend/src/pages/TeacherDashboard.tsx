@@ -28,6 +28,7 @@ import {
   lookupRoster,
 } from "../api";
 import FloatingImageViewer from "../components/FloatingImageViewer";
+import FileButton from "../components/FileButton";
 
 interface Question {
   id: string;
@@ -332,6 +333,13 @@ export default function TeacherDashboard() {
 
   // 选择文件后解析文件名并查询班级
   const handleSupplementFile = async (file: File) => {
+    // 校验是否为真实 PDF
+    const header = await file.slice(0, 4).text();
+    if (header !== "%PDF") {
+      alert("仅支持 PDF 格式文件，请上传真实的 PDF 文件");
+      setSupplementFile(null);
+      return;
+    }
     setSupplementFile(file);
     setSupplementParsed(null);
     setSupplementParsing(true);
@@ -865,7 +873,12 @@ export default function TeacherDashboard() {
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">题目附图</label>
-                  <input type="file" accept="image/*" onChange={(e) => setImage(e.target.files?.[0] || null)} />
+                  <FileButton
+                    accept="image/*"
+                    onChange={(file) => setImage(file)}
+                    label="选择图片"
+                    fileName={image?.name}
+                  />
                   <div className="mt-2">
                     {image && imagePreviewUrl ? (
                       <img src={imagePreviewUrl} alt="题目附图预览" className="w-full rounded border" />
@@ -878,7 +891,12 @@ export default function TeacherDashboard() {
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">参考工程图 (PDF)</label>
-                  <input type="file" accept=".pdf" onChange={(e) => setRefPdf(e.target.files?.[0] || null)} />
+                  <FileButton
+                    accept=".pdf"
+                    onChange={(file) => setRefPdf(file)}
+                    label="选择PDF"
+                    fileName={refPdf?.name}
+                  />
                   <div className="mt-2">
                     {refPdf ? (
                       <div className="text-xs text-blue-600 py-3 px-3 bg-blue-50 rounded border border-blue-200">
@@ -1051,17 +1069,13 @@ export default function TeacherDashboard() {
               <div className="space-y-3">
                 <div>
                   <label className="block text-sm text-gray-600 mb-1">作业文件</label>
-                  <input
-                    type="file"
-                    accept=".pdf,.png,.jpg,.jpeg,.gif,.webp"
-                    onChange={(e) => {
-                      const f = e.target.files?.[0];
-                      if (f) handleSupplementFile(f);
-                      else { setSupplementFile(null); setSupplementParsed(null); }
-                    }}
-                    className="w-full text-sm"
+                  <FileButton
+                    accept=".pdf"
+                    onChange={(file) => handleSupplementFile(file)}
+                    label="选择作业文件"
+                    fileName={supplementFile?.name}
                   />
-                  <p className="text-xs text-gray-400 mt-1">文件名需包含学号和姓名，如 2024001_张三.pdf 或 张三-2024001.png</p>
+                  <p className="text-xs text-gray-400 mt-1">文件名需包含学号和姓名，如 2024001_张三.pdf</p>
                 </div>
 
                 {/* 解析结果确认面板 */}
@@ -1196,11 +1210,22 @@ export default function TeacherDashboard() {
                 {/* 学生工程图 */}
                 <div className="border rounded-lg overflow-hidden bg-gray-100 mb-4">
                   <img
-                    src={getTeacherStudentPreviewUrl(gradesView, reviewSid)}
+                    src={`${getTeacherStudentPreviewUrl(gradesView, reviewSid)}?t=${Date.now()}`}
                     alt="学生工程图"
                     className="w-full"
-                    onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }}
+                    onError={(e) => {
+                      const el = e.target as HTMLImageElement;
+                      el.style.display = "none";
+                      // 显示提示占位
+                      const placeholder = el.nextElementSibling;
+                      if (placeholder && placeholder.classList.contains("img-error-placeholder")) {
+                        (placeholder as HTMLElement).style.display = "flex";
+                      }
+                    }}
                   />
+                  <div className="img-error-placeholder hidden items-center justify-center py-16 text-gray-400 text-sm">
+                    该学生尚未提交工程图文件
+                  </div>
                 </div>
 
                 {/* 学生图面分析结果 */}
@@ -1342,11 +1367,11 @@ export default function TeacherDashboard() {
                   </div>
                   <div>
                     <label className="block text-xs text-gray-500 mb-1">学生名单 CSV</label>
-                    <input
-                      type="file"
+                    <FileButton
                       accept=".csv"
-                      onChange={(e) => setRosterFile(e.target.files?.[0] || null)}
-                      className="w-full text-sm"
+                      onChange={(file) => setRosterFile(file)}
+                      label="选择CSV"
+                      fileName={rosterFile?.name}
                     />
                   </div>
                   <button
