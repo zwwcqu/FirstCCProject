@@ -543,6 +543,9 @@ def reject_if_fake(qid: str, student_id: str, name: str, file_path: Path,
     虚假作业检测 + 自动标 F。
     学生端和教师端共用。返回 True 表示已拦截并标F，调用方应终止后续流程。
     """
+    # TODO: 临时关闭虚假图检测，恢复时删除下面这行
+    return False
+
     from services.llm_service import check_if_photo
     from services.grade_service import save_grade
 
