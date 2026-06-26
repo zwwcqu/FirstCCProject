@@ -157,11 +157,12 @@ async def create_question_handler(
     knowledge: str = Form(""),
     image: Optional[UploadFile] = File(None),           # 题目附图（可选）
     reference_pdf: Optional[UploadFile] = File(None),   # 参考工程图（可选）
+    submission_type: str = Form("pdf"),                  # 学生提交文件类型：pdf / image
 ):
     """新增题目"""
     _require_auth(request)
     try:
-        entry = create_question(qid, title, description, phase1_criteria, phase2_criteria, knowledge)
+        entry = create_question(qid, title, description, phase1_criteria, phase2_criteria, knowledge, submission_type)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     if image and image.filename:
@@ -185,10 +186,11 @@ async def update_question_handler(
     knowledge: str = Form(""),
     image: Optional[UploadFile] = File(None),
     reference_pdf: Optional[UploadFile] = File(None),
+    submission_type: str = Form("pdf"),                  # 学生提交文件类型：pdf / image
 ):
     """编辑已有题目"""
     _require_auth(request)
-    entry = update_question(qid, title, description, phase1_criteria, phase2_criteria, knowledge)
+    entry = update_question(qid, title, description, phase1_criteria, phase2_criteria, knowledge, submission_type)
     if entry is None:
         raise HTTPException(status_code=404, detail="题目不存在")
     if image and image.filename:

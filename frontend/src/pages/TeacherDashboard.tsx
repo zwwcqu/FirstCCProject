@@ -126,6 +126,7 @@ export default function TeacherDashboard() {
   const [knowledge, setKnowledge] = useState("");
   const [image, setImage] = useState<File | null>(null);
   const [refPdf, setRefPdf] = useState<File | null>(null);
+  const [submissionType, setSubmissionType] = useState("pdf");  // 学生提交文件类型：pdf / image
   const [existingImages, setExistingImages] = useState<string[]>([]);
   const [existingRefPdf, setExistingRefPdf] = useState<string | null>(null);
 
@@ -184,6 +185,7 @@ export default function TeacherDashboard() {
     setKnowledge("");
     setImage(null);
     setRefPdf(null);
+    setSubmissionType("pdf");
     setExistingImages([]);
     setExistingRefPdf(null);
     setEditingId(null);
@@ -198,6 +200,7 @@ export default function TeacherDashboard() {
     fd.append("phase1_criteria", phase1Criteria);
     fd.append("phase2_criteria", phase2Criteria);
     fd.append("knowledge", knowledge);
+    fd.append("submission_type", submissionType);
     if (image) fd.append("image", image);
     if (refPdf) fd.append("reference_pdf", refPdf);
     try {
@@ -218,6 +221,7 @@ export default function TeacherDashboard() {
     fd.append("phase1_criteria", phase1Criteria);
     fd.append("phase2_criteria", phase2Criteria);
     fd.append("knowledge", knowledge);
+    fd.append("submission_type", submissionType);
     if (image) fd.append("image", image);
     if (refPdf) fd.append("reference_pdf", refPdf);
     try {
@@ -250,6 +254,7 @@ export default function TeacherDashboard() {
       setPhase1Criteria(detail.files?.phase1_criteria || "");
       setPhase2Criteria(detail.files?.phase2_criteria || "");
       setKnowledge(detail.files?.knowledge || "");
+      setSubmissionType(detail.submission_type || "pdf");
       setImage(null);
       setRefPdf(null);
       setExistingImages(detail.files?.images || []);
@@ -870,6 +875,21 @@ export default function TeacherDashboard() {
                     className="w-full border rounded px-3 py-2"
                     placeholder="例如：零件材料为HT200、表面粗糙度Ra6.3、未注倒角C1等"
                   />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">学生提交文件类型</label>
+                  <div className="flex gap-4">
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input type="radio" name="submission_type" value="pdf"
+                        checked={submissionType === "pdf"} onChange={(e) => setSubmissionType(e.target.value)} />
+                      <span className="text-sm">PDF 文件</span>
+                    </label>
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input type="radio" name="submission_type" value="image"
+                        checked={submissionType === "image"} onChange={(e) => setSubmissionType(e.target.value)} />
+                      <span className="text-sm">图片文件</span>
+                    </label>
+                  </div>
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">题目附图</label>

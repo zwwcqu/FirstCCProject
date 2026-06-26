@@ -71,7 +71,7 @@ def get_question(qid: str) -> dict | None:
 
 def create_question(qid: str, title: str, description: str,
                     phase1_criteria: str, phase2_criteria: str,
-                    knowledge: str = "") -> dict:
+                    knowledge: str = "", submission_type: str = "pdf") -> dict:
     """创建题目：写索引 + 创建目录 + 写内容文件"""
     if not qid.isdigit():
         raise ValueError("题号必须为非负整数")
@@ -89,7 +89,7 @@ def create_question(qid: str, title: str, description: str,
     (qdir / "阶段2评分标准.md").write_text(phase2_criteria, encoding="utf-8")
     (qdir / "补充知识.md").write_text(knowledge, encoding="utf-8")
 
-    entry = {"id": qid, "title": title}
+    entry = {"id": qid, "title": title, "submission_type": submission_type}
     questions.append(entry)
     write_questions_index(questions)
     logger.info(f"题目已创建: [{qid}] {title}")
@@ -98,13 +98,14 @@ def create_question(qid: str, title: str, description: str,
 
 def update_question(qid: str, title: str, description: str,
                     phase1_criteria: str, phase2_criteria: str,
-                    knowledge: str = "") -> dict | None:
+                    knowledge: str = "", submission_type: str = "pdf") -> dict | None:
     """编辑题目：更新索引 + 覆盖内容文件"""
     questions = read_questions_index()
     found = None
     for q in questions:
         if q["id"] == qid:
             q["title"] = title
+            q["submission_type"] = submission_type
             found = q
             break
     if found is None:

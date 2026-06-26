@@ -20,6 +20,7 @@ import FileButton from "../components/FileButton";
 interface Question {
   id: string;
   title: string;
+  submission_type?: string;  // 教师设置的学生提交文件类型：pdf / image，缺省 pdf
   files?: { description: string; phase1_criteria: string; phase2_criteria: string; images: string[] };
 }
 
@@ -592,9 +593,11 @@ export default function StudentPage() {
             </h2>
 
             <div className="mb-4">
-              <label className="block text-sm font-medium text-gray-700 mb-1">上传工程图 (PDF)</label>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                上传工程图 ({question?.submission_type === "image" ? "图片" : "PDF"})
+              </label>
               <FileButton
-                accept=".pdf"
+                accept={question?.submission_type === "image" ? "image/*" : ".pdf"}
                 onChange={(file) => handleUpload(file)}
                 label="选择文件"
                 fileName={studentFilename || undefined}

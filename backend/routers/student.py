@@ -229,9 +229,18 @@ async def upload_submission(
     file_bytes = await file.read()
     fname = file.filename or "submission.pdf"
 
-    # 校验是否为真实 PDF（检查文件头 %PDF）
-    if not file_bytes.startswith(b"%PDF"):
-        raise HTTPException(status_code=400, detail="仅支持 PDF 格式文件，请上传真实的 PDF 文件")
+    # 根据题目设置的提交类型校验文件格式
+    sub_type = q.get("submission_type", "pdf")  # 缺省 pdf
+    if sub_type == "pdf":
+        if not file_bytes.startswith(b"%PDF"):
+            raise HTTPException(status_code=400, detail="本题要求提交 PDF 文件，请上传真实的 PDF 文件")
+    elif sub_type == "image":
+        if file_bytes.startswith(b"%PDF"):
+            raise HTTPException(status_code=400, detail="本题要求提交图片文件，不支持 PDF 格式")
+    else:
+        # 未知类型，保持 PDF 校验
+        if not file_bytes.startswith(b"%PDF"):
+            raise HTTPException(status_code=400, detail="仅支持 PDF 格式文件，请上传真实的 PDF 文件")
 
     set_status(qid, name, student_id, "upload", "converting")
 
