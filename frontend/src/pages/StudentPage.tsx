@@ -273,10 +273,16 @@ export default function StudentPage() {
       return;
     }
 
-    // 校验是否为真实 PDF（检查文件头 %PDF）
+    // 根据题目设置校验文件格式
+    const subType = question?.submission_type || "pdf";
     const header = await selectedFile.slice(0, 4).text();
-    if (header !== "%PDF") {
-      setError("仅支持 PDF 格式文件，请上传真实的 PDF 文件");
+    const isPdfHeader = header === "%PDF";
+    if (subType === "pdf" && !isPdfHeader) {
+      setError("本题要求提交 PDF 文件，请上传真实的 PDF 文件");
+      return;
+    }
+    if (subType === "image" && isPdfHeader) {
+      setError("本题要求提交图片文件，不支持 PDF 格式");
       return;
     }
 
