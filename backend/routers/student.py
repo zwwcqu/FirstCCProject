@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Optional
@@ -528,13 +529,21 @@ async def get_submission_record(qid: str, name: str, student_id: str):
 
 # ── 文件服务 ─────────────────────────────────────────────
 
+def _check_path_safe(base: Path, target: Path) -> Path:
+    """确保 target 在 base 目录内，防止路径穿越攻击"""
+    resolved = target.resolve()
+    if not str(resolved).startswith(str(base.resolve()) + os.sep):
+        raise HTTPException(status_code=404, detail="文件未找到")
+    return resolved
+
+
 @router.get("/files/{qid}/{filename}")
 async def serve_student_file(qid: str, filename: str):
     """直接下载学生提交的原始文件"""
     from services.question_service import get_student_dir
-    sdir = get_student_dir(qid)
-    filepath = sdir / filename
-    if not filepath.exists() or not filepath.is_file():
+    sdir = get_student_dir(qid).resolve()
+    filepath = _check_path_safe(sdir, Path(sdir / filename))
+    if not filepath.is_file():
         raise HTTPException(status_code=404)
     return FileResponse(str(filepath))
 
@@ -545,16 +554,16 @@ async def serve_student_preview(qid: str, filename: str):
     from services.question_service import get_student_dir
     from fastapi.responses import FileResponse
 
-    sdir = get_student_dir(qid)
-    # 优先找预生成的 PNG
+    sdir = get_student_dir(qid).resolve()
+    # 优先找预生成的 PNG（stem 已剥离路径，安全）
     stem = Path(filename).stem
-    png_path = sdir / f"{stem}.png"
-    if png_path.exists():
+    png_path = _check_path_safe(sdir, Path(sdir / f"{stem}.png"))
+    if png_path.is_file():
         return FileResponse(str(png_path), media_type="image/png")
 
     # 回退：实时转换（兼容旧数据）
-    filepath = sdir / filename
-    if not filepath.exists() or not filepath.is_file():
+    filepath = _check_path_safe(sdir, Path(sdir / filename))
+    if not filepath.is_file():
         raise HTTPException(status_code=404)
     from services.llm_service import image_to_base64
     import base64

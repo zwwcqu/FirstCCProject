@@ -15,6 +15,7 @@
 
 import json
 import logging
+import os
 import threading
 from pathlib import Path
 from typing import Optional
@@ -923,15 +924,23 @@ async def restart_service(request: Request):
 
 # ── 文件服务 ─────────────────────────────────────────────
 
+def _check_path_safe(base: Path, target: Path) -> Path:
+    """确保 target 在 base 目录内，防止路径穿越攻击"""
+    resolved = target.resolve()
+    if not str(resolved).startswith(str(base.resolve()) + os.sep):
+        raise HTTPException(status_code=404, detail="文件未找到")
+    return resolved
+
+
 @router.get("/files/{qid}/{filename}")
 async def serve_question_file(qid: str, filename: str, request: Request):
     """直接下载题目目录下的原始文件（参考工程图需登录）"""
     # 参考工程图不允许未登录访问（防止学生复制答案）
     if "参考" in filename or "reference" in filename.lower():
         _require_auth(request)
-    qdir = get_question_dir(qid)
-    filepath = qdir / filename
-    if not filepath.exists() or not filepath.is_file():
+    qdir = get_question_dir(qid).resolve()
+    filepath = _check_path_safe(qdir, Path(qdir / filename))
+    if not filepath.is_file():
         raise HTTPException(status_code=404)
     from fastapi.responses import FileResponse
     return FileResponse(str(filepath))
@@ -948,9 +957,9 @@ async def serve_question_preview(qid: str, filename: str, request: Request):
     from io import BytesIO
     from fastapi.responses import Response
 
-    qdir = get_question_dir(qid)
-    filepath = qdir / filename
-    if not filepath.exists() or not filepath.is_file():
+    qdir = get_question_dir(qid).resolve()
+    filepath = _check_path_safe(qdir, Path(qdir / filename))
+    if not filepath.is_file():
         raise HTTPException(status_code=404)
 
     b64 = image_to_base64(filepath)
