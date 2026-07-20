@@ -61,12 +61,22 @@ def _run_reference_analysis(qid: str) -> None:
     """
     教师参考图分析，通过任务队列以最高优先级执行。
     """
-    from services.llm_service import analyze_structure, analyze_quantitative
+    from services.llm_service import analyze_merged
     from services.task_queue import enqueue
 
+    # 立即删除旧分析文件，防止查询接口返回旧数据（新分析完成前返回"未就绪"）
+    qdir = get_question_dir(qid)
+    old_struct = qdir / "参考图_结构分析.json"
+    old_quant = qdir / "参考图_量化分析.json"
+    for f in (old_struct, old_quant):
+        try:
+            f.unlink(missing_ok=True)
+        except Exception:
+            pass
+
     def _task():
-        qdir = get_question_dir(qid)
-        ref_pdf = qdir / "参考工程图.pdf"
+        qdir2 = get_question_dir(qid)
+        ref_pdf = qdir2 / "参考工程图.pdf"
         if not ref_pdf.exists():
             logger.warning(f"[{qid}] 参考工程图不存在，跳过分析")
             return
@@ -75,16 +85,15 @@ def _run_reference_analysis(qid: str) -> None:
         struct_tpl = CONFIG_DIR / "结构分析模版.txt"
         quant_tpl = CONFIG_DIR / "量化分析模版.txt"
 
-        logger.info(f"[{qid}] 开始参考图结构分析…")
-        structure = analyze_structure(ref_pdf, struct_tpl, knowledge=kn)
+        logger.info(f"[{qid}] 开始参考图合并分析（结构+量化）…")
+        analysis = analyze_merged(ref_pdf, struct_tpl, quant_tpl, knowledge=kn)
+        structure = analysis["structure"]
         # 校验：结构分析结果不能为空
         if len(structure.get("views", [])) == 0 and len(structure.get("features", [])) == 0:
             logger.error(f"[{qid}] 参考图结构分析结果为空（0视图、0特征），请检查模型是否支持图像识别")
             return
-        logger.info(f"[{qid}] 参考图量化分析…")
-        quantitative = analyze_quantitative(ref_pdf, quant_tpl, structure, knowledge=kn)
 
-        save_reference_analysis(qid, {"structure": structure, "quantitative": quantitative})
+        save_reference_analysis(qid, analysis)
         logger.info(f"[{qid}] 参考图分析完成并已保存")
 
     enqueue(0, _task,
@@ -231,6 +240,10 @@ async def trigger_analysis(request: Request, qid: str):
     ref_pdf = qdir / "参考工程图.pdf"
     if not ref_pdf.exists():
         raise HTTPException(status_code=400, detail="请先上传参考工程图 PDF")
+    # 诊断日志：记录当前激活模型
+    from services.llm_service import _get_active_config
+    active = _get_active_config()
+    logger.info(f"[诊断] 触发重分析 qid={qid}，当前激活模型={active.get('name')}({active.get('model')}) llm_active={read_settings().get('llm_active')}")
     _run_reference_analysis(qid)
     return {"ok": True, "message": "分析已启动，请稍后查询结果"}
 
@@ -298,6 +311,22 @@ async def get_grades(request: Request, qid: str):
         student_path = get_student_submission_path(qid, sid, lookup_name)
         row["_filename"] = student_path.name if student_path else ""
 
+        # 读取评分结果 JSON，附加模型和 token 用量
+        import json as _json
+        student_dir = get_student_dir(qid)
+        safe_name_json = _sanitize_filename_part(name or (rec.get("name", "") if rec else ""))
+        safe_id_json = _sanitize_filename_part(sid)
+        result_path = student_dir / f"{safe_name_json}_{safe_id_json}.json"
+        if result_path.exists():
+            try:
+                rj = _json.loads(result_path.read_text(encoding="utf-8"))
+                row["_model"] = rj.get("_model", "")
+                row["_usage"] = rj.get("_usage", {})
+                row["_phase1_usage"] = rj.get("_phase1_usage", {})
+                row["_phase2_usage"] = rj.get("_phase2_usage", {})
+            except Exception:
+                pass  # JSON 损坏或格式异常，跳过
+
     all_rows = graded_rows + ungraded_rows
     return {"qid": qid, "grades": all_rows, "columns": FIELDNAMES}
 
@@ -311,7 +340,7 @@ async def batch_grade(request: Request, qid: str):
     if not student_ids:
         raise HTTPException(status_code=400, detail="请选择至少一名学生")
 
-    from services.llm_service import run_two_phase_grading, analyze_structure, analyze_quantitative
+    from services.llm_service import run_two_phase_grading, analyze_merged
     from services.task_queue import enqueue
 
     # 先同步磁盘文件到 submissions.json（补充提交的学生可能不在记录中）
@@ -351,9 +380,13 @@ async def batch_grade(request: Request, qid: str):
                     return
 
                 update_submission_record(qid, sid, name, student_path.stem, "analyzing")
-                structure = analyze_structure(student_path, struct_tpl, knowledge=knowledge)
-                quantitative = analyze_quantitative(student_path, quant_tpl, structure, knowledge=knowledge)
-                stu_analysis = {"structure": structure, "quantitative": quantitative}
+                analysis = analyze_merged(student_path, struct_tpl, quant_tpl, knowledge=knowledge)
+                stu_analysis = {"structure": analysis["structure"], "quantitative": analysis["quantitative"]}
+                # 保留元数据到 student analysis
+                if analysis.get("_model"):
+                    stu_analysis["_model"] = analysis["_model"]
+                if analysis.get("_usage"):
+                    stu_analysis["_usage"] = analysis["_usage"]
                 save_student_analysis(qid, sid, name, stu_analysis)
                 update_submission_record(qid, sid, name, student_path.stem, "analyzed")
             except Exception as e:
@@ -513,6 +546,22 @@ async def refresh_grades(request: Request, qid: str):
         lookup_name = rec.get("name", "") if rec else name
         student_path = get_student_submission_path(qid, sid, lookup_name)
         row["_filename"] = student_path.name if student_path else ""
+
+        # 读取评分结果 JSON，附加模型和 token 用量
+        import json as _json
+        student_dir = get_student_dir(qid)
+        safe_name_json = _sanitize_filename_part(name or (rec.get("name", "") if rec else ""))
+        safe_id_json = _sanitize_filename_part(sid)
+        result_path = student_dir / f"{safe_name_json}_{safe_id_json}.json"
+        if result_path.exists():
+            try:
+                rj = _json.loads(result_path.read_text(encoding="utf-8"))
+                row["_model"] = rj.get("_model", "")
+                row["_usage"] = rj.get("_usage", {})
+                row["_phase1_usage"] = rj.get("_phase1_usage", {})
+                row["_phase2_usage"] = rj.get("_phase2_usage", {})
+            except Exception:
+                pass  # JSON 损坏或格式异常，跳过
 
     all_rows = graded_rows + ungraded_rows
     return {"qid": qid, "grades": all_rows, "columns": FIELDNAMES, "added": added}
@@ -747,9 +796,15 @@ async def test_vision_capability(request: Request):
                     },
                 ],
             }],
-            max_tokens=50,
+            max_tokens=1024,
         )
-        reply = response.choices[0].message.content or ""
+        # 推理模型（如 DeepSeek-R1、mimo-v2.5）把思考放在 reasoning_content，
+        # 最终回答在 content。优先取 content，为空时回退到 reasoning_content
+        msg = response.choices[0].message
+        reply = (msg.content or "").strip()
+        if not reply:
+            reasoning = getattr(msg, "reasoning_content", None) or ""
+            reply = reasoning.strip()
 
         # 判断：回复包含"是"且不包含"不是"即为通过
         passed = "是" in reply and "不是" not in reply
@@ -869,10 +924,16 @@ async def query_current_model(request: Request):
                             {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
                         ],
                     }],
-                    max_tokens=50,
-                    timeout=30,
+                    max_tokens=1024,
+                    timeout=60,
                 )
-                reply = vr.choices[0].message.content or ""
+                # 推理模型（如 DeepSeek-R1、mimo-v2.5）把思考放在 reasoning_content，
+                # 最终回答在 content。优先取 content，为空时回退到 reasoning_content
+                msg = vr.choices[0].message
+                reply = (msg.content or "").strip()
+                if not reply:
+                    reasoning = getattr(msg, "reasoning_content", None) or ""
+                    reply = reasoning.strip()
                 vision_reply = reply[:200]
                 vision_ok = "是" in reply and "不是" not in reply
                 if not vision_ok:

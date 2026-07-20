@@ -9,6 +9,7 @@ export async function api(path: string, options: RequestInit = {}): Promise<any>
     ...options,
     headers: { ...headers, ...(options.headers as Record<string, string> || {}) },
     credentials: "include",
+    cache: "no-store",
   });
   if (!resp.ok) {
     const err = await resp.json().catch(() => ({ detail: resp.statusText }));
@@ -59,7 +60,7 @@ export function getSubmissionRecord(qid: string, name: string, studentId: string
 
 // 获取分析结果（学生端，analyze 完成后的轮询目标）
 export function getStudentAnalysisResult(qid: string, name: string, studentId: string) {
-  return api(`/api/student/analysis/${qid}?name=${encodeURIComponent(name)}&student_id=${encodeURIComponent(studentId)}`);
+  return api(`/api/student/analysis/${qid}?name=${encodeURIComponent(name)}&student_id=${encodeURIComponent(studentId)}&_t=${Date.now()}`);
 }
 
 // 新版：分步 upload → analyze → grade
@@ -174,7 +175,7 @@ export function getTeacherStudentPreviewUrl(qid: string, studentId: string): str
 }
 
 export function getStudentAnalysis(qid: string, studentId: string, name: string) {
-  return api(`/api/teacher/student-analysis/${qid}/${studentId}?name=${encodeURIComponent(name)}`);
+  return api(`/api/teacher/student-analysis/${qid}/${studentId}?name=${encodeURIComponent(name)}&_t=${Date.now()}`);
 }
 
 // --- Roster (全局 StudentInfo) ---
@@ -207,7 +208,7 @@ export function triggerAnalysis(qid: string) {
 }
 
 export function getAnalysisResult(qid: string) {
-  return api(`/api/teacher/questions/${qid}/analysis`);
+  return api(`/api/teacher/questions/${qid}/analysis?_t=${Date.now()}`);
 }
 
 export function restartService() {

@@ -40,10 +40,8 @@ from services.question_service import (
     reject_if_fake,
 )
 from services.llm_service import (
-    analyze_structure,
-    analyze_quantitative,
-    analyze_structure_bytes,
-    analyze_quantitative_bytes,
+    analyze_merged,
+    analyze_merged_bytes,
     run_two_phase_grading,
 )
 from services.grade_service import save_grade, save_result_json, get_student_grade, read_all_grades
@@ -274,8 +272,7 @@ def _run_analyze(
         if is_test:
             if not file_bytes:
                 raise RuntimeError("测试模式文件数据丢失，请重新上传")
-            structure = analyze_structure_bytes(file_bytes, filename, struct_tpl, knowledge=knowledge)
-            quantitative = analyze_quantitative_bytes(file_bytes, filename, quant_tpl, structure, knowledge=knowledge)
+            analysis = analyze_merged_bytes(file_bytes, filename, struct_tpl, quant_tpl, knowledge=knowledge)
         else:
             student_path = get_student_submission_path(qid, student_id, name)
             if student_path is None:
@@ -287,14 +284,12 @@ def _run_analyze(
                 set_status(qid, name, student_id, "analyze", "done")
                 return
 
-            structure = analyze_structure(student_path, struct_tpl, knowledge=knowledge)
-            quantitative = analyze_quantitative(student_path, quant_tpl, structure, knowledge=knowledge)
+            analysis = analyze_merged(student_path, struct_tpl, quant_tpl, knowledge=knowledge)
 
+        structure = analysis["structure"]
         # 校验：结构分析结果不能是空的（0视图+0特征表示LLM未真正读图）
         if len(structure.get("views", [])) == 0 and len(structure.get("features", [])) == 0:
             raise RuntimeError("结构分析结果为空（0视图、0特征），模型可能未能正确识读图片，请稍后重试")
-
-        analysis = {"structure": structure, "quantitative": quantitative}
         if not is_test:
             save_student_analysis(qid, student_id, name, analysis)
             from services.question_service import update_submission_record

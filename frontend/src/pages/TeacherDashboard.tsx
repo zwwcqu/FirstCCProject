@@ -137,13 +137,16 @@ export default function TeacherDashboard() {
     try {
       const data = await getTeacherQuestions();
       setQuestions(data);
-      // 加载已有分析结果
+      // 加载已有分析结果，检测进行中的分析
       for (const q of data) {
         if (q.files?.reference_pdf) {
           try {
             const res = await getAnalysisResult(q.id);
             if (res.ready && res.analysis) {
               setAnalysisResults((prev) => ({ ...prev, [q.id]: res.analysis }));
+            } else if (res.ready === false) {
+              // 分析进行中（旧文件已删除，新文件尚未生成），恢复轮询
+              setAnalyzingQid(q.id);
             }
           } catch (_) { /* 该题尚未分析 */ }
         }
@@ -715,6 +718,23 @@ export default function TeacherDashboard() {
                   </div>
                 </div>
 
+                {/* 模型和 Token 用量 */}
+                {(analysis.structure?._model || analysis.quantitative?._model) && (
+                  <div className="bg-gray-50 border rounded px-3 py-2 mb-3 text-xs text-gray-500 flex items-center gap-4 flex-wrap">
+                    <span>模型：<span className="font-medium text-gray-700">{analysis.structure?._model || analysis.quantitative?._model}</span></span>
+                    {analysis.structure?._usage && (
+                      <span>结构分析：<span className="font-mono text-gray-600">{analysis.structure._usage.total_tokens?.toLocaleString()} tokens</span>
+                        <span className="text-gray-300 ml-1">(提示{analysis.structure._usage.prompt_tokens?.toLocaleString()}+生成{analysis.structure._usage.completion_tokens?.toLocaleString()})</span>
+                      </span>
+                    )}
+                    {analysis.quantitative?._usage && (
+                      <span>量化分析：<span className="font-mono text-gray-600">{analysis.quantitative._usage.total_tokens?.toLocaleString()} tokens</span>
+                        <span className="text-gray-300 ml-1">(提示{analysis.quantitative._usage.prompt_tokens?.toLocaleString()}+生成{analysis.quantitative._usage.completion_tokens?.toLocaleString()})</span>
+                      </span>
+                    )}
+                  </div>
+                )}
+
                 {/* 参考工程图预览 */}
                 {q?.files?.reference_pdf && (
                   <div className="mb-3">
@@ -1247,6 +1267,26 @@ export default function TeacherDashboard() {
                     该学生尚未提交工程图文件
                   </div>
                 </div>
+
+                {/* 模型和 Token 用量 */}
+                {(row._model || studentAnalysis?.structure?._model) && (
+                  <div className="bg-gray-50 border rounded px-3 py-2 mb-3 text-xs text-gray-500 flex items-center gap-4 flex-wrap">
+                    <span>模型：<span className="font-medium text-gray-700">{row._model || studentAnalysis?.structure?._model}</span></span>
+                    {row._usage && Object.keys(row._usage).length > 0 && (
+                      <span>评分：<span className="font-mono text-gray-600">{row._usage.total_tokens?.toLocaleString()} tokens</span>
+                        {(row._phase1_usage || row._phase2_usage) && (
+                          <span className="text-gray-300 ml-1">
+                            (阶段一 {row._phase1_usage?.total_tokens?.toLocaleString() || "-"}
+                            + 阶段二 {row._phase2_usage?.total_tokens?.toLocaleString() || "-"})
+                          </span>
+                        )}
+                      </span>
+                    )}
+                    {studentAnalysis?.structure?._usage && (
+                      <span>分析：<span className="font-mono text-gray-600">{studentAnalysis.structure._usage.total_tokens?.toLocaleString()} tokens</span></span>
+                    )}
+                  </div>
+                )}
 
                 {/* 学生图面分析结果 */}
                 {studentAnalysis && (

@@ -248,6 +248,7 @@ def _pixel_similarity(img1: Image.Image, img2: Image.Image, threshold: int = 20)
 
 def _call_and_parse(client, model, messages, parse_fn, temperature=0.1, max_tokens=4096, max_retries=1):
     """调用 LLM → 解析 JSON。JSON 解析失败时自动重试一次"""
+    logger.info(f"[LLM-CALL] 即将调用模型: {model}, max_tokens={max_tokens}")
     kwargs = {
         "model": model,
         "messages": messages,
@@ -256,16 +257,35 @@ def _call_and_parse(client, model, messages, parse_fn, temperature=0.1, max_toke
         "extra_body": {"enable_thinking": False},
     }
     last_error = None
+    last_usage = None
     for attempt in range(max_retries + 1):
         response = client.chat.completions.create(**kwargs)
         raw_text = response.choices[0].message.content or ""
+        # 捕获 token 用量（重试时使用最后一次成功调用的数据）
+        if hasattr(response, 'usage') and response.usage is not None:
+            last_usage = {
+                "prompt_tokens": getattr(response.usage, 'prompt_tokens', 0) or 0,
+                "completion_tokens": getattr(response.usage, 'completion_tokens', 0) or 0,
+                "total_tokens": getattr(response.usage, 'total_tokens', 0) or 0,
+            }
         try:
-            return parse_fn(raw_text)
+            result = parse_fn(raw_text)
+            result["_model"] = model
+            if last_usage:
+                result["_usage"] = last_usage
+            return result
         except ValueError as e:
             last_error = e
             if attempt < max_retries:
                 logger.warning(f"JSON 解析失败（第{attempt+1}次），重试: {e}")
     raise last_error  # type: ignore
+
+
+# ── 元数据清洗 ───────────────────────────────────────────
+
+def _strip_meta(d: dict) -> dict:
+    """去掉 dict 中以下划线开头的内部字段（_model, _usage 等），避免泄露到 LLM prompt"""
+    return {k: v for k, v in d.items() if not k.startswith("_")}
 
 
 # ── Prompt 构建 ──────────────────────────────────────────
@@ -496,7 +516,7 @@ def analyze_quantitative_bytes(data: bytes, filename: str, template_path: Path, 
     client = _build_client()
     model = _get_model()
     template_text = template_path.read_text(encoding="utf-8")
-    prompt_text = template_text.replace("__STRUCTURE_JSON__", json.dumps(structure_json, ensure_ascii=False, indent=2))
+    prompt_text = template_text.replace("__STRUCTURE_JSON__", json.dumps(_strip_meta(structure_json), ensure_ascii=False, indent=2))
     if knowledge:
         prompt_text = f"【补充知识】\n{knowledge}\n\n{prompt_text}"
     b64 = bytes_to_base64(data, filename)
@@ -521,7 +541,7 @@ def analyze_quantitative(image_path: Path, template_path: Path, structure_json: 
     client = _build_client()
     model = _get_model()
     template_text = template_path.read_text(encoding="utf-8")
-    prompt_text = template_text.replace("__STRUCTURE_JSON__", json.dumps(structure_json, ensure_ascii=False, indent=2))
+    prompt_text = template_text.replace("__STRUCTURE_JSON__", json.dumps(_strip_meta(structure_json), ensure_ascii=False, indent=2))
     if knowledge:
         prompt_text = f"【补充知识】\n{knowledge}\n\n{prompt_text}"
     b64 = image_to_base64(image_path)
@@ -536,6 +556,96 @@ def analyze_quantitative(image_path: Path, template_path: Path, structure_json: 
         [{"role": "user", "content": content}],
         _parse_json_response)
     logger.info("量化分析完成")
+    return result
+
+
+# ── 合并分析（单次调用完成结构+量化）───────────────────────
+
+def _build_merged_prompt(struct_template: str, quant_template: str) -> str:
+    """构建合并分析 Prompt：一次调用完成结构分析 + 量化分析"""
+    quant_part = quant_template.replace(
+        "__STRUCTURE_JSON__",
+        "【请直接使用你在任务一中输出的结构分析 JSON 作为本任务的输入依据】"
+    )
+    return (
+        "你是机械制图与检测专家。请一次性完成以下两项任务：\n\n"
+        "## 任务一：结构分析\n" + struct_template + "\n\n"
+        "## 任务二：量化分析（基于你在任务一中输出的结构特征）\n" + quant_part + "\n\n"
+        "请将两项结果合并为一个 JSON，不要用 markdown 代码块包裹：\n"
+        '{\n'
+        '  "structure": { ... 任务一的完整 JSON 输出 ... },\n'
+        '  "quantitative": { ... 任务二的完整 JSON 输出 ... }\n'
+        '}'
+    )
+
+
+def analyze_merged(image_path: Path, struct_template: Path, quant_template: Path,
+                   knowledge: str = "") -> dict:
+    """
+    合并分析：单次 LLM 调用同时完成结构分析和量化分析。
+    返回 {"structure": {...}, "quantitative": {...}, "_model": ..., "_usage": ...}
+    """
+    client = _build_client()
+    model = _get_model()
+    struct_tpl = struct_template.read_text(encoding="utf-8")
+    quant_tpl = quant_template.read_text(encoding="utf-8")
+    prompt_text = _build_merged_prompt(struct_tpl, quant_tpl)
+    if knowledge:
+        prompt_text = f"【补充知识】\n{knowledge}\n\n{prompt_text}"
+    b64 = image_to_base64(image_path)
+
+    content: list[dict] = [
+        {"type": "text", "text": prompt_text},
+        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+    ]
+
+    logger.info(f"合并分析中（模型: {model}）…")
+    merged = _call_and_parse(client, model,
+        [{"role": "user", "content": content}],
+        _parse_json_response)
+    logger.info("合并分析完成")
+
+    # 拆分并保留元数据
+    s = merged.get("structure", {})
+    q = merged.get("quantitative", {})
+    result = {
+        "structure": s if isinstance(s, dict) else {},
+        "quantitative": q if isinstance(q, dict) else {},
+    }
+    result["_model"] = merged.get("_model", model)
+    result["_usage"] = merged.get("_usage", {})
+    return result
+
+
+def analyze_merged_bytes(data: bytes, filename: str, struct_template: Path,
+                         quant_template: Path, knowledge: str = "") -> dict:
+    """合并分析（bytes 版本，测试模式使用）"""
+    client = _build_client()
+    model = _get_model()
+    struct_tpl = struct_template.read_text(encoding="utf-8")
+    quant_tpl = quant_template.read_text(encoding="utf-8")
+    prompt_text = _build_merged_prompt(struct_tpl, quant_tpl)
+    if knowledge:
+        prompt_text = f"【补充知识】\n{knowledge}\n\n{prompt_text}"
+    b64 = bytes_to_base64(data, filename)
+
+    content: list[dict] = [
+        {"type": "text", "text": prompt_text},
+        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+    ]
+
+    logger.info(f"合并分析中（模型: {model}）…")
+    merged = _call_and_parse(client, model,
+        [{"role": "user", "content": content}],
+        _parse_json_response)
+    logger.info("合并分析完成")
+
+    result = {
+        "structure": merged.get("structure", {}) if isinstance(merged.get("structure"), dict) else {},
+        "quantitative": merged.get("quantitative", {}) if isinstance(merged.get("quantitative"), dict) else {},
+    }
+    result["_model"] = merged.get("_model", model)
+    result["_usage"] = merged.get("_usage", {})
     return result
 
 
@@ -563,10 +673,10 @@ def grade_phase1(
     prompt_text = f"""{kn_block}你是一位工程图批阅老师。请对比学生图和参考图的结构特征，评估图形相似度和画图质量。
 
 【参考工程图结构分析】
-{json.dumps(ref_struct, ensure_ascii=False, indent=2)}
+{json.dumps(_strip_meta(ref_struct), ensure_ascii=False, indent=2)}
 
 【学生工程图结构分析】
-{json.dumps(stu_struct, ensure_ascii=False, indent=2)}
+{json.dumps(_strip_meta(stu_struct), ensure_ascii=False, indent=2)}
 
 【评分标准】
 {phase1_criteria}
@@ -712,7 +822,36 @@ def run_two_phase_grading(
                       knowledge=knowledge)
     p2 = grade_phase2(ref_quant, stu_quant, phase2_criteria, knowledge=knowledge)
 
+    # 提取元数据后再合并，避免 p2 覆盖 p1 的 _model 和 _usage
+    p1_usage = p1.pop("_usage", None)
+    p1_model = p1.pop("_model", None)
+    p2_usage = p2.pop("_usage", None)
+    p2_model = p2.pop("_model", None)
+
     merged = {**p1, **p2}
+
+    # 模型名称（两阶段通常一致，取任意一个）
+    model = p1_model or p2_model
+    if model:
+        merged["_model"] = model
+
+    # 按阶段存储用量（前端可按阶段展示）
+    if p1_usage:
+        merged["_phase1_usage"] = p1_usage
+    if p2_usage:
+        merged["_phase2_usage"] = p2_usage
+
+    # 合计用量
+    if p1_usage and p2_usage:
+        merged["_usage"] = {
+            "prompt_tokens": p1_usage["prompt_tokens"] + p2_usage["prompt_tokens"],
+            "completion_tokens": p1_usage["completion_tokens"] + p2_usage["completion_tokens"],
+            "total_tokens": p1_usage["total_tokens"] + p2_usage["total_tokens"],
+        }
+    elif p1_usage:
+        merged["_usage"] = p1_usage
+    elif p2_usage:
+        merged["_usage"] = p2_usage
 
     p1_score = float(merged.get("phase1_similarity", 0))
     p2_score = float(merged.get("phase2_criteria", 0))
