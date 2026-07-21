@@ -11,7 +11,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 3. **两阶段评分** (two-phase grading):
    - Phase 1: visual comparison of student vs reference drawing structure (similarity 60–100%)
    - Phase 2: scoring against teacher criteria using quantitative analysis (0–100%)
-   - Total = Phase1 × Phase2, mapped to 9-level grades (A+≥93.75 → F<50)
+   - Total = √(Phase1 × Phase2), mapped to 9-level grades (A+≥90 → F<50)
 
 The teacher can also provide **补充知识** (supplementary knowledge) about the drawing (e.g., material, surface finish) which is injected into all LLM prompts that read images.
 

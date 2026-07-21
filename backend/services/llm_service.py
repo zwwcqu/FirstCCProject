@@ -9,7 +9,7 @@ LLM 批阅服务。
 - 解析 LLM 返回的 JSON，计算最终等级（A+ ~ F 共 9 档）
 
 评分公式：
-  总分 = 阶段1分数 × 阶段2分数 / 100
+  总分 = √(阶段1分数 × 阶段2分数)
   等级阈值：A+≥90, A≥85, B+≥80, B≥75, C+≥68.75,
             C≥62.5, D+≥56.25, D≥50, F<50
 """
@@ -305,7 +305,7 @@ def _build_prompt(description: str, phase1_criteria: str, phase2_criteria: str) 
 {phase2_criteria}
 
 ### 第三阶段：计算总分
-总分 = 第一阶段分数 × 第二阶段分数
+总分 = √(第一阶段分数 × 第二阶段分数)
 根据总分映射到等级（100~50 线性分布为 A+~D 八档，50以下为F）：
 A+≥90, A≥85, B+≥80, B≥75, C+≥68.75, C≥62.5, D+≥56.25, D≥50, F<50
 
@@ -451,7 +451,7 @@ def grade_submission(
     # 计算总分和等级
     p1 = float(result.get("phase1_similarity", 0))
     p2 = float(result.get("phase2_criteria", 0))
-    total = round(p1 * p2 / 100, 1)
+    total = round((p1 * p2) ** 0.5, 1)
     grade = _compute_grade(total)
 
     result["grade"] = grade

@@ -333,6 +333,8 @@ def list_classes() -> list[dict]:
     _ensure_student_info_dir()
     result = []
     for f in sorted(STUDENT_INFO_DIR.iterdir()):
+        if f.name.startswith("._"):
+            continue
         if f.suffix.lower() == ".csv" and f.stem != "_模版":
             rows = _read_csv(f)
             result.append({"class_name": f.stem, "count": len(rows)})
@@ -365,7 +367,7 @@ def ensure_template() -> str:
 def check_roster(name: str, student_id: str) -> tuple[bool, str]:
     """校验学生是否在任意班级名单中。无任何班级文件时放行。返回 (ok, message)"""
     _ensure_student_info_dir()
-    csvs = [f for f in STUDENT_INFO_DIR.iterdir() if f.suffix.lower() == ".csv" and f.stem != "_模版"]
+    csvs = [f for f in STUDENT_INFO_DIR.iterdir() if f.suffix.lower() == ".csv" and f.stem != "_模版" and not f.name.startswith("._")]
     if not csvs:
         return True, ""
     for f in csvs:
@@ -379,6 +381,8 @@ def find_student_class(name: str, student_id: str) -> str:
     """查找学生所属班级，返回班级名；未找到返回空字符串"""
     _ensure_student_info_dir()
     for f in STUDENT_INFO_DIR.iterdir():
+        if f.name.startswith("._"):
+            continue
         if f.suffix.lower() == ".csv" and f.stem != "_模版":
             for row in _read_csv(f):
                 if row.get("姓名", "").strip() == name.strip() and row.get("学号", "").strip() == student_id.strip():
@@ -391,15 +395,26 @@ def find_student_class(name: str, student_id: str) -> str:
 def save_reference_analysis(qid: str, analysis: dict) -> None:
     """
     保存参考图的分析结果。
-    analysis 应包含 structure 和 quantitative 两个 key。
-    写入 data/{qid}/参考图_结构分析.json 和 参考图_量化分析.json
+    analysis 应包含 structure 和 quantitative 两个 key，以及可选的 _model、_usage 元数据。
+    写入 data/{qid}/参考图_结构分析.json 和 参考图_量化分析.json。
+    元数据（_model, _usage）会嵌入 structure 和 quantitative 内部，供前端展示。
     """
     qdir = get_question_dir(qid)
     qdir.mkdir(parents=True, exist_ok=True)
     struct_path = qdir / "参考图_结构分析.json"
     quant_path = qdir / "参考图_量化分析.json"
-    struct_path.write_text(json.dumps(analysis.get("structure", {}), ensure_ascii=False, indent=2), encoding="utf-8")
-    quant_path.write_text(json.dumps(analysis.get("quantitative", {}), ensure_ascii=False, indent=2), encoding="utf-8")
+
+    structure = analysis.get("structure", {})
+    quantitative = analysis.get("quantitative", {})
+
+    # 将元数据嵌入 structure 和 quantitative 内部，确保前端可以读取
+    for key in ("_model", "_usage"):
+        if key in analysis and analysis[key]:
+            structure[key] = analysis[key]
+            quantitative[key] = analysis[key]
+
+    struct_path.write_text(json.dumps(structure, ensure_ascii=False, indent=2), encoding="utf-8")
+    quant_path.write_text(json.dumps(quantitative, ensure_ascii=False, indent=2), encoding="utf-8")
     logger.info(f"参考图分析结果已保存: [{qid}]")
 
 
@@ -501,7 +516,9 @@ def clear_student_data(qid: str, student_id: str, name: str) -> str:
 def save_student_analysis(qid: str, student_id: str, name: str, analysis: dict) -> None:
     """
     保存学生图的分析结果。
-    写入 data/{qid}/student/{姓名}_{学号}_结构分析.json 和 _量化分析.json
+    analysis 应包含 structure 和 quantitative 两个 key，以及可选的 _model、_usage 元数据。
+    写入 data/{qid}/student/{姓名}_{学号}_结构分析.json 和 _量化分析.json。
+    元数据（_model, _usage）会嵌入 structure 和 quantitative 内部，供前端展示。
     """
     student_dir = get_student_dir(qid)
     student_dir.mkdir(parents=True, exist_ok=True)
@@ -509,8 +526,18 @@ def save_student_analysis(qid: str, student_id: str, name: str, analysis: dict) 
     safe_id = _sanitize_filename_part(student_id)
     struct_path = student_dir / f"{safe_name}_{safe_id}_结构分析.json"
     quant_path = student_dir / f"{safe_name}_{safe_id}_量化分析.json"
-    struct_path.write_text(json.dumps(analysis.get("structure", {}), ensure_ascii=False, indent=2), encoding="utf-8")
-    quant_path.write_text(json.dumps(analysis.get("quantitative", {}), ensure_ascii=False, indent=2), encoding="utf-8")
+
+    structure = analysis.get("structure", {})
+    quantitative = analysis.get("quantitative", {})
+
+    # 将元数据嵌入 structure 和 quantitative 内部，确保前端可以读取
+    for key in ("_model", "_usage"):
+        if key in analysis and analysis[key]:
+            structure[key] = analysis[key]
+            quantitative[key] = analysis[key]
+
+    struct_path.write_text(json.dumps(structure, ensure_ascii=False, indent=2), encoding="utf-8")
+    quant_path.write_text(json.dumps(quantitative, ensure_ascii=False, indent=2), encoding="utf-8")
     logger.info(f"学生图分析结果已保存: [{qid}] {name}({student_id})")
 
 
@@ -533,8 +560,15 @@ def get_student_analysis(qid: str, student_id: str, name: str) -> dict | None:
 
 
 def _read_csv(path: Path) -> list[dict]:
-    """读取 CSV 文件，返回字典列表（内部工具）"""
-    with open(path, "r", encoding="utf-8-sig") as f:
+    """读取 CSV 文件，返回字典列表（内部工具）。兼容 UTF-8 和 GBK 编码"""
+    # 先尝试 UTF-8
+    try:
+        with open(path, "r", encoding="utf-8-sig") as f:
+            return list(csv.DictReader(f))
+    except UnicodeDecodeError:
+        pass
+    # 回退到 GBK（某些中文 Windows 导出的文件）
+    with open(path, "r", encoding="gbk") as f:
         return list(csv.DictReader(f))
 
 
@@ -572,6 +606,8 @@ def get_all_roster_students() -> list[dict]:
     _ensure_student_info_dir()
     students: list[dict] = []
     for f in STUDENT_INFO_DIR.iterdir():
+        if f.name.startswith("._"):
+            continue
         if f.suffix.lower() == ".csv" and f.stem != "_模版":
             for row in _read_csv(f):
                 name = row.get("姓名", "").strip()
