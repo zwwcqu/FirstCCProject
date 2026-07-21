@@ -1143,7 +1143,7 @@ export default function TeacherDashboard() {
                     </div>
                     <div className="flex justify-between">
                       <span className="text-gray-500">文件</span>
-                      <span className="text-gray-600 truncate max-w-[200px]">{supplementFile.name}</span>
+                      <span className="text-gray-600 truncate max-w-[200px]">{supplementFile?.name || ""}</span>
                     </div>
                   </div>
                 )}

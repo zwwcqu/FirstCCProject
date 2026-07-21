@@ -400,7 +400,7 @@ export default function StudentPage() {
             const r = await getStudentAnalysisResult(capturedQid, capturedKey.name, capturedKey.id);
             setAnalysisData(r.analysis);
             setSubmitStatus("");
-            if (capturedIdentity && !capturedIsTest) loadHistory(capturedIdentity.name, capturedIdentity.id);
+            if (!capturedIsTest) loadHistory(capturedKey.name, capturedKey.id);
           } else if (s.step === "analyze" && s.status === "error") {
             clearPolling();
             setSubmitStatus("");
@@ -412,7 +412,7 @@ export default function StudentPage() {
       setSubmitStatus("");
       setError(e.message);
     }
-  };
+  }
 
   // ── 步骤2：评分 ──────────────────────────────────────
 
