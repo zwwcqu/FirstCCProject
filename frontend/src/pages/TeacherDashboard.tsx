@@ -128,7 +128,7 @@ export default function TeacherDashboard() {
   const [image, setImage] = useState<File | null>(null);
   const [refPdf, setRefPdf] = useState<File | null>(null);
   const [submissionType, setSubmissionType] = useState("pdf");  // 学生提交文件类型：pdf / image
-  const [classes, setClasses] = useState("");                  // 适用班别（逗号分隔）
+  const [qClasses, setQClasses] = useState("");               // 适用班别（逗号分隔）
   const [existingImages, setExistingImages] = useState<string[]>([]);
   const [existingRefPdf, setExistingRefPdf] = useState<string | null>(null);
 
@@ -199,7 +199,7 @@ export default function TeacherDashboard() {
     setImage(null);
     setRefPdf(null);
     setSubmissionType("pdf");
-    setClasses("");
+    setQClasses("");
     setExistingImages([]);
     setExistingRefPdf(null);
     setEditingId(null);
@@ -215,7 +215,7 @@ export default function TeacherDashboard() {
     fd.append("phase2_criteria", phase2Criteria);
     fd.append("knowledge", knowledge);
     fd.append("submission_type", submissionType);
-    fd.append("classes", classes);
+    fd.append("classes", qClasses);
     if (image) fd.append("image", image);
     if (refPdf) fd.append("reference_pdf", refPdf);
     try {
@@ -237,7 +237,7 @@ export default function TeacherDashboard() {
     fd.append("phase2_criteria", phase2Criteria);
     fd.append("knowledge", knowledge);
     fd.append("submission_type", submissionType);
-    fd.append("classes", classes);
+    fd.append("classes", qClasses);
     if (image) fd.append("image", image);
     if (refPdf) fd.append("reference_pdf", refPdf);
     try {
@@ -271,7 +271,7 @@ export default function TeacherDashboard() {
       setPhase2Criteria(detail.files?.phase2_criteria || "");
       setKnowledge(detail.files?.knowledge || "");
       setSubmissionType(detail.submission_type || "pdf");
-      setClasses((detail as any).classes || "");
+      setQClasses((detail as any).classes || "");
       setImage(null);
       setRefPdf(null);
       setExistingImages(detail.files?.images || []);
@@ -928,7 +928,7 @@ export default function TeacherDashboard() {
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">适用班别</label>
-                  <input type="text" value={classes} onChange={(e) => setClasses(e.target.value)}
+                  <input type="text" value={qClasses} onChange={(e) => setQClasses(e.target.value)}
                     placeholder="多个班别用逗号分隔，如：25级机电1班,25级机电2班"
                     className="w-full border rounded px-3 py-1.5 text-sm"
                   />
