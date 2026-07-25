@@ -128,6 +128,7 @@ export default function TeacherDashboard() {
   const [image, setImage] = useState<File | null>(null);
   const [refPdf, setRefPdf] = useState<File | null>(null);
   const [submissionType, setSubmissionType] = useState("pdf");  // 学生提交文件类型：pdf / image
+  const [classes, setClasses] = useState("");                  // 适用班别（逗号分隔）
   const [existingImages, setExistingImages] = useState<string[]>([]);
   const [existingRefPdf, setExistingRefPdf] = useState<string | null>(null);
 
@@ -198,6 +199,7 @@ export default function TeacherDashboard() {
     setImage(null);
     setRefPdf(null);
     setSubmissionType("pdf");
+    setClasses("");
     setExistingImages([]);
     setExistingRefPdf(null);
     setEditingId(null);
@@ -213,6 +215,7 @@ export default function TeacherDashboard() {
     fd.append("phase2_criteria", phase2Criteria);
     fd.append("knowledge", knowledge);
     fd.append("submission_type", submissionType);
+    fd.append("classes", classes);
     if (image) fd.append("image", image);
     if (refPdf) fd.append("reference_pdf", refPdf);
     try {
@@ -234,6 +237,7 @@ export default function TeacherDashboard() {
     fd.append("phase2_criteria", phase2Criteria);
     fd.append("knowledge", knowledge);
     fd.append("submission_type", submissionType);
+    fd.append("classes", classes);
     if (image) fd.append("image", image);
     if (refPdf) fd.append("reference_pdf", refPdf);
     try {
@@ -267,6 +271,7 @@ export default function TeacherDashboard() {
       setPhase2Criteria(detail.files?.phase2_criteria || "");
       setKnowledge(detail.files?.knowledge || "");
       setSubmissionType(detail.submission_type || "pdf");
+      setClasses((detail as any).classes || "");
       setImage(null);
       setRefPdf(null);
       setExistingImages(detail.files?.images || []);
@@ -652,15 +657,22 @@ export default function TeacherDashboard() {
                 <tr className="bg-gray-50 border-b">
                   <th className="text-left p-2">题号</th>
                   <th className="text-left p-2">标题</th>
+                  <th className="text-left p-2">教师</th>
+                  <th className="text-left p-2">班别</th>
                   <th className="text-center p-2">参考图分析</th>
                   <th className="text-right p-2">操作</th>
                 </tr>
               </thead>
               <tbody>
-                {questions.map((q) => (
+                {questions.map((q) => {
+                  const myUsername = sessionStorage.getItem("teacher_username") || "";
+                  const isOwner = !(q as any).teacher || (q as any).teacher === myUsername || !myUsername;
+                  return (
                   <tr key={q.id} className="border-b hover:bg-gray-50">
                     <td className="p-2 font-mono">{q.id}</td>
                     <td className="p-2">{q.title}</td>
+                    <td className="p-2 text-sm text-gray-600">{ (q as any).teacher || "-" }</td>
+                    <td className="p-2 text-sm text-gray-600">{ (q as any).classes || "-" }</td>
                     <td className="p-2 text-center">
                       {analyzingQid === q.id ? (
                         <span className="text-yellow-600 text-xs animate-pulse">分析中…</span>
@@ -698,12 +710,19 @@ export default function TeacherDashboard() {
                       )}
                     </td>
                     <td className="p-2 text-right space-x-2">
-                      <button onClick={() => handleEdit(q)} className="text-blue-600 hover:underline">编辑</button>
+                      {isOwner ? (
+                        <>
+                          <button onClick={() => handleEdit(q)} className="text-blue-600 hover:underline">编辑</button>
+                          <button onClick={() => handleDelete(q.id)} className="text-red-600 hover:underline">删除</button>
+                        </>
+                      ) : (
+                        <span className="text-gray-300 text-xs">只读</span>
+                      )}
                       <button onClick={() => handleViewGrades(q.id)} className="text-green-600 hover:underline">成绩</button>
-                      <button onClick={() => handleDelete(q.id)} className="text-red-600 hover:underline">删除</button>
                     </td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           )}
@@ -905,6 +924,13 @@ export default function TeacherDashboard() {
                     rows={4}
                     className="w-full border rounded px-3 py-2"
                     placeholder="例如：零件材料为HT200、表面粗糙度Ra6.3、未注倒角C1等"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">适用班别</label>
+                  <input type="text" value={classes} onChange={(e) => setClasses(e.target.value)}
+                    placeholder="多个班别用逗号分隔，如：25级机电1班,25级机电2班"
+                    className="w-full border rounded px-3 py-1.5 text-sm"
                   />
                 </div>
                 <div>

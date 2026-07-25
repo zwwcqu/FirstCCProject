@@ -57,6 +57,17 @@ def _require_auth(request: Request) -> None:
         raise HTTPException(status_code=401, detail="请先登录")
 
 
+def _get_teacher_username(request: Request) -> str:
+    """从 session 中提取当前教师的用户名"""
+    token = request.cookies.get("session") or ""
+    if token:
+        sf = __import__("config").DATA_DIR / ".sessions" / f"{token}.json"
+        if sf.exists():
+            data = json.loads(sf.read_text(encoding="utf-8"))
+            return data.get("teacher_username", "")
+    return ""
+
+
 def _run_reference_analysis(qid: str) -> None:
     """
     教师参考图分析，通过任务队列以最高优先级执行。
@@ -172,11 +183,14 @@ async def create_question_handler(
     image: Optional[UploadFile] = File(None),           # 题目附图（可选）
     reference_pdf: Optional[UploadFile] = File(None),   # 参考工程图（可选）
     submission_type: str = Form("pdf"),                  # 学生提交文件类型：pdf / image
+    classes: str = Form(""),                             # 适用班别（逗号分隔）
 ):
     """新增题目"""
     _require_auth(request)
+    teacher = _get_teacher_username(request)
     try:
-        entry = create_question(qid, title, description, phase1_criteria, phase2_criteria, knowledge, submission_type)
+        entry = create_question(qid, title, description, phase1_criteria, phase2_criteria,
+                                knowledge, submission_type, teacher=teacher, classes=classes)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     if image and image.filename:
@@ -201,10 +215,16 @@ async def update_question_handler(
     image: Optional[UploadFile] = File(None),
     reference_pdf: Optional[UploadFile] = File(None),
     submission_type: str = Form("pdf"),                  # 学生提交文件类型：pdf / image
+    classes: str = Form(""),                             # 适用班别（逗号分隔）
 ):
     """编辑已有题目"""
     _require_auth(request)
-    entry = update_question(qid, title, description, phase1_criteria, phase2_criteria, knowledge, submission_type)
+    teacher = _get_teacher_username(request)
+    try:
+        entry = update_question(qid, title, description, phase1_criteria, phase2_criteria,
+                                knowledge, submission_type, teacher=teacher, classes=classes)
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
     if entry is None:
         raise HTTPException(status_code=404, detail="题目不存在")
     if image and image.filename:
@@ -219,8 +239,14 @@ async def update_question_handler(
 
 @router.delete("/questions/{qid}")
 async def delete_question_handler(request: Request, qid: str):
-    """删除题目（数据移到 backup/ 目录）"""
+    """删除题目（数据移到 backup/ 目录）。仅创建者可删除"""
     _require_auth(request)
+    teacher = _get_teacher_username(request)
+    # 检查所有权
+    questions = read_questions_index()
+    for q in questions:
+        if q["id"] == qid and teacher and q.get("teacher", "") and q["teacher"] != teacher:
+            raise HTTPException(status_code=403, detail=f"题目 [{qid}] 由 {q['teacher']} 创建，您无权删除")
     ok = delete_question(qid)
     if not ok:
         raise HTTPException(status_code=404, detail="题目不存在")

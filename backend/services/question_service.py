@@ -71,8 +71,9 @@ def get_question(qid: str) -> dict | None:
 
 def create_question(qid: str, title: str, description: str,
                     phase1_criteria: str, phase2_criteria: str,
-                    knowledge: str = "", submission_type: str = "pdf") -> dict:
-    """创建题目：写索引 + 创建目录 + 写内容文件"""
+                    knowledge: str = "", submission_type: str = "pdf",
+                    teacher: str = "", classes: str = "") -> dict:
+    """创建题目：写索引 + 创建目录 + 写内容文件。teacher=创建者用户名，classes=适用班别"""
     if not qid.isdigit():
         raise ValueError("题号必须为非负整数")
     questions = read_questions_index()
@@ -89,23 +90,32 @@ def create_question(qid: str, title: str, description: str,
     (qdir / "阶段2评分标准.md").write_text(phase2_criteria, encoding="utf-8")
     (qdir / "补充知识.md").write_text(knowledge, encoding="utf-8")
 
-    entry = {"id": qid, "title": title, "submission_type": submission_type}
+    entry = {"id": qid, "title": title, "submission_type": submission_type,
+             "teacher": teacher, "classes": classes}
     questions.append(entry)
     write_questions_index(questions)
-    logger.info(f"题目已创建: [{qid}] {title}")
+    logger.info(f"题目已创建: [{qid}] {title} by {teacher}")
     return entry
 
 
 def update_question(qid: str, title: str, description: str,
                     phase1_criteria: str, phase2_criteria: str,
-                    knowledge: str = "", submission_type: str = "pdf") -> dict | None:
-    """编辑题目：更新索引 + 覆盖内容文件"""
+                    knowledge: str = "", submission_type: str = "pdf",
+                    teacher: str = "", classes: str = "") -> dict | None:
+    """编辑题目：更新索引 + 覆盖内容文件。仅拥有者可修改"""
     questions = read_questions_index()
     found = None
     for q in questions:
         if q["id"] == qid:
+            # 检查所有权：非创建者不可修改
+            if teacher and q.get("teacher", "") and q["teacher"] != teacher:
+                raise PermissionError(f"题目 [{qid}] 由 {q['teacher']} 创建，您无权修改")
             q["title"] = title
             q["submission_type"] = submission_type
+            if teacher:
+                q["teacher"] = teacher
+            if classes:
+                q["classes"] = classes
             found = q
             break
     if found is None:
@@ -117,7 +127,7 @@ def update_question(qid: str, title: str, description: str,
     (qdir / "阶段2评分标准.md").write_text(phase2_criteria, encoding="utf-8")
     (qdir / "补充知识.md").write_text(knowledge, encoding="utf-8")
     write_questions_index(questions)
-    logger.info(f"题目已更新: [{qid}] {title}")
+    logger.info(f"题目已更新: [{qid}] {title} by {teacher}")
     return found
 
 
