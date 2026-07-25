@@ -273,7 +273,7 @@ export default function TeacherDashboard() {
       setPhase2Criteria(detail.files?.phase2_criteria || "");
       setKnowledge(detail.files?.knowledge || "");
       setSubmissionType(detail.submission_type || "pdf");
-      setQClasses(((detail as any).classes || "").split(",").filter(Boolean));
+      setQClasses(((q as any).classes || "").split(",").filter(Boolean));
       setImage(null);
       setRefPdf(null);
       setExistingImages(detail.files?.images || []);
