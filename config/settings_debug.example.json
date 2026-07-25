@@ -1,0 +1,93 @@
+{
+  "_说明": "══════════════════════════════════════════════════════════════",
+  "_说明_": "工程图批阅系统 — 调试/运维参数（不显示在教师设置页面）",
+  "_说明__": "══════════════════════════════════════════════════════════════",
+
+  "rate_limit": {
+    "_说明": "学生提交接口频率限制",
+    "window_seconds": 60,
+    "_window_seconds": "滑动窗口时长（秒）",
+    "max_requests": 50,
+    "_max_requests": "窗口内同一 IP 最大请求数"
+  },
+
+  "sessions": {
+    "_说明": "登录会话管理",
+    "teacher_timeout_minutes": 30,
+    "_teacher_timeout_minutes": "教师 session 无操作超时（分钟）",
+    "student_timeout_minutes": 1,
+    "_student_timeout_minutes": "学生 session 无操作超时（分钟）",
+    "cleanup_interval_seconds": 600,
+    "_cleanup_interval_seconds": "过期 session 清理间隔（秒）"
+  },
+
+  "submit_status": {
+    "_说明": "异步提交状态追踪",
+    "expire_seconds": 1800,
+    "_expire_seconds": "提交状态记录过期时间（秒），超过后自动清理",
+    "cleanup_interval_seconds": 300,
+    "_cleanup_interval_seconds": "过期状态清理间隔（秒）"
+  },
+
+  "task_queue": {
+    "_说明": "LLM 任务队列",
+    "max_concurrency": 5,
+    "_max_concurrency": "最大并发 worker 数上限（实际并发取此值与模型 concurrency 的较小值）",
+    "worker_poll_timeout": 1,
+    "_worker_poll_timeout": "Worker 从队列取任务的等待超时（秒）",
+    "shutdown_timeout": 5,
+    "_shutdown_timeout": "停止服务时等待 worker 线程结束的超时（秒）"
+  },
+
+  "request_timeouts": {
+    "_说明": "各 API 端点的 HTTP 请求超时（秒）",
+    "upload": 120,
+    "_upload": "文件上传（含 PDF→PNG 转换）",
+    "teacher_questions": 120,
+    "_teacher_questions": "教师创建/编辑题目（含文件上传）",
+    "analyze": 10,
+    "_analyze": "分析入队（仅入队操作，很快）",
+    "grade": 10,
+    "_grade": "评分入队（仅入队操作，很快）",
+    "default": 60,
+    "_default": "其他未列出的端点默认超时"
+  },
+
+  "photo_detection": {
+    "_说明": "虚假作业检测（拍照/截图判别），默认关闭",
+    "enabled": false,
+    "_enabled": "是否启用拍照检测（true=自动拦截实物照片/截图）",
+    "render_dpi": 120,
+    "_render_dpi": "检测用 PDF 渲染 DPI",
+    "sample_size": 200,
+    "_sample_size": "色彩分布采样缩略图边长（像素）",
+    "color_threshold": 18,
+    "_color_threshold": "RGB 通道最大差值阈值（超过视为彩色噪点）",
+    "white_threshold": 250,
+    "_white_threshold": "判定为\"纯白\"的灰度最低值",
+    "color_rate_max": 0.05,
+    "_color_rate_max": "彩色噪点比例上限（超过为照片）",
+    "white_rate_min": 0.75,
+    "_white_rate_min": "纯白背景比例下限（低于为截图/扫描件）",
+    "aspect_ratio_min": 1.39,
+    "_aspect_ratio_min": "工程图纸宽高比下限（A4/A3 标准范围）",
+    "aspect_ratio_max": 1.43,
+    "_aspect_ratio_max": "工程图纸宽高比上限"
+  },
+
+  "pdf_validation_dpi": 72,
+  "_pdf_validation_dpi": "PDF 文件有效性校验时的渲染 DPI（低 DPI 足够判断文件是否损坏）",
+
+  "frontend": {
+    "_说明": "前端行为参数（后端透传给前端）",
+    "max_file_mb": 20,
+    "_max_file_mb": "学生上传文件大小上限（MB）",
+    "poll_interval_ms": 2000,
+    "_poll_interval_ms": "状态轮询间隔（毫秒）",
+    "poll_timeout_ms": 120000,
+    "_poll_timeout_ms": "状态轮询总超时（毫秒）"
+  },
+
+  "log_level": "INFO",
+  "_log_level": "全局日志级别：DEBUG | INFO | WARNING | ERROR"
+}

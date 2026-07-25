@@ -208,14 +208,22 @@ def get_question_files(qid: str) -> dict:
 # ── 评分模板（新建题目时预填）────────────────────────────
 
 def get_scoring_templates() -> dict:
-    """从 config/ 目录读取两个评分模板文件，返回 {phase1, phase2}"""
-    result = {"phase1": "", "phase2": ""}
-    t1 = CONFIG_DIR / "评分模版1.md"
-    t2 = CONFIG_DIR / "评分模版2.md"
-    if t1.exists():
-        result["phase1"] = t1.read_text(encoding="utf-8").strip()
-    if t2.exists():
-        result["phase2"] = t2.read_text(encoding="utf-8").strip()
+    """
+    读取评分模板默认值（新建题目时预填）。
+    优先使用 settings 中的模板，为空时回退到 config/ 目录的文件。
+    """
+    from config import get_scoring_templates as _get_templates
+    stored = _get_templates()
+    result = {"phase1": stored.get("phase1", "").strip(), "phase2": stored.get("phase2", "").strip()}
+    # 如果 settings 中为空，回退到文件
+    if not result["phase1"]:
+        t1 = CONFIG_DIR / "评分模版1.md"
+        if t1.exists():
+            result["phase1"] = t1.read_text(encoding="utf-8").strip()
+    if not result["phase2"]:
+        t2 = CONFIG_DIR / "评分模版2.md"
+        if t2.exists():
+            result["phase2"] = t2.read_text(encoding="utf-8").strip()
     return result
 
 

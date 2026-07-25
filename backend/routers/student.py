@@ -53,16 +53,25 @@ router = APIRouter(prefix="/api/student", tags=["student"])
 
 # ── 频率限制 ─────────────────────────────────────────────
 _RATE_LIMIT: dict[str, list[float]] = {}
-_RATE_WINDOW = 60
-_RATE_MAX = 50
+
+
+def _get_rate_limit() -> tuple[int, int]:
+    """从 debug 配置读取频率限制（window_seconds, max_requests）"""
+    try:
+        from config import read_settings_debug
+        rl = read_settings_debug().get("rate_limit", {})
+        return rl.get("window_seconds", 60), rl.get("max_requests", 50)
+    except Exception:
+        return 60, 50
 
 
 def _check_rate_limit(request: Request) -> None:
     ip = request.client.host if request.client else "unknown"
     now = time.time()
+    window, max_req = _get_rate_limit()
     timestamps = _RATE_LIMIT.get(ip, [])
-    timestamps = [t for t in timestamps if now - t < _RATE_WINDOW]
-    if len(timestamps) >= _RATE_MAX:
+    timestamps = [t for t in timestamps if now - t < window]
+    if len(timestamps) >= max_req:
         logger.warning(f"IP {ip} 提交过于频繁，已拒绝")
         raise HTTPException(status_code=429, detail="提交过于频繁，请稍后再试")
     timestamps.append(now)

@@ -8,6 +8,7 @@ import {
   updateQuestion,
   deleteQuestion,
   getGrades,
+  getSettings,
   getQuestionDetail,
   getClasses,
   getClassStudents,
@@ -161,6 +162,14 @@ export default function TeacherDashboard() {
   useEffect(() => {
     checkLogin().catch(() => navigate("/teacher"));
     loadQuestions();
+    // 加载等级阈值配置
+    getSettings().then((s) => {
+      if (s.grade_thresholds) {
+        const entries = Object.entries(s.grade_thresholds) as [string, number][];
+        entries.sort((a, b) => b[1] - a[1]); // 分数从高到低
+        setGradeThresholds(entries);
+      }
+    }).catch(() => {});
   }, [navigate, loadQuestions]);
 
   // 轮询参考图分析结果
@@ -394,17 +403,18 @@ export default function TeacherDashboard() {
     setEditValue(value);
   };
 
+  // 从后端配置加载等级阈值（不再硬编码）
+  const [gradeThresholds, setGradeThresholds] = useState<[number, string][]>([
+    [90, "A+"], [85, "A"], [80, "B+"], [75, "B"],
+    [68.75, "C+"], [62.5, "C"], [56.25, "D+"], [50, "D"],
+  ]);
+
   const computeTotal = (p1: number, p2: number) => Math.round(Math.sqrt(p1 * p2) * 10) / 10;
 
   const computeGrade = (total: number) => {
-    if (total >= 90) return "A+";
-    if (total >= 85) return "A";
-    if (total >= 80) return "B+";
-    if (total >= 75) return "B";
-    if (total >= 68.75) return "C+";
-    if (total >= 62.5) return "C";
-    if (total >= 56.25) return "D+";
-    if (total >= 50) return "D";
+    for (const [threshold, grade] of gradeThresholds) {
+      if (total >= threshold) return grade;
+    }
     return "F";
   };
 

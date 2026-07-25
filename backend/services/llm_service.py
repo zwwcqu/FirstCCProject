@@ -26,7 +26,7 @@ from pathlib import Path
 from openai import OpenAI
 from PIL import Image
 
-from config import read_settings
+from config import read_settings, get_llm_params, get_image_params, get_grade_thresholds, get_prompt_templates, get_scoring_templates
 
 logger = logging.getLogger(__name__)
 
@@ -54,10 +54,11 @@ def _get_active_config() -> dict:
 def _build_client() -> OpenAI:
     """按当前激活模型配置创建 OpenAI 客户端"""
     cfg = _get_active_config()
+    llm = get_llm_params()
     return OpenAI(
         base_url=cfg["api_base"],
         api_key=cfg["api_key"],
-        timeout=120,
+        timeout=llm.get("client_timeout", 120),
     )
 
 
@@ -80,29 +81,56 @@ def _get_model() -> str:
 
 
 # ── 图像处理 ─────────────────────────────────────────────
-MAX_IMAGE_SIZE = 3508                     # 长边最大像素数，超过则等比缩放
+
+def _analysis_max_size() -> int:
+    return get_image_params().get("analysis_max_size", 3508)
 
 
-def _resize_image(img: Image.Image) -> Image.Image:
-    """若图像长边超过 MAX_IMAGE_SIZE，等比缩放"""
+def _phase1_max_size() -> int:
+    return get_image_params().get("phase1_max_size", 768)
+
+
+def _phase1_jpeg_quality() -> int:
+    return get_image_params().get("phase1_jpeg_quality", 55)
+
+
+def _analysis_jpeg_quality() -> int:
+    return get_image_params().get("analysis_jpeg_quality", 85)
+
+
+def _analysis_dpi() -> int:
+    return get_image_params().get("analysis_dpi", 150)
+
+
+def _resize_image(img: Image.Image, max_size: int | None = None) -> Image.Image:
+    """若图像长边超过 max_size，等比缩放。max_size=None 时使用 analysis_max_size"""
+    if max_size is None:
+        max_size = _analysis_max_size()
     w, h = img.size
     longest = max(w, h)
-    if longest <= MAX_IMAGE_SIZE:
+    if longest <= max_size:
         return img
-    ratio = MAX_IMAGE_SIZE / longest
+    ratio = max_size / longest
     new_w, new_h = int(w * ratio), int(h * ratio)
     return img.resize((new_w, new_h), Image.LANCZOS)
 
 
-def image_to_base64(path: Path) -> str:
-    """将 PDF 或图片文件转为 JPEG 的 Base64 字符串。PDF 取首页渲染"""
+def image_to_base64(path: Path, max_size: int | None = None,
+                    quality: int | None = None) -> str:
+    """将 PDF 或图片文件转为 JPEG 的 Base64 字符串。PDF 取首页渲染。
+    max_size: 长边最大像素数（None=使用 analysis_max_size）；quality: JPEG 质量（None=使用 analysis_jpeg_quality）"""
+    if max_size is None:
+        max_size = _analysis_max_size()
+    if quality is None:
+        quality = _analysis_jpeg_quality()
+    dpi = _analysis_dpi()
     if path.suffix.lower() == ".pdf":
         try:
             from pdf2image import convert_from_path
-            images = convert_from_path(str(path), first_page=1, last_page=1, dpi=150)
-            img = _resize_image(images[0])
+            images = convert_from_path(str(path), first_page=1, last_page=1, dpi=dpi)
+            img = _resize_image(images[0], max_size)
             buf = BytesIO()
-            img.save(buf, format="JPEG", quality=85)
+            img.save(buf, format="JPEG", quality=quality)
             return base64.b64encode(buf.getvalue()).decode()
         except ImportError:
             raise RuntimeError("pdf2image 未安装，无法处理 PDF 工程图。请安装 poppler 和 pdf2image。")
@@ -110,9 +138,9 @@ def image_to_base64(path: Path) -> str:
         img = Image.open(path)
         if img.mode in ("RGBA", "P"):
             img = img.convert("RGB")        # RGBA/调色板转为 RGB，避免 JPEG 保存报错
-        img = _resize_image(img)
+        img = _resize_image(img, max_size)
         buf = BytesIO()
-        img.save(buf, format="JPEG", quality=85)
+        img.save(buf, format="JPEG", quality=quality)
         return base64.b64encode(buf.getvalue()).decode()
     else:
         raise ValueError(f"不支持的文件格式: {path.suffix}")
@@ -121,10 +149,11 @@ def image_to_base64(path: Path) -> str:
 def save_as_png(input_path: Path, output_path: Path) -> Path:
     """将 PDF/图片转换为 PNG 并保存到 output_path，返回输出路径"""
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    dpi = _analysis_dpi()
     if input_path.suffix.lower() == ".pdf":
         try:
             from pdf2image import convert_from_path
-            images = convert_from_path(str(input_path), first_page=1, last_page=1, dpi=150)
+            images = convert_from_path(str(input_path), first_page=1, last_page=1, dpi=dpi)
             img = _resize_image(images[0])
             img.save(str(output_path), format="PNG")
             return output_path
@@ -141,16 +170,23 @@ def save_as_png(input_path: Path, output_path: Path) -> Path:
         raise ValueError(f"不支持的文件格式: {input_path.suffix}")
 
 
-def bytes_to_base64(data: bytes, filename: str) -> str:
-    """将内存中的 PDF/图片 bytes 直接转为 JPEG Base64，不落盘。测试模式使用"""
+def bytes_to_base64(data: bytes, filename: str, max_size: int | None = None,
+                    quality: int | None = None) -> str:
+    """将内存中的 PDF/图片 bytes 直接转为 JPEG Base64，不落盘。测试模式使用。
+    max_size: 长边最大像素数（None=使用 analysis_max_size）；quality: JPEG 质量（None=使用 analysis_jpeg_quality）"""
+    if max_size is None:
+        max_size = _analysis_max_size()
+    if quality is None:
+        quality = _analysis_jpeg_quality()
+    dpi = _analysis_dpi()
     ext = Path(filename).suffix.lower()
     if ext == ".pdf":
         try:
             from pdf2image import convert_from_bytes
-            images = convert_from_bytes(data, first_page=1, last_page=1, dpi=150)
-            img = _resize_image(images[0])
+            images = convert_from_bytes(data, first_page=1, last_page=1, dpi=dpi)
+            img = _resize_image(images[0], max_size)
             buf = BytesIO()
-            img.save(buf, format="JPEG", quality=85)
+            img.save(buf, format="JPEG", quality=quality)
             return base64.b64encode(buf.getvalue()).decode()
         except ImportError:
             raise RuntimeError("pdf2image 未安装，无法处理 PDF 工程图。请安装 poppler 和 pdf2image。")
@@ -158,9 +194,9 @@ def bytes_to_base64(data: bytes, filename: str) -> str:
         img = Image.open(BytesIO(data))
         if img.mode in ("RGBA", "P"):
             img = img.convert("RGB")
-        img = _resize_image(img)
+        img = _resize_image(img, max_size)
         buf = BytesIO()
-        img.save(buf, format="JPEG", quality=85)
+        img.save(buf, format="JPEG", quality=quality)
         return base64.b64encode(buf.getvalue()).decode()
     else:
         raise ValueError(f"不支持的文件格式: {ext}")
@@ -246,15 +282,24 @@ def _pixel_similarity(img1: Image.Image, img2: Image.Image, threshold: int = 20)
 
 # ── LLM 调用 + JSON 解析（自动重试）─────────────────────
 
-def _call_and_parse(client, model, messages, parse_fn, temperature=0.1, max_tokens=4096, max_retries=1):
-    """调用 LLM → 解析 JSON。JSON 解析失败时自动重试一次"""
+def _call_and_parse(client, model, messages, parse_fn, temperature=None, max_tokens=None, max_retries=None):
+    """调用 LLM → 解析 JSON。JSON 解析失败时自动重试一次。
+    temperature/max_tokens/max_retries: None=使用 settings 默认值"""
+    llm = get_llm_params()
+    if temperature is None:
+        temperature = llm.get("temperature", 0.1)
+    if max_tokens is None:
+        max_tokens = llm.get("max_tokens", 4096)
+    if max_retries is None:
+        max_retries = 1
+    enable_thinking = llm.get("enable_thinking", False)
     logger.info(f"[LLM-CALL] 即将调用模型: {model}, max_tokens={max_tokens}")
     kwargs = {
         "model": model,
         "messages": messages,
         "temperature": temperature,
         "max_tokens": max_tokens,
-        "extra_body": {"enable_thinking": False},
+        "extra_body": {"enable_thinking": enable_thinking},
     }
     last_error = None
     last_usage = None
@@ -292,6 +337,8 @@ def _strip_meta(d: dict) -> dict:
 
 def _build_prompt(description: str, phase1_criteria: str, phase2_criteria: str) -> str:
     """组装两阶段评分 Prompt 文本"""
+    thresholds = get_grade_thresholds()
+    threshold_text = "，".join(f"{name}≥{score}" for score, name in thresholds) + "，F<" + str(int(thresholds[-1][0]) if thresholds else 50)
     return f"""你是一位工程图批阅老师。请根据以下信息，分两阶段批阅学生提交的工程图。
 
 【题目】{description}
@@ -307,7 +354,7 @@ def _build_prompt(description: str, phase1_criteria: str, phase2_criteria: str) 
 ### 第三阶段：计算总分
 总分 = √(第一阶段分数 × 第二阶段分数)
 根据总分映射到等级（100~50 线性分布为 A+~D 八档，50以下为F）：
-A+≥90, A≥85, B+≥80, B≥75, C+≥68.75, C≥62.5, D+≥56.25, D≥50, F<50
+{threshold_text}
 
 请严格按以下 JSON 格式输出，不要包含其他文字：
 {{
@@ -385,22 +432,10 @@ def _parse_llm_response(text: str) -> dict:
 
 # ── 等级计算 ─────────────────────────────────────────────
 
-# 分数阈值 → 等级（从高到低排列，匹配第一个命中的）
-GRADE_THRESHOLDS = [
-    (90, "A+"),
-    (85, "A"),
-    (80, "B+"),
-    (75, "B"),
-    (68.75, "C+"),
-    (62.5, "C"),
-    (56.25, "D+"),
-    (50, "D"),
-]
-
-
 def _compute_grade(total: float) -> str:
-    """按总分映射到九档等级，低于 50 为 F"""
-    for threshold, grade in GRADE_THRESHOLDS:
+    """按总分映射到九档等级，低于最低阈值为 F"""
+    thresholds = get_grade_thresholds()
+    for threshold, grade in thresholds:
         if total >= threshold:
             return grade
     return "F"
@@ -584,11 +619,19 @@ def analyze_merged(image_path: Path, struct_template: Path, quant_template: Path
     """
     合并分析：单次 LLM 调用同时完成结构分析和量化分析。
     返回 {"structure": {...}, "quantitative": {...}, "_model": ..., "_usage": ...}
+    优先使用 settings 中的模板，settings 为空时回退到文件。
     """
     client = _build_client()
     model = _get_model()
-    struct_tpl = struct_template.read_text(encoding="utf-8")
-    quant_tpl = quant_template.read_text(encoding="utf-8")
+    templates = get_prompt_templates()
+    # 根据文件名判断使用哪个模板 key
+    def _read_tpl(tpl_path: Path, settings_key: str) -> str:
+        tpl = templates.get(settings_key, "")
+        if tpl:
+            return tpl
+        return tpl_path.read_text(encoding="utf-8")
+    struct_tpl = _read_tpl(struct_template, "structure_analysis" if "学生" not in str(struct_template) else "structure_analysis_student")
+    quant_tpl = _read_tpl(quant_template, "quantitative_analysis" if "学生" not in str(quant_template) else "quantitative_analysis_student")
     prompt_text = _build_merged_prompt(struct_tpl, quant_tpl)
     if knowledge:
         prompt_text = f"【补充知识】\n{knowledge}\n\n{prompt_text}"
@@ -619,11 +662,18 @@ def analyze_merged(image_path: Path, struct_template: Path, quant_template: Path
 
 def analyze_merged_bytes(data: bytes, filename: str, struct_template: Path,
                          quant_template: Path, knowledge: str = "") -> dict:
-    """合并分析（bytes 版本，测试模式使用）"""
+    """合并分析（bytes 版本，测试模式使用）。
+    优先使用 settings 中的模板，settings 为空时回退到文件。"""
     client = _build_client()
     model = _get_model()
-    struct_tpl = struct_template.read_text(encoding="utf-8")
-    quant_tpl = quant_template.read_text(encoding="utf-8")
+    templates = get_prompt_templates()
+    def _read_tpl(tpl_path: Path, settings_key: str) -> str:
+        tpl = templates.get(settings_key, "")
+        if tpl:
+            return tpl
+        return tpl_path.read_text(encoding="utf-8")
+    struct_tpl = _read_tpl(struct_template, "structure_analysis" if "学生" not in str(struct_template) else "structure_analysis_student")
+    quant_tpl = _read_tpl(quant_template, "quantitative_analysis" if "学生" not in str(quant_template) else "quantitative_analysis_student")
     prompt_text = _build_merged_prompt(struct_tpl, quant_tpl)
     if knowledge:
         prompt_text = f"【补充知识】\n{knowledge}\n\n{prompt_text}"
@@ -670,7 +720,9 @@ def grade_phase1(
     model = _get_model()
 
     kn_block = f"【补充知识】\n{knowledge}\n\n" if knowledge else ""
-    prompt_text = f"""{kn_block}你是一位工程图批阅老师。请对比学生图和参考图的结构特征，评估图形相似度和画图质量。
+    templates = get_prompt_templates()
+    phase1_guide = templates.get("phase1_guide", "你是一位工程图批阅老师。请对比学生图和参考图的结构特征，评估图形相似度和画图质量。")
+    prompt_text = f"""{kn_block}{phase1_guide}
 
 【参考工程图结构分析】
 {json.dumps(_strip_meta(ref_struct), ensure_ascii=False, indent=2)}
@@ -687,11 +739,13 @@ def grade_phase1(
   "phase1_comment": "与参考图相比的相似度评价，指出学生图在结构完整性和画图规范性方面的表现"
 }}"""
 
-    ref_b64 = image_to_base64(ref_image_path)
+    p1_size = _phase1_max_size()
+    p1_qual = _phase1_jpeg_quality()
+    ref_b64 = image_to_base64(ref_image_path, max_size=p1_size, quality=p1_qual)
     if stu_data:
-        stu_b64 = bytes_to_base64(stu_data, stu_filename)
+        stu_b64 = bytes_to_base64(stu_data, stu_filename, max_size=p1_size, quality=p1_qual)
     else:
-        stu_b64 = image_to_base64(stu_image_path)
+        stu_b64 = image_to_base64(stu_image_path, max_size=p1_size, quality=p1_qual)
 
     content: list[dict] = [
         {"type": "text", "text": prompt_text},
@@ -757,17 +811,22 @@ def grade_phase2(
     client = _build_client()
     model = _get_model()
 
-    from config import CONFIG_DIR
-    hint_path = CONFIG_DIR / "二阶段修正提示词.txt"
-    phase2_hint = hint_path.read_text(encoding="utf-8") if hint_path.exists() else ""
+    templates = get_prompt_templates()
+    phase2_hint = templates.get("phase2_correction_hint", "")
+    # 如果 settings 中为空，回退到文件
+    if not phase2_hint:
+        from config import CONFIG_DIR
+        hint_path = CONFIG_DIR / "二阶段修正提示词.txt"
+        phase2_hint = hint_path.read_text(encoding="utf-8") if hint_path.exists() else ""
 
     ref_simple = _simplify_quantitative(ref_quant)
     stu_simple = _simplify_quantitative(stu_quant)
 
     kn_block = f"【补充知识】\n{knowledge}\n\n" if knowledge else ""
+    phase2_guide = templates.get("phase2_guide", "你是一位机械检测工程师。请逐项对比两份量化分析数据，评估学生标注的完整性和正确性。")
     prompt_text = f"""{kn_block}{phase2_hint}
 
-你是一位机械检测工程师。请逐项对比两份量化分析数据，评估学生标注的完整性和正确性。
+{phase2_guide}
 
 【参考图量化数据】
 {json.dumps(ref_simple, ensure_ascii=False, indent=2)}

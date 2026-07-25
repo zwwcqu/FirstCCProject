@@ -21,23 +21,32 @@ import secrets
 import time
 from datetime import datetime, timedelta
 
-from config import read_settings, write_settings, DATA_DIR
+from config import read_settings, write_settings, DATA_DIR, read_settings_debug
 
 logger = logging.getLogger(__name__)
 
+# ── Session 超时（从 debug 配置读取，提供内置默认值）─────
+def _get_teacher_timeout() -> timedelta:
+    minutes = read_settings_debug().get("sessions", {}).get("teacher_timeout_minutes", 30)
+    return timedelta(minutes=minutes)
+
+def _get_student_timeout() -> timedelta:
+    minutes = read_settings_debug().get("sessions", {}).get("student_timeout_minutes", 1)
+    return timedelta(minutes=minutes)
+
+def _get_session_cleanup_interval() -> int:
+    return read_settings_debug().get("sessions", {}).get("cleanup_interval_seconds", 600)
+
 # ── 教师 Session 配置 ──────────────────────────────────────
 _teacher_sessions: dict[str, datetime] = {}    # 内存缓存：token → 最后活跃时间
-TEACHER_SESSION_TIMEOUT = timedelta(minutes=30)  # 30分钟无操作自动断开
 
 # ── 学生 Session 配置 ──────────────────────────────────────
 _student_sessions: dict[str, datetime] = {}    # 内存缓存：token → 最后活跃时间
-STUDENT_SESSION_TIMEOUT = timedelta(minutes=1)  # 1分钟无操作自动断开
 
 _SESSIONS_DIR = DATA_DIR / ".sessions"        # 持久化目录
 
 # 过期文件清理间隔（秒），避免每次请求都扫描目录
 _last_cleanup = 0.0
-_CLEANUP_INTERVAL = 600  # 10 分钟
 
 # ── 密码哈希参数 ─────────────────────────────────────────
 _PBKDF2_ITERATIONS = 100_000                   # PBKDF2 迭代次数
@@ -108,7 +117,7 @@ def _cleanup_expired_sessions() -> None:
     """清理过期的 session 文件（限频调用）"""
     global _last_cleanup
     now = time.time()
-    if now - _last_cleanup < _CLEANUP_INTERVAL:
+    if now - _last_cleanup < _get_session_cleanup_interval():
         return
     _last_cleanup = now
     if not _SESSIONS_DIR.exists():
@@ -118,7 +127,7 @@ def _cleanup_expired_sessions() -> None:
             if f.suffix == ".json":
                 data = json.loads(f.read_text(encoding="utf-8"))
                 created = datetime.fromisoformat(data["created_at"])
-                timeout = STUDENT_SESSION_TIMEOUT if data.get("type") == "student" else TEACHER_SESSION_TIMEOUT
+                timeout = _get_student_timeout() if data.get("type") == "student" else _get_teacher_timeout()
                 if datetime.now() - created > timeout:
                     f.unlink(missing_ok=True)
         except Exception:
@@ -144,7 +153,7 @@ def create_session() -> str:
 
 def validate_session(token: str) -> bool:
     """校验教师 session 是否有效"""
-    return _validate(token, _teacher_sessions, TEACHER_SESSION_TIMEOUT)
+    return _validate(token, _teacher_sessions, _get_teacher_timeout())
 
 
 def destroy_session(token: str) -> None:
@@ -203,7 +212,7 @@ def create_student_session(name: str, student_id: str) -> str:
 
 def validate_student_session(token: str) -> bool:
     """校验学生 session 是否有效"""
-    return _validate(token, _student_sessions, STUDENT_SESSION_TIMEOUT)
+    return _validate(token, _student_sessions, _get_student_timeout())
 
 
 def get_student_session(token: str) -> dict | None:

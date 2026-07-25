@@ -50,13 +50,21 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 import asyncio
 
+def _get_request_timeouts() -> dict:
+    """从 debug 配置读取各 API 端点的请求超时（秒）"""
+    try:
+        from config import read_settings_debug
+        return read_settings_debug().get("request_timeouts", {})
+    except Exception:
+        return {}
+
 _REQUEST_TIMEOUTS = {
-    "/api/student/upload": 120,     # 上传 + PNG 转换
-    "/api/teacher/questions": 120,  # 题目创建（含上传）
-    "/api/student/analyze": 10,     # 分析入队，应该很快
-    "/api/student/grade": 10,       # 评分入队，应该很快
+    "/api/student/upload": _get_request_timeouts().get("upload", 120),
+    "/api/teacher/questions": _get_request_timeouts().get("teacher_questions", 120),
+    "/api/student/analyze": _get_request_timeouts().get("analyze", 10),
+    "/api/student/grade": _get_request_timeouts().get("grade", 10),
 }
-_DEFAULT_TIMEOUT = 60
+_DEFAULT_TIMEOUT = _get_request_timeouts().get("default", 60)
 
 
 class TimeoutMiddleware(BaseHTTPMiddleware):

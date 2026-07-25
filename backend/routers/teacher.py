@@ -687,12 +687,23 @@ async def teacher_student_preview(request: Request, qid: str, student_id: str):
 
 @router.get("/settings")
 async def get_settings(request: Request):
-    """获取当前 LLM 配置（API 地址 / 密钥 / 模型名），不返回密码"""
+    """获取完整的教师可配置设置，缺失字段用默认值补齐"""
     _require_auth(request)
+    from config import get_llm_params, get_image_params, get_grade_thresholds, get_prompt_templates, get_scoring_templates
     settings = read_settings()
+    # 等级阈值转为前端需要的 {等级: 分数} 格式
+    raw_thresholds = settings.get("grade_thresholds", {})
+    if not raw_thresholds:
+        thresholds_list = get_grade_thresholds()
+        raw_thresholds = {name: score for score, name in thresholds_list}
     return {
         "models": settings.get("models", []),
         "llm_active": settings.get("llm_active", 0),
+        "llm_params": get_llm_params(),
+        "image_params": get_image_params(),
+        "grade_thresholds": raw_thresholds,
+        "prompt_templates": get_prompt_templates(),
+        "scoring_templates": get_scoring_templates(),
     }
 
 
@@ -710,6 +721,12 @@ async def update_settings(request: Request):
         settings["models"] = models
     if "llm_active" in body:
         settings["llm_active"] = int(body["llm_active"])
+
+    # 新增可配置区块（仅更新 body 中包含的字段）
+    for section in ("llm_params", "image_params", "grade_thresholds",
+                    "prompt_templates", "scoring_templates"):
+        if section in body and isinstance(body[section], dict):
+            settings[section] = {**settings.get(section, {}), **body[section]}
 
     # 密码修改走哈希流程
     if "teacher_password" in body and body["teacher_password"]:

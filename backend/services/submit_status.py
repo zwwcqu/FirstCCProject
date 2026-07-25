@@ -59,14 +59,31 @@ def get_status(qid: str, name: str, student_id: str) -> dict:
         }
 
 
-CLEANUP_INTERVAL = 300  # 5分钟清理一次过期记录
+CLEANUP_INTERVAL = 300  # 默认 5 分钟（实际值优先读取 settings_debug.json）
+
+
+def _get_cleanup_interval() -> int:
+    try:
+        from config import read_settings_debug
+        return read_settings_debug().get("submit_status", {}).get("cleanup_interval_seconds", CLEANUP_INTERVAL)
+    except Exception:
+        return CLEANUP_INTERVAL
+
+
+def _get_expire_seconds() -> int:
+    try:
+        from config import read_settings_debug
+        return read_settings_debug().get("submit_status", {}).get("expire_seconds", 1800)
+    except Exception:
+        return 1800
 
 
 def _cleanup():
-    """清理超过 30 分钟的旧状态记录"""
+    """清理超过过期时间的旧状态记录"""
     now = time.time()
+    expire = _get_expire_seconds()
     with _lock:
-        stale = [k for k, v in _status.items() if now - v["ts"] > 1800]
+        stale = [k for k, v in _status.items() if now - v["ts"] > expire]
         for k in stale:
             del _status[k]
     if stale:
@@ -74,7 +91,8 @@ def _cleanup():
 
 
 def _start_cleanup_timer():
-    t = threading.Timer(CLEANUP_INTERVAL, _start_cleanup_timer)
+    interval = _get_cleanup_interval()
+    t = threading.Timer(interval, _start_cleanup_timer)
     t.daemon = True
     t.start()
     _cleanup()

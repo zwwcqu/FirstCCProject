@@ -37,14 +37,16 @@ def _is_local_model(base_url: str) -> bool:
 
 
 def _detect_concurrency() -> int:
-    """从当前激活模型配置读取并发数，上限 5"""
+    """从当前激活模型配置读取并发数，上限取自 debug 配置（默认 5）"""
+    from config import read_settings_debug
+    max_conc = read_settings_debug().get("task_queue", {}).get("max_concurrency", 5)
     settings = read_settings()
     models = settings.get("models", [])
     idx = settings.get("llm_active", 0)
     if models and 0 <= idx < len(models):
         configured = models[idx].get("concurrency", 1)
         if isinstance(configured, int) and configured >= 1:
-            return min(configured, 5)
+            return min(configured, max_conc)
     return 1
 
 
