@@ -128,7 +128,7 @@ export default function TeacherDashboard() {
   const [image, setImage] = useState<File | null>(null);
   const [refPdf, setRefPdf] = useState<File | null>(null);
   const [submissionType, setSubmissionType] = useState("pdf");  // 学生提交文件类型：pdf / image
-  const [qClasses, setQClasses] = useState("");               // 适用班别（逗号分隔）
+  const [qClasses, setQClasses] = useState<string[]>([]);     // 适用班别（复选框）
   const [existingImages, setExistingImages] = useState<string[]>([]);
   const [existingRefPdf, setExistingRefPdf] = useState<string | null>(null);
 
@@ -163,6 +163,8 @@ export default function TeacherDashboard() {
   useEffect(() => {
     checkLogin().catch(() => navigate("/teacher"));
     loadQuestions();
+    // 加载班别列表（供表单复选框使用）
+    getClasses().then((data: any) => { setClasses(data.classes || []); }).catch(() => {});
     // 加载等级阈值配置
     getSettings().then((s) => {
       if (s.grade_thresholds) {
@@ -199,7 +201,7 @@ export default function TeacherDashboard() {
     setImage(null);
     setRefPdf(null);
     setSubmissionType("pdf");
-    setQClasses("");
+    setQClasses([]);
     setExistingImages([]);
     setExistingRefPdf(null);
     setEditingId(null);
@@ -215,7 +217,7 @@ export default function TeacherDashboard() {
     fd.append("phase2_criteria", phase2Criteria);
     fd.append("knowledge", knowledge);
     fd.append("submission_type", submissionType);
-    fd.append("classes", qClasses);
+    fd.append("classes", qClasses.join(","));
     if (image) fd.append("image", image);
     if (refPdf) fd.append("reference_pdf", refPdf);
     try {
@@ -237,7 +239,7 @@ export default function TeacherDashboard() {
     fd.append("phase2_criteria", phase2Criteria);
     fd.append("knowledge", knowledge);
     fd.append("submission_type", submissionType);
-    fd.append("classes", qClasses);
+    fd.append("classes", qClasses.join(","));
     if (image) fd.append("image", image);
     if (refPdf) fd.append("reference_pdf", refPdf);
     try {
@@ -271,7 +273,7 @@ export default function TeacherDashboard() {
       setPhase2Criteria(detail.files?.phase2_criteria || "");
       setKnowledge(detail.files?.knowledge || "");
       setSubmissionType(detail.submission_type || "pdf");
-      setQClasses((detail as any).classes || "");
+      setQClasses(((detail as any).classes || "").split(",").filter(Boolean));
       setImage(null);
       setRefPdf(null);
       setExistingImages(detail.files?.images || []);
@@ -936,10 +938,23 @@ export default function TeacherDashboard() {
                 <div className="grid grid-cols-2 gap-3">
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-1">适用班别</label>
-                    <input type="text" value={qClasses} onChange={(e) => setQClasses(e.target.value)}
-                      placeholder="逗号分隔，如：25级机电1班"
-                      className="w-full border rounded px-3 py-1.5 text-sm"
-                    />
+                    {classes.length > 0 ? (
+                      <div className="flex flex-wrap gap-2">
+                        {classes.map((c) => (
+                          <label key={c.class_name} className="flex items-center gap-1.5 cursor-pointer text-sm">
+                            <input type="checkbox" checked={qClasses.includes(c.class_name)}
+                              onChange={(e) => {
+                                if (e.target.checked) setQClasses([...qClasses, c.class_name]);
+                                else setQClasses(qClasses.filter(x => x !== c.class_name));
+                              }}
+                              className="w-4 h-4" />
+                            {c.class_name}
+                          </label>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="text-xs text-gray-400">暂无班别数据，请先在学生信息中导入班级</p>
+                    )}
                   </div>
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-1">创建教师</label>
