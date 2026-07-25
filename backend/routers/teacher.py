@@ -121,7 +121,6 @@ async def login(response: Response, username: str = Form(""), password: str = Fo
         data["teacher_username"] = username.strip()
         sf.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
         response.set_cookie(key="session", value=token, max_age=14400, httponly=True, samesite="lax", path="/")
-        response.set_cookie(key="teacher_name", value=info["姓名"], max_age=14400, path="/")
         logger.info(f"教师登录: {info['姓名']} ({username.strip()})")
         return {"ok": True, "name": info["姓名"], "username": username.strip(), "password_changed": info.get("password_changed", False)}
     # 旧版单密码兼容
@@ -140,7 +139,6 @@ async def logout(request: Request, response: Response):
     if token:
         destroy_session(token)
     response.delete_cookie(key="session", path="/")
-    response.delete_cookie(key="teacher_name", path="/")
     logger.info("教师已登出")
     return {"ok": True}
 
