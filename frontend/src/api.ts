@@ -107,10 +107,29 @@ export function gradeSubmission(qid: string, name: string, studentId: string, mo
 }
 
 // ------- Teacher -------
-export async function teacherLogin(password: string) {
+export async function teacherLogin(password: string, username = "") {
   const fd = new FormData();
   fd.append("password", password);
+  if (username) fd.append("username", username);
   return api("/api/teacher/login", { method: "POST", body: fd });
+}
+
+export function getTeacherProfile() {
+  return api("/api/teacher/profile");
+}
+
+export function updateTeacherProfile(name: string, username: string) {
+  return api("/api/teacher/profile", {
+    method: "PUT",
+    body: JSON.stringify({ name, username }),
+  });
+}
+
+export function teacherChangePassword(oldPassword: string, newPassword: string) {
+  return api("/api/teacher/profile/change-password", {
+    method: "POST",
+    body: JSON.stringify({ old_password: oldPassword, new_password: newPassword }),
+  });
 }
 
 export function teacherLogout() {

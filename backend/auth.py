@@ -202,6 +202,150 @@ def change_student_password(class_name: str, student_id: str,
     return True, ""
 
 
+# ── 教师账号管理 ─────────────────────────────────────────
+
+_TEACHER_DEFAULT_PASSWORD = "MechCAD"  # 教师初始默认密码
+_TEACHER_INFO_DIR = DATA_DIR / "TeacherInfo"  # 教师名单目录
+_TEACHER_AUTH_DIR = DATA_DIR / "TeacherAuth"  # 教师密码文件目录
+
+
+def _read_teacher_csv() -> list[dict]:
+    """读取教师名单 CSV，返回 [{姓名, 用户名, 工号}]"""
+    csv_path = _TEACHER_INFO_DIR / "教师名单.csv"
+    if not csv_path.exists():
+        # 回退到 config 模板
+        from config import CONFIG_DIR
+        csv_path = CONFIG_DIR / "教师名单模版.csv"
+    if not csv_path.exists():
+        return []
+    import csv as _csv
+    with open(csv_path, "r", encoding="utf-8-sig") as f:
+        return list(_csv.DictReader(f))
+
+
+def _get_teacher_auth_path() -> Path:
+    """返回教师密码文件路径"""
+    return _TEACHER_AUTH_DIR / "teachers.json"
+
+
+def _read_teacher_auth() -> dict:
+    """读取教师密码数据，返回 {用户名: {姓名, 工号, password_hash, salt, password_changed}}"""
+    path = _get_teacher_auth_path()
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _write_teacher_auth(data: dict) -> None:
+    """写入教师密码数据"""
+    _TEACHER_AUTH_DIR.mkdir(parents=True, exist_ok=True)
+    path = _get_teacher_auth_path()
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _ensure_teacher_auth() -> None:
+    """确保教师密码文件存在，不存在则从 CSV 初始化（默认密码 MechCAD）"""
+    auth_data = _read_teacher_auth()
+    teachers = _read_teacher_csv()
+    changed = False
+    default_hash, default_salt = _hash_password(_TEACHER_DEFAULT_PASSWORD)
+    for t in teachers:
+        username = (t.get("用户名") or "").strip()
+        if not username:
+            continue
+        if username not in auth_data:
+            auth_data[username] = {
+                "姓名": t.get("姓名", "").strip(),
+                "工号": t.get("工号", "").strip(),
+                "password_hash": default_hash,
+                "salt": default_salt,
+                "password_changed": False,
+            }
+            changed = True
+            logger.info(f"初始化教师账号: {username} ({t.get('姓名')})")
+    if changed:
+        _TEACHER_INFO_DIR.mkdir(parents=True, exist_ok=True)
+        _write_teacher_auth(auth_data)
+
+
+def verify_teacher_password(username: str, password: str) -> tuple[bool, dict | None]:
+    """
+    校验教师密码。返回 (ok, teacher_info)
+    teacher_info 包含 姓名, 用户名, 工号, password_changed
+    """
+    _ensure_teacher_auth()
+    auth_data = _read_teacher_auth()
+    record = auth_data.get(username)
+    if not record:
+        return False, None
+
+    stored_hash = record.get("password_hash", "")
+    stored_salt = record.get("salt", "")
+    if not stored_hash or not stored_salt:
+        return False, None
+
+    hashed, _ = _hash_password(password, stored_salt)
+    if secrets.compare_digest(hashed, stored_hash):
+        return True, {
+            "姓名": record.get("姓名", ""),
+            "用户名": username,
+            "工号": record.get("工号", ""),
+            "password_changed": record.get("password_changed", False),
+        }
+    return False, None
+
+
+def change_teacher_password(username: str, old_password: str, new_password: str) -> tuple[bool, str]:
+    """修改教师密码。返回 (成功, 错误消息)"""
+    ok, info = verify_teacher_password(username, old_password)
+    if not ok:
+        return False, "旧密码错误"
+
+    auth_data = _read_teacher_auth()
+    hashed, salt = _hash_password(new_password)
+    auth_data[username]["password_hash"] = hashed
+    auth_data[username]["salt"] = salt
+    auth_data[username]["password_changed"] = True
+    _write_teacher_auth(auth_data)
+    logger.info(f"教师 {username} 密码已修改")
+    return True, ""
+
+
+def update_teacher_profile(username: str, new_name: str, new_username: str) -> tuple[bool, str]:
+    """修改教师姓名和用户名。返回 (成功, 错误消息)"""
+    auth_data = _read_teacher_auth()
+    if username not in auth_data:
+        return False, "教师不存在"
+
+    # 如果要改用户名，检查新用户名是否冲突
+    if new_username != username and new_username in auth_data:
+        return False, "该用户名已被占用"
+
+    record = auth_data.pop(username)
+    record["姓名"] = new_name
+    auth_data[new_username] = record
+    _write_teacher_auth(auth_data)
+    logger.info(f"教师 {username} → {new_username} 信息已更新")
+    return True, ""
+
+
+def get_all_teachers() -> list[dict]:
+    """返回所有教师列表 [{姓名, 用户名, 工号}]，不包含密码信息"""
+    _ensure_teacher_auth()
+    auth_data = _read_teacher_auth()
+    result = []
+    for username, record in auth_data.items():
+        result.append({
+            "姓名": record.get("姓名", ""),
+            "用户名": username,
+            "工号": record.get("工号", ""),
+        })
+    return result
+
+
 # ── Session 文件持久化辅助 ──────────────────────────────
 
 def _session_file(token: str):

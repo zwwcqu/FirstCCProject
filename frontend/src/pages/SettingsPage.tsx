@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import { getSettings, updateSettings, checkLogin, restartService, queryCurrentModel, testVision, getQueueStatus, clearQueue, changePassword } from "../api";
+import { getSettings, updateSettings, checkLogin, restartService, queryCurrentModel, testVision, getQueueStatus, clearQueue, getTeacherProfile, updateTeacherProfile, teacherChangePassword } from "../api";
 
 interface ModelConfig {
   name: string;
@@ -150,6 +150,7 @@ function ModelCard({ cfg, active, onActivate, onChange, onSave, onDelete, saving
 
 // ------ 标签页定义 ------
 const TABS = [
+  { key: "profile", label: "个人信息" },
   { key: "models", label: "模型配置" },
   { key: "llm", label: "LLM 参数" },
   { key: "image", label: "图像处理" },
@@ -157,7 +158,6 @@ const TABS = [
   { key: "analysis", label: "工程图分析模板" },
   { key: "scoring", label: "评分模板" },
   { key: "system", label: "系统管理" },
-  { key: "password", label: "修改密码" },
 ];
 
 export default function SettingsPage() {
@@ -185,6 +185,13 @@ export default function SettingsPage() {
   const [scoringTemplates, setScoringTemplates] = useState<Record<string, string>>({});
 
   // 模型查询
+  // 个人信息
+  const [profileName, setProfileName] = useState("");
+  const [profileUsername, setProfileUsername] = useState("");
+  const [profileOldPwd, setProfileOldPwd] = useState("");
+  const [profileNewPwd, setProfileNewPwd] = useState("");
+  const [profileNewPwd2, setProfileNewPwd2] = useState("");
+
   const [querying, setQuerying] = useState(false);
   const [modelQuery, setModelQuery] = useState<any>(null);
   const [queryError, setQueryError] = useState("");
@@ -192,10 +199,6 @@ export default function SettingsPage() {
   const [queueInfo, setQueueInfo] = useState<any>(null);
   // 重启
   const [restarting, setRestarting] = useState(false);
-  // 密码
-  const [currentPwd, setCurrentPwd] = useState("");
-  const [newPwd, setNewPwd] = useState("");
-
   // 加载全部设置
   const loadAllSettings = async () => {
     try {
@@ -215,6 +218,11 @@ export default function SettingsPage() {
   useEffect(() => {
     checkLogin().catch(() => navigate("/teacher"));
     loadAllSettings();
+    // 加载教师个人信息
+    getTeacherProfile().then((p: any) => {
+      setProfileName(p["姓名"] || sessionStorage.getItem("teacher_name") || "");
+      setProfileUsername(p["用户名"] || sessionStorage.getItem("teacher_username") || "");
+    }).catch(() => {});
   }, [navigate]);
 
   // 保存通用函数
@@ -304,17 +312,6 @@ export default function SettingsPage() {
   };
 
   useEffect(() => { fetchQueueStatus(); const timer = setInterval(fetchQueueStatus, 5000); return () => clearInterval(timer); }, []);
-
-  const handleChangePwd = async () => {
-    if (!currentPwd || !newPwd) { setMsg("请填写当前密码和新密码"); return; }
-    setSaving(true); setMsg("");
-    try {
-      await changePassword(currentPwd, newPwd);
-      setMsg("密码已修改");
-      setCurrentPwd(""); setNewPwd("");
-    } catch (e: any) { setMsg("修改失败: " + e.message); }
-    finally { setSaving(false); }
-  };
 
   // ------ 渲染辅助 ------
   const inputClass = "w-full border rounded px-3 py-1.5 text-sm";
@@ -638,22 +635,68 @@ export default function SettingsPage() {
           </div>
         )}
 
-        {/* ========== 修改密码 ========== */}
-        {tab === "password" && (
+        {/* ========== 个人信息 ========== */}
+        {tab === "profile" && (
           <div className={sectionClass}>
-            <h2 className="text-lg font-semibold">修改密码</h2>
+            <h2 className="text-lg font-semibold">个人信息</h2>
+            <div className="grid grid-cols-2 gap-4 max-w-sm">
+              <div>
+                <label className={labelClass}>姓名</label>
+                <input type="text" value={profileName} onChange={e => setProfileName(e.target.value)}
+                  className={inputClass} />
+              </div>
+              <div>
+                <label className={labelClass}>用户名</label>
+                <input type="text" value={profileUsername} onChange={e => setProfileUsername(e.target.value)}
+                  className={inputClass} />
+              </div>
+            </div>
+            <button onClick={async () => {
+              setSaving(true); setMsg("");
+              try {
+                await updateTeacherProfile(profileName, profileUsername);
+                sessionStorage.setItem("teacher_name", profileName);
+                sessionStorage.setItem("teacher_username", profileUsername);
+                setMsg("个人信息已保存");
+              } catch (e: any) { setMsg("保存失败: " + e.message); }
+              finally { setSaving(false); }
+            }} disabled={saving}
+              className="bg-blue-600 text-white px-4 py-1.5 rounded hover:bg-blue-700 disabled:opacity-50 text-sm">
+              {saving ? "保存中…" : "保存个人信息"}
+            </button>
+
+            <hr className="my-4" />
+
+            <h3 className="text-lg font-semibold">修改密码</h3>
             <div className="space-y-3 max-w-sm">
               <div>
-                <label className={labelClass}>当前密码</label>
-                <input type="password" value={currentPwd} onChange={e => setCurrentPwd(e.target.value)}
-                  className={inputClass} />
+                <label className={labelClass}>旧密码</label>
+                <input type="password" value={profileOldPwd} onChange={e => setProfileOldPwd(e.target.value)}
+                  className={inputClass} placeholder="请输入当前密码" />
               </div>
               <div>
                 <label className={labelClass}>新密码</label>
-                <input type="password" value={newPwd} onChange={e => setNewPwd(e.target.value)}
-                  className={inputClass} />
+                <input type="password" value={profileNewPwd} onChange={e => setProfileNewPwd(e.target.value)}
+                  className={inputClass} placeholder="请输入新密码（至少6位）" />
               </div>
-              <button onClick={handleChangePwd} disabled={saving}
+              <div>
+                <label className={labelClass}>确认新密码</label>
+                <input type="password" value={profileNewPwd2} onChange={e => setProfileNewPwd2(e.target.value)}
+                  className={inputClass} placeholder="请再次输入新密码" />
+              </div>
+              <button onClick={async () => {
+                if (!profileOldPwd) { setMsg("请输入旧密码"); return; }
+                if (!profileNewPwd || profileNewPwd.length < 6) { setMsg("新密码至少6位"); return; }
+                if (profileNewPwd !== profileNewPwd2) { setMsg("两次输入的新密码不一致"); return; }
+                if (profileOldPwd === profileNewPwd) { setMsg("新密码不能与旧密码相同"); return; }
+                setSaving(true); setMsg("");
+                try {
+                  await teacherChangePassword(profileOldPwd, profileNewPwd);
+                  setProfileOldPwd(""); setProfileNewPwd(""); setProfileNewPwd2("");
+                  setMsg("密码已修改");
+                } catch (e: any) { setMsg("修改失败: " + e.message); }
+                finally { setSaving(false); }
+              }} disabled={saving}
                 className="bg-blue-600 text-white px-4 py-1.5 rounded hover:bg-blue-700 disabled:opacity-50 text-sm">
                 {saving ? "保存中…" : "修改密码"}
               </button>

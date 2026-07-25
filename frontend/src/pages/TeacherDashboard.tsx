@@ -601,7 +601,8 @@ export default function TeacherDashboard() {
     <div className="min-h-screen bg-gray-50">
       <header className="bg-blue-700 text-white p-4 shadow flex justify-between items-center">
         <h1 className="text-xl font-bold">教师后台</h1>
-        <div className="flex gap-2">
+        <div className="flex items-center gap-3">
+          <span className="text-sm opacity-80">{sessionStorage.getItem("teacher_name") || "教师"}</span>
           <button
             onClick={handleOpenRoster}
             className="bg-white/20 px-3 py-1 rounded hover:bg-white/30"

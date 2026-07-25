@@ -104,21 +104,33 @@ def _run_reference_analysis(qid: str) -> None:
 # ── 登录 / 登出 ──────────────────────────────────────────
 
 @router.post("/login")
-async def login(response: Response, password: str = Form(...)):
-    """教师登录，成功后设置 HttpOnly Cookie"""
+async def login(response: Response, username: str = Form(""), password: str = Form(...)):
+    """教师登录（支持多教师账号）。username 为空时回退到旧版单密码模式"""
+    from auth import verify_teacher_password, verify_password
+    # 新版多教师登录
+    if username.strip():
+        ok, info = verify_teacher_password(username.strip(), password)
+        if not ok:
+            raise HTTPException(status_code=403, detail="用户名或密码错误")
+        token = create_session()
+        # 将教师信息存入 session 文件
+        _SESSIONS_DIR = __import__("config").DATA_DIR / ".sessions"
+        sf = _SESSIONS_DIR / f"{token}.json"
+        data = json.loads(sf.read_text(encoding="utf-8"))
+        data["teacher_name"] = info["姓名"]
+        data["teacher_username"] = username.strip()
+        sf.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        response.set_cookie(key="session", value=token, max_age=14400, httponly=True, samesite="lax", path="/")
+        response.set_cookie(key="teacher_name", value=info["姓名"], max_age=14400, path="/")
+        logger.info(f"教师登录: {info['姓名']} ({username.strip()})")
+        return {"ok": True, "name": info["姓名"], "username": username.strip(), "password_changed": info.get("password_changed", False)}
+    # 旧版单密码兼容
     if not verify_password(password):
         raise HTTPException(status_code=403, detail="密码错误")
     token = create_session()
-    response.set_cookie(
-        key="session",
-        value=token,
-        max_age=14400,          # 4 小时
-        httponly=True,          # JS 不可读，防 XSS
-        samesite="lax",
-        path="/",
-    )
-    logger.info("教师登录成功")
-    return {"ok": True}
+    response.set_cookie(key="session", value=token, max_age=14400, httponly=True, samesite="lax", path="/")
+    logger.info("教师登录成功（旧版单密码模式）")
+    return {"ok": True, "name": "教师", "username": "", "password_changed": True}
 
 
 @router.post("/logout")
@@ -128,6 +140,7 @@ async def logout(request: Request, response: Response):
     if token:
         destroy_session(token)
     response.delete_cookie(key="session", path="/")
+    response.delete_cookie(key="teacher_name", path="/")
     logger.info("教师已登出")
     return {"ok": True}
 
@@ -681,6 +694,88 @@ async def teacher_student_preview(request: Request, qid: str, student_id: str):
     if rec:
         raise HTTPException(status_code=404, detail="提交文件不存在")
     raise HTTPException(status_code=404, detail="该学生未提交作业")
+
+
+# ── 教师个人信息 ───────────────────────────────────────────
+
+@router.get("/profile")
+async def get_profile(request: Request):
+    """获取当前登录教师的信息"""
+    _require_auth(request)
+    token = request.cookies.get("session") or ""
+    if token:
+        sf = __import__("config").DATA_DIR / ".sessions" / f"{token}.json"
+        if sf.exists():
+            data = json.loads(sf.read_text(encoding="utf-8"))
+            username = data.get("teacher_username", "")
+            name = data.get("teacher_name", "")
+            if username:
+                from auth import _read_teacher_auth
+                auth = _read_teacher_auth()
+                record = auth.get(username, {})
+                return {
+                    "姓名": record.get("姓名", name),
+                    "用户名": username,
+                    "工号": record.get("工号", ""),
+                    "password_changed": record.get("password_changed", True),
+                }
+    return {"姓名": "", "用户名": "", "工号": "", "password_changed": True}
+
+
+@router.put("/profile")
+async def update_profile(request: Request):
+    """修改教师姓名和用户名"""
+    _require_auth(request)
+    body = await request.json()
+    new_name = (body.get("name") or "").strip()
+    new_username = (body.get("username") or "").strip()
+    if not new_name or not new_username:
+        raise HTTPException(status_code=400, detail="姓名和用户名不能为空")
+    token = request.cookies.get("session") or ""
+    if token:
+        sf = __import__("config").DATA_DIR / ".sessions" / f"{token}.json"
+        if sf.exists():
+            data = json.loads(sf.read_text(encoding="utf-8"))
+            old_username = data.get("teacher_username", "")
+            if old_username:
+                from auth import update_teacher_profile
+                ok, msg = update_teacher_profile(old_username, new_name, new_username)
+                if not ok:
+                    raise HTTPException(status_code=400, detail=msg)
+                # 更新 session 中的信息
+                data["teacher_name"] = new_name
+                data["teacher_username"] = new_username
+                sf.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+                return {"ok": True}
+    raise HTTPException(status_code=400, detail="请使用多教师账号登录")
+
+
+@router.post("/profile/change-password")
+async def teacher_change_password(request: Request):
+    """教师修改登录密码（需验证旧密码）"""
+    _require_auth(request)
+    body = await request.json()
+    old_password = (body.get("old_password") or "").strip()
+    new_password = (body.get("new_password") or "").strip()
+    if not old_password or not new_password:
+        raise HTTPException(status_code=400, detail="请填写旧密码和新密码")
+    if len(new_password) < 6:
+        raise HTTPException(status_code=400, detail="密码至少6位")
+    if old_password == new_password:
+        raise HTTPException(status_code=400, detail="新密码不能与旧密码相同")
+    token = request.cookies.get("session") or ""
+    if token:
+        sf = __import__("config").DATA_DIR / ".sessions" / f"{token}.json"
+        if sf.exists():
+            data = json.loads(sf.read_text(encoding="utf-8"))
+            username = data.get("teacher_username", "")
+            if username:
+                from auth import change_teacher_password
+                ok, msg = change_teacher_password(username, old_password, new_password)
+                if not ok:
+                    raise HTTPException(status_code=400, detail=msg)
+                return {"ok": True}
+    raise HTTPException(status_code=400, detail="请使用多教师账号登录")
 
 
 # ── 系统设置 ─────────────────────────────────────────────
