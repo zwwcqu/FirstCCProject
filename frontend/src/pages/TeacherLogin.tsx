@@ -10,12 +10,12 @@ export default function TeacherLogin() {
   const navigate = useNavigate();
 
   const handleLogin = async () => {
+    if (!username.trim()) { setError("请输入用户名"); return; }
     if (!password) { setError("请输入密码"); return; }
     setLoading(true);
     setError("");
     try {
       const res = await teacherLogin(password, username.trim());
-      // 存储教师姓名到 sessionStorage
       if (res.name) sessionStorage.setItem("teacher_name", res.name);
       if (res.username) sessionStorage.setItem("teacher_username", res.username);
       navigate("/teacher/dashboard");
@@ -39,7 +39,8 @@ export default function TeacherLogin() {
               onChange={(e) => setUsername(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && handleLogin()}
               className="w-full border rounded px-3 py-2"
-              placeholder="多教师账号用户名（留空为旧版）"
+              placeholder="请输入用户名"
+              autoFocus
             />
           </div>
           <div>
@@ -50,7 +51,7 @@ export default function TeacherLogin() {
               onChange={(e) => setPassword(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && handleLogin()}
               className="w-full border rounded px-3 py-2"
-              autoFocus
+              placeholder="请输入密码"
             />
           </div>
           <button

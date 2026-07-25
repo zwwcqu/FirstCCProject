@@ -104,32 +104,25 @@ def _run_reference_analysis(qid: str) -> None:
 # ── 登录 / 登出 ──────────────────────────────────────────
 
 @router.post("/login")
-async def login(response: Response, username: str = Form(""), password: str = Form(...)):
-    """教师登录（支持多教师账号）。username 为空时回退到旧版单密码模式"""
-    from auth import verify_teacher_password, verify_password
-    # 新版多教师登录
-    if username.strip():
-        ok, info = verify_teacher_password(username.strip(), password)
-        if not ok:
-            raise HTTPException(status_code=403, detail="用户名或密码错误")
-        token = create_session()
-        # 将教师信息存入 session 文件
-        _SESSIONS_DIR = __import__("config").DATA_DIR / ".sessions"
-        sf = _SESSIONS_DIR / f"{token}.json"
-        data = json.loads(sf.read_text(encoding="utf-8"))
-        data["teacher_name"] = info["姓名"]
-        data["teacher_username"] = username.strip()
-        sf.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-        response.set_cookie(key="session", value=token, max_age=14400, httponly=True, samesite="lax", path="/")
-        logger.info(f"教师登录: {info['姓名']} ({username.strip()})")
-        return {"ok": True, "name": info["姓名"], "username": username.strip(), "password_changed": info.get("password_changed", False)}
-    # 旧版单密码兼容
-    if not verify_password(password):
-        raise HTTPException(status_code=403, detail="密码错误")
+async def login(response: Response, username: str = Form(...), password: str = Form(...)):
+    """教师登录（用户名+密码）"""
+    if not username.strip():
+        raise HTTPException(status_code=400, detail="请输入用户名")
+    from auth import verify_teacher_password
+    ok, info = verify_teacher_password(username.strip(), password)
+    if not ok:
+        raise HTTPException(status_code=403, detail="用户名或密码错误")
     token = create_session()
+    # 将教师信息存入 session 文件
+    _SESSIONS_DIR = __import__("config").DATA_DIR / ".sessions"
+    sf = _SESSIONS_DIR / f"{token}.json"
+    data = json.loads(sf.read_text(encoding="utf-8"))
+    data["teacher_name"] = info["姓名"]
+    data["teacher_username"] = username.strip()
+    sf.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
     response.set_cookie(key="session", value=token, max_age=14400, httponly=True, samesite="lax", path="/")
-    logger.info("教师登录成功（旧版单密码模式）")
-    return {"ok": True, "name": "教师", "username": "", "password_changed": True}
+    logger.info(f"教师登录: {info['姓名']} ({username.strip()})")
+    return {"ok": True, "name": info["姓名"], "username": username.strip(), "password_changed": info.get("password_changed", False)}
 
 
 @router.post("/logout")

@@ -107,10 +107,10 @@ export function gradeSubmission(qid: string, name: string, studentId: string, mo
 }
 
 // ------- Teacher -------
-export async function teacherLogin(password: string, username = "") {
+export async function teacherLogin(password: string, username: string) {
   const fd = new FormData();
+  fd.append("username", username);
   fd.append("password", password);
-  if (username) fd.append("username", username);
   return api("/api/teacher/login", { method: "POST", body: fd });
 }
 
