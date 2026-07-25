@@ -1205,6 +1205,20 @@ async def create_roster_class(
     return {"ok": True, "class_name": class_name, "count": count}
 
 
+@router.post("/roster/reset-password")
+async def reset_student_pwd(request: Request):
+    """教师重置学生密码为默认值 cad123"""
+    _require_auth(request)
+    body = await request.json()
+    class_name = (body.get("class_name") or "").strip()
+    student_id = (body.get("student_id") or "").strip()
+    if not class_name or not student_id:
+        raise HTTPException(status_code=400, detail="请提供班级和学生学号")
+    from auth import reset_student_password
+    reset_student_password(class_name, student_id)
+    return {"ok": True}
+
+
 @router.delete("/roster/classes/{class_name}")
 async def remove_roster_class(request: Request, class_name: str):
     """删除班级 CSV 文件"""

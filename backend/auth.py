@@ -332,6 +332,20 @@ def update_teacher_profile(username: str, new_name: str, new_username: str) -> t
     return True, ""
 
 
+def reset_student_password(class_name: str, student_id: str) -> bool:
+    """重置学生密码为默认密码 cad123"""
+    default_hash, default_salt = _hash_password(_STUDENT_DEFAULT_PASSWORD)
+    auth_data = _read_student_auth(class_name)
+    auth_data[student_id] = {
+        "password_hash": default_hash,
+        "salt": default_salt,
+        "password_changed": False,
+    }
+    _write_student_auth(class_name, auth_data)
+    logger.info(f"学生 {student_id} 密码已重置为默认密码")
+    return True
+
+
 def get_all_teachers() -> list[dict]:
     """返回所有教师列表 [{姓名, 用户名, 工号}]，不包含密码信息"""
     _ensure_teacher_auth()

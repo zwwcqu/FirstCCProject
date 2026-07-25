@@ -15,6 +15,7 @@ import {
   createClass,
   deleteClass,
   downloadRosterTemplate,
+  resetStudentPassword,
   getScoringTemplates,
   triggerAnalysis,
   getAnalysisResult,
@@ -1550,6 +1551,7 @@ export default function TeacherDashboard() {
                                   <tr className="border-b">
                                     <th className="text-left p-1">姓名</th>
                                     <th className="text-left p-1">学号</th>
+                                    <th className="p-1"></th>
                                   </tr>
                                 </thead>
                                 <tbody>
@@ -1557,6 +1559,18 @@ export default function TeacherDashboard() {
                                     <tr key={i} className="border-b">
                                       <td className="p-1">{s.姓名}</td>
                                       <td className="p-1">{s.学号}</td>
+                                      <td className="p-1">
+                                        <button
+                                          onClick={async () => {
+                                            if (!confirm(`确定将 ${s.姓名}(${s.学号}) 的密码重置为 cad123 吗？`)) return;
+                                            try {
+                                              await resetStudentPassword(selectedClass!, s.学号);
+                                              alert("密码已重置为 cad123");
+                                            } catch (e: any) { alert("重置失败: " + e.message); }
+                                          }}
+                                          className="text-xs text-orange-600 hover:underline"
+                                        >重置密码</button>
+                                      </td>
                                     </tr>
                                   ))}
                                 </tbody>

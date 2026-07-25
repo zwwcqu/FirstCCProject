@@ -229,6 +229,13 @@ export function createClass(className: string, file: File) {
   return api("/api/teacher/roster/classes", { method: "POST", body: fd });
 }
 
+export function resetStudentPassword(className: string, studentId: string) {
+  return api("/api/teacher/roster/reset-password", {
+    method: "POST",
+    body: JSON.stringify({ class_name: className, student_id: studentId }),
+  });
+}
+
 export function deleteClass(className: string) {
   return api(`/api/teacher/roster/classes/${encodeURIComponent(className)}`, { method: "DELETE" });
 }
