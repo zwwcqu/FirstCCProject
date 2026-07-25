@@ -118,19 +118,46 @@ async def check_identity(request: Request):
 
 @router.post("/login")
 async def student_login(request: Request):
-    """学生登录：验证姓名+学号，返回 session token（1分钟超时）"""
+    """学生登录：验证姓名+学号+密码，返回 session token + password_changed 标志"""
     body = await request.json()
     name = (body.get("name") or "").strip()
     student_id = (body.get("student_id") or "").strip()
-    if not name or not student_id:
-        raise HTTPException(status_code=400, detail="姓名和学号不能为空")
+    password = (body.get("password") or "").strip()
+    if not name or not student_id or not password:
+        raise HTTPException(status_code=400, detail="姓名、学号和密码不能为空")
     from services.question_service import check_roster, find_student_class
+    from auth import verify_student_password
     ok, msg = check_roster(name, student_id)
     if not ok:
         raise HTTPException(status_code=401, detail=msg)
-    token = create_student_session(name, student_id)
     class_name = find_student_class(name, student_id)
-    return {"ok": True, "token": token, "class_name": class_name}
+    # 校验密码
+    pwd_ok, pwd_changed = verify_student_password(class_name, student_id, password)
+    if not pwd_ok:
+        raise HTTPException(status_code=401, detail="密码错误")
+    token = create_student_session(name, student_id)
+    return {"ok": True, "token": token, "class_name": class_name, "password_changed": pwd_changed}
+
+
+@router.post("/change-password")
+async def student_change_password(request: Request):
+    """学生修改密码"""
+    body = await request.json()
+    name = (body.get("name") or "").strip()
+    student_id = (body.get("student_id") or "").strip()
+    class_name = (body.get("class_name") or "").strip()
+    new_password = (body.get("new_password") or "").strip()
+    if not all([name, student_id, class_name, new_password]):
+        raise HTTPException(status_code=400, detail="参数不完整")
+    if len(new_password) < 4:
+        raise HTTPException(status_code=400, detail="密码至少4位")
+    from services.question_service import check_roster
+    ok, _ = check_roster(name, student_id)
+    if not ok:
+        raise HTTPException(status_code=403, detail="身份校验失败")
+    from auth import change_student_password
+    change_student_password(class_name, student_id, new_password)
+    return {"ok": True}
 
 
 def _require_student_login(request: Request, expected_name: str = "", expected_sid: str = "") -> dict:

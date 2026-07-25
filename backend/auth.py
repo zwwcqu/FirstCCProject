@@ -106,6 +106,98 @@ def change_password(new_password: str) -> None:
     logger.info("教师密码已更新")
 
 
+# ── 学生密码管理 ─────────────────────────────────────────
+
+_STUDENT_DEFAULT_PASSWORD = "cad123"  # 学生初始默认密码
+_STUDENT_AUTH_DIR = DATA_DIR / "StudentAuth"  # 学生密码文件目录
+
+
+def _get_student_auth_path(class_name: str) -> Path:
+    """返回某班级的学生密码文件路径"""
+    return _STUDENT_AUTH_DIR / f"{class_name}.json"
+
+
+def _read_student_auth(class_name: str) -> dict:
+    """读取某班级的学生密码数据，返回 {student_id: {hash, salt, password_changed}}"""
+    path = _get_student_auth_path(class_name)
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _write_student_auth(class_name: str, data: dict) -> None:
+    """写入某班级的学生密码数据"""
+    _STUDENT_AUTH_DIR.mkdir(parents=True, exist_ok=True)
+    path = _get_student_auth_path(class_name)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def get_default_password_hash() -> tuple[str, str]:
+    """返回默认密码 cad123 的哈希和盐（用于首次登录校验）"""
+    return _hash_password(_STUDENT_DEFAULT_PASSWORD)
+
+
+def verify_student_password(class_name: str, student_id: str, password: str) -> tuple[bool, bool]:
+    """
+    校验学生密码。返回 (ok: bool, password_changed: bool)
+    - 学生首次登录（auth 文件中无记录）：用默认密码 cad123 校验，成功后自动创建记录
+    - 已有记录：正常哈希校验
+    """
+    auth_data = _read_student_auth(class_name)
+    record = auth_data.get(student_id)
+
+    if record is None:
+        # 首次登录：校验默认密码
+        if password == _STUDENT_DEFAULT_PASSWORD:
+            # 自动创建记录（未修改密码状态）
+            default_hash, default_salt = get_default_password_hash()
+            auth_data[student_id] = {
+                "password_hash": default_hash,
+                "salt": default_salt,
+                "password_changed": False,
+            }
+            _write_student_auth(class_name, auth_data)
+            logger.info(f"学生 {student_id} 首次登录，密码待修改")
+            return True, False
+        return False, False
+
+    # 已有记录：正常哈希校验
+    stored_hash = record.get("password_hash", "")
+    stored_salt = record.get("salt", "")
+    if not stored_hash or not stored_salt:
+        return False, False
+
+    hashed, _ = _hash_password(password, stored_salt)
+    if secrets.compare_digest(hashed, stored_hash):
+        return True, record.get("password_changed", False)
+    return False, False
+
+
+def change_student_password(class_name: str, student_id: str, new_password: str) -> bool:
+    """修改学生密码。返回是否成功"""
+    auth_data = _read_student_auth(class_name)
+    if student_id not in auth_data:
+        # 如果没有记录，创建一个
+        hashed, salt = _hash_password(new_password)
+        auth_data[student_id] = {
+            "password_hash": hashed,
+            "salt": salt,
+            "password_changed": True,
+        }
+    else:
+        hashed, salt = _hash_password(new_password)
+        auth_data[student_id]["password_hash"] = hashed
+        auth_data[student_id]["salt"] = salt
+        auth_data[student_id]["password_changed"] = True
+
+    _write_student_auth(class_name, auth_data)
+    logger.info(f"学生 {student_id} 密码已修改")
+    return True
+
+
 # ── Session 文件持久化辅助 ──────────────────────────────
 
 def _session_file(token: str):

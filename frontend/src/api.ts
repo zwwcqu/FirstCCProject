@@ -35,6 +35,22 @@ export function getStudentResult(qid: string, studentId: string) {
   return api(`/api/student/result/${qid}/${studentId}`);
 }
 
+// 学生登录（含密码）
+export function studentLogin(name: string, studentId: string, password: string) {
+  return api("/api/student/login", {
+    method: "POST",
+    body: JSON.stringify({ name, student_id: studentId, password }),
+  });
+}
+
+// 学生修改密码
+export function studentChangePassword(name: string, studentId: string, className: string, newPassword: string) {
+  return api("/api/student/change-password", {
+    method: "POST",
+    body: JSON.stringify({ name, student_id: studentId, class_name: className, new_password: newPassword }),
+  });
+}
+
 // 身份校验
 export function checkRoster(name: string, studentId: string) {
   return api("/api/student/check", {

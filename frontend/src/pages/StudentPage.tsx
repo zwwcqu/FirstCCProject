@@ -10,6 +10,8 @@ import {
   getStudentAnalysisResult,
   getStudentSubmissions,
   checkRoster,
+  studentLogin,
+  studentChangePassword,
   getSubmissionRecord,
   getQuestionFileUrl,
   getStudentPreviewUrl,
@@ -76,8 +78,14 @@ export default function StudentPage() {
   const [identity, setIdentity] = useState<Identity | null>(null);
   const [entryName, setEntryName] = useState("");
   const [entryId, setEntryId] = useState("");
+  const [entryPassword, setEntryPassword] = useState("");
   const [entryError, setEntryError] = useState("");
   const [checking, setChecking] = useState(false);
+
+  // 强制修改密码
+  const [mustChangePwd, setMustChangePwd] = useState(false);
+  const [newPwd, setNewPwd] = useState("");
+  const [pwdError, setPwdError] = useState("");
 
   // 题目 + 历史
   const [questions, setQuestions] = useState<Question[]>([]);
@@ -154,18 +162,19 @@ export default function StudentPage() {
   const handleEnter = async () => {
     const name = entryName.trim();
     const sid = entryId.trim();
+    const pwd = entryPassword.trim();
     if (!name) { setEntryError("请填写姓名"); return; }
     if (!sid) { setEntryError("请填写学号"); return; }
+    if (!pwd) { setEntryError("请填写密码"); return; }
     setChecking(true);
     setEntryError("");
     try {
-      const res = await checkRoster(name, sid);
-      if (!res.ok) {
-        setEntryError(res.message || "不在班级名单中");
-      } else {
-        setIdentity({ name, id: sid, isTest: false, className: res.class_name || "" });
-        await loadData();
-        await loadHistory(name, sid);
+      const res = await studentLogin(name, sid, pwd);
+      setIdentity({ name, id: sid, isTest: false, className: res.class_name || "" });
+      await loadData();
+      await loadHistory(name, sid);
+      if (!res.password_changed) {
+        setMustChangePwd(true);  // 首次登录，强制修改密码
       }
     } catch (e: any) {
       setEntryError(e.message);
@@ -177,6 +186,19 @@ export default function StudentPage() {
   const handleTestMode = async () => {
     setIdentity({ name: "测试", id: `test_${Date.now()}`, isTest: true, className: "" });
     await loadData();
+  };
+
+  const handleChangePwd = async () => {
+    if (!newPwd || newPwd.length < 4) { setPwdError("密码至少4位"); return; }
+    if (!identity) return;
+    setPwdError("");
+    try {
+      await studentChangePassword(identity.name, identity.id, identity.className, newPwd.trim());
+      setMustChangePwd(false);
+      setNewPwd("");
+    } catch (e: any) {
+      setPwdError(e.message);
+    }
   };
 
   const handleLogout = () => {
@@ -502,6 +524,12 @@ export default function StudentPage() {
                 onKeyDown={(e) => e.key === "Enter" && handleEnter()}
                 className="w-full border rounded px-3 py-2" placeholder="请输入学号" />
             </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">密码</label>
+              <input type="password" value={entryPassword} onChange={(e) => setEntryPassword(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && handleEnter()}
+                className="w-full border rounded px-3 py-2" placeholder="请输入密码" />
+            </div>
             {entryError && <p className="text-red-500 text-sm">{entryError}</p>}
             <button onClick={handleEnter} disabled={checking}
               className="w-full bg-blue-600 text-white py-2 rounded hover:bg-blue-700 disabled:opacity-50">
@@ -512,6 +540,35 @@ export default function StudentPage() {
                 测试模式（无需姓名学号）
               </button>
             </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ── 强制修改密码弹窗 ──────────────────────────────
+
+  if (mustChangePwd) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+        <div className="bg-white rounded-lg shadow p-8 w-full max-w-sm">
+          <div className="text-center mb-4">
+            <span className="text-3xl">🔐</span>
+          </div>
+          <h2 className="text-lg font-bold text-center mb-2">首次登录，请修改密码</h2>
+          <p className="text-sm text-gray-500 text-center mb-4">默认密码为 cad123，为保障账号安全请立即修改</p>
+          <div className="space-y-3">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">新密码</label>
+              <input type="password" value={newPwd} onChange={(e) => setNewPwd(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && handleChangePwd()}
+                className="w-full border rounded px-3 py-2" placeholder="请输入新密码（至少4位）" />
+            </div>
+            {pwdError && <p className="text-red-500 text-sm">{pwdError}</p>}
+            <button onClick={handleChangePwd}
+              className="w-full bg-blue-600 text-white py-2 rounded hover:bg-blue-700">
+              确认修改
+            </button>
           </div>
         </div>
       </div>
