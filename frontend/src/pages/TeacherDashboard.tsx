@@ -926,12 +926,20 @@ export default function TeacherDashboard() {
                     placeholder="例如：零件材料为HT200、表面粗糙度Ra6.3、未注倒角C1等"
                   />
                 </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">适用班别</label>
-                  <input type="text" value={qClasses} onChange={(e) => setQClasses(e.target.value)}
-                    placeholder="多个班别用逗号分隔，如：25级机电1班,25级机电2班"
-                    className="w-full border rounded px-3 py-1.5 text-sm"
-                  />
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">适用班别</label>
+                    <input type="text" value={qClasses} onChange={(e) => setQClasses(e.target.value)}
+                      placeholder="逗号分隔，如：25级机电1班"
+                      className="w-full border rounded px-3 py-1.5 text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">创建教师</label>
+                    <input type="text" value={sessionStorage.getItem("teacher_name") || sessionStorage.getItem("teacher_username") || ""}
+                      disabled className="w-full border rounded px-3 py-1.5 text-sm bg-gray-100 text-gray-600"
+                    />
+                  </div>
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">学生提交文件类型</label>
