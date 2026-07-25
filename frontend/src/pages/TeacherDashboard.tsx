@@ -668,7 +668,7 @@ export default function TeacherDashboard() {
                   const myUsername = sessionStorage.getItem("teacher_username") || "";
                   const isOwner = !(q as any).teacher || (q as any).teacher === myUsername || !myUsername;
                   return (
-                  <tr key={q.id} className="border-b hover:bg-gray-50">
+                  <tr key={q.id} className={`border-b hover:bg-gray-50 ${!isOwner ? "opacity-50 bg-gray-100" : ""}`}>
                     <td className="p-2 font-mono">{q.id}</td>
                     <td className="p-2">{q.title}</td>
                     <td className="p-2 text-sm text-gray-600">{ (q as any).teacher || "-" }</td>

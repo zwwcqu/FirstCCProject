@@ -81,9 +81,18 @@ def _check_rate_limit(request: Request) -> None:
 # ── 题目相关 ─────────────────────────────────────────────
 
 @router.get("/questions")
-async def get_questions():
-    """获取所有题目列表"""
-    return list_questions()
+async def get_questions(class_name: str = ""):
+    """获取题目列表。指定 class_name 时仅返回该班别相关的题目"""
+    all_qs = list_questions()
+    if not class_name:
+        return all_qs
+    # 过滤：题目的 classes 字段包含该班别，或 classes 为空（未限制）
+    result = []
+    for q in all_qs:
+        q_classes = (q.get("classes") or "").strip()
+        if not q_classes or class_name in q_classes:
+            result.append(q)
+    return result
 
 
 @router.get("/questions/{qid}")

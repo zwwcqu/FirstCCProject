@@ -22,7 +22,9 @@ import FileButton from "../components/FileButton";
 interface Question {
   id: string;
   title: string;
-  submission_type?: string;  // 教师设置的学生提交文件类型：pdf / image，缺省 pdf
+  submission_type?: string;  // pdf / image
+  classes?: string;          // 适用班别（逗号分隔）
+  teacher?: string;          // 创建教师
   files?: { description: string; phase1_criteria: string; phase2_criteria: string; images: string[] };
 }
 
@@ -149,8 +151,19 @@ export default function StudentPage() {
     }
   }, [selectedQid, studentFilename, !!analysisData, !!result]);
 
-  const loadData = async () => {
-    try { setQuestions(await listQuestions()); } catch { /* ignore */ }
+  const loadData = async (className = "") => {
+    try {
+      // 学生端按班别过滤题目
+      const qs = await listQuestions();
+      if (className) {
+        setQuestions(qs.filter((q: any) => {
+          const cc = (q.classes || "").trim();
+          return !cc || cc.includes(className);
+        }));
+      } else {
+        setQuestions(qs);
+      }
+    } catch { /* ignore */ }
   };
 
   const loadHistory = async (name: string, id: string) => {
@@ -174,7 +187,7 @@ export default function StudentPage() {
     try {
       const res = await studentLogin(name, sid, pwd);
       setIdentity({ name, id: sid, isTest: false, className: res.class_name || "" });
-      await loadData();
+      await loadData(res.class_name || "");
       await loadHistory(name, sid);
       if (!res.password_changed) {
         setMustChangePwd(true);  // 首次登录，强制修改密码
