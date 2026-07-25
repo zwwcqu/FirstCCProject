@@ -320,20 +320,20 @@ export default function SettingsPage() {
 
   return (
     <div className="min-h-screen bg-gray-50">
-      <header className="bg-blue-700 text-white p-4 shadow flex justify-between items-center">
-        <div className="flex items-center gap-6">
+      <header className="bg-blue-700 text-white p-4 shadow">
+        <div className="flex items-center justify-between mb-2">
           <h1 className="text-xl font-bold">系统设置</h1>
-          <nav className="flex gap-1 flex-wrap">
-            {TABS.map(t => (
-              <button key={t.key} onClick={() => setTab(t.key)}
-                className={`px-3 py-1 rounded text-sm whitespace-nowrap ${tab === t.key ? "bg-white/20 font-medium" : "hover:bg-white/20 transition-colors"}`}>
-                {t.label}
-              </button>
-            ))}
-          </nav>
+          <button onClick={() => navigate("/teacher/dashboard")}
+            className="bg-white/20 px-3 py-1 rounded hover:bg-white/30 flex-shrink-0">返回</button>
         </div>
-        <button onClick={() => navigate("/teacher/dashboard")}
-          className="bg-white/20 px-3 py-1 rounded hover:bg-white/30">返回</button>
+        <nav className="flex gap-1 flex-wrap">
+          {TABS.map(t => (
+            <button key={t.key} onClick={() => setTab(t.key)}
+              className={`px-3 py-1 rounded text-sm whitespace-nowrap ${tab === t.key ? "bg-white/20 font-medium" : "hover:bg-white/20 transition-colors"}`}>
+              {t.label}
+            </button>
+          ))}
+        </nav>
       </header>
 
       <main className="max-w-3xl mx-auto p-4 space-y-4">
