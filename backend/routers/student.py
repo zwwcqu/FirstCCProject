@@ -150,8 +150,8 @@ async def student_change_password(request: Request):
     new_password = (body.get("new_password") or "").strip()
     if not all([name, student_id, class_name, old_password, new_password]):
         raise HTTPException(status_code=400, detail="参数不完整")
-    if len(new_password) < 4:
-        raise HTTPException(status_code=400, detail="密码至少4位")
+    if len(new_password) < 6:
+        raise HTTPException(status_code=400, detail="密码至少6位")
     if old_password == new_password:
         raise HTTPException(status_code=400, detail="新密码不能与旧密码相同")
     from services.question_service import check_roster

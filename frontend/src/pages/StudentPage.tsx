@@ -193,7 +193,7 @@ export default function StudentPage() {
 
   const handleChangePwd = async () => {
     if (!oldPwd.trim()) { setPwdError("请输入旧密码"); return; }
-    if (!newPwd || newPwd.length < 4) { setPwdError("新密码至少4位"); return; }
+    if (!newPwd || newPwd.length < 6) { setPwdError("新密码至少6位"); return; }
     if (newPwd !== newPwd2) { setPwdError("两次输入的新密码不一致"); return; }
     if (oldPwd.trim() === newPwd) { setPwdError("新密码不能与旧密码相同"); return; }
     if (!identity) return;
@@ -574,7 +574,7 @@ export default function StudentPage() {
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">新密码</label>
               <input type="password" value={newPwd} onChange={(e) => setNewPwd(e.target.value)}
-                className="w-full border rounded px-3 py-2" placeholder="请输入新密码（至少4位）" />
+                className="w-full border rounded px-3 py-2" placeholder="请输入新密码（至少6位）" />
             </div>
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">确认新密码</label>
@@ -609,7 +609,7 @@ export default function StudentPage() {
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">新密码</label>
               <input type="password" value={newPwd} onChange={(e) => setNewPwd(e.target.value)}
-                className="w-full border rounded px-3 py-2" placeholder="请输入新密码（至少4位）" />
+                className="w-full border rounded px-3 py-2" placeholder="请输入新密码（至少6位）" />
             </div>
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">确认新密码</label>
