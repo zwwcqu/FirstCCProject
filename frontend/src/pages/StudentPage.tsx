@@ -85,9 +85,10 @@ export default function StudentPage() {
   // 强制修改密码 & 设置页
   const [mustChangePwd, setMustChangePwd] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [oldPwd, setOldPwd] = useState("");
   const [newPwd, setNewPwd] = useState("");
+  const [newPwd2, setNewPwd2] = useState("");
   const [pwdError, setPwdError] = useState("");
-  const [oldPwd, setOldPwd] = useState("");  // 主动修改密码时需验证旧密码
 
   // 题目 + 历史
   const [questions, setQuestions] = useState<Question[]>([]);
@@ -190,16 +191,19 @@ export default function StudentPage() {
     await loadData();
   };
 
-  const handleChangePwd = async (isVoluntary = false) => {
-    if (!newPwd || newPwd.length < 4) { setPwdError("密码至少4位"); return; }
+  const handleChangePwd = async () => {
+    if (!oldPwd.trim()) { setPwdError("请输入旧密码"); return; }
+    if (!newPwd || newPwd.length < 4) { setPwdError("新密码至少4位"); return; }
+    if (newPwd !== newPwd2) { setPwdError("两次输入的新密码不一致"); return; }
+    if (oldPwd.trim() === newPwd) { setPwdError("新密码不能与旧密码相同"); return; }
     if (!identity) return;
     setPwdError("");
     try {
-      await studentChangePassword(identity.name, identity.id, identity.className, newPwd.trim());
+      await studentChangePassword(identity.name, identity.id, identity.className,
+                                  oldPwd.trim(), newPwd.trim());
       setMustChangePwd(false);
       setShowSettings(false);
-      setNewPwd("");
-      setOldPwd("");
+      setOldPwd(""); setNewPwd(""); setNewPwd2("");
     } catch (e: any) {
       setPwdError(e.message);
     }
@@ -563,10 +567,20 @@ export default function StudentPage() {
           <p className="text-sm text-gray-500 text-center mb-4">默认密码为 cad123，为保障账号安全请立即修改</p>
           <div className="space-y-3">
             <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">旧密码</label>
+              <input type="password" value={oldPwd} onChange={(e) => setOldPwd(e.target.value)}
+                className="w-full border rounded px-3 py-2" placeholder="默认密码 cad123" />
+            </div>
+            <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">新密码</label>
               <input type="password" value={newPwd} onChange={(e) => setNewPwd(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && handleChangePwd()}
                 className="w-full border rounded px-3 py-2" placeholder="请输入新密码（至少4位）" />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">确认新密码</label>
+              <input type="password" value={newPwd2} onChange={(e) => setNewPwd2(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && handleChangePwd()}
+                className="w-full border rounded px-3 py-2" placeholder="请再次输入新密码" />
             </div>
             {pwdError && <p className="text-red-500 text-sm">{pwdError}</p>}
             <button onClick={handleChangePwd}
@@ -588,18 +602,28 @@ export default function StudentPage() {
           <h2 className="text-lg font-bold text-center mb-4">修改密码</h2>
           <div className="space-y-3">
             <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">旧密码</label>
+              <input type="password" value={oldPwd} onChange={(e) => setOldPwd(e.target.value)}
+                className="w-full border rounded px-3 py-2" placeholder="请输入当前密码" />
+            </div>
+            <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">新密码</label>
               <input type="password" value={newPwd} onChange={(e) => setNewPwd(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && handleChangePwd(true)}
                 className="w-full border rounded px-3 py-2" placeholder="请输入新密码（至少4位）" />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">确认新密码</label>
+              <input type="password" value={newPwd2} onChange={(e) => setNewPwd2(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && handleChangePwd()}
+                className="w-full border rounded px-3 py-2" placeholder="请再次输入新密码" />
             </div>
             {pwdError && <p className="text-red-500 text-sm">{pwdError}</p>}
             <div className="flex gap-2">
-              <button onClick={() => handleChangePwd(true)}
+              <button onClick={handleChangePwd}
                 className="flex-1 bg-blue-600 text-white py-2 rounded hover:bg-blue-700">
                 确认修改
               </button>
-              <button onClick={() => { setShowSettings(false); setNewPwd(""); setPwdError(""); }}
+              <button onClick={() => { setShowSettings(false); setOldPwd(""); setNewPwd(""); setNewPwd2(""); setPwdError(""); }}
                 className="flex-1 bg-gray-200 text-gray-700 py-2 rounded hover:bg-gray-300">
                 返回
               </button>
@@ -619,7 +643,7 @@ export default function StudentPage() {
           <div className="flex items-center gap-3">
             <button onClick={handleLogout} className="hover:underline opacity-70 hover:opacity-100">&larr;退出</button>
             {!identity.isTest && (
-              <button onClick={() => { setShowSettings(true); setNewPwd(""); setOldPwd(""); setPwdError(""); }}
+              <button onClick={() => { setShowSettings(true); setOldPwd(""); setNewPwd(""); setNewPwd2(""); setPwdError(""); }}
                 className="opacity-70 hover:opacity-100 text-lg" title="设置">
                 ⚙
               </button>

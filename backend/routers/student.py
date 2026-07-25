@@ -141,22 +141,27 @@ async def student_login(request: Request):
 
 @router.post("/change-password")
 async def student_change_password(request: Request):
-    """学生修改密码"""
+    """学生修改密码（需验证旧密码）"""
     body = await request.json()
     name = (body.get("name") or "").strip()
     student_id = (body.get("student_id") or "").strip()
     class_name = (body.get("class_name") or "").strip()
+    old_password = (body.get("old_password") or "").strip()
     new_password = (body.get("new_password") or "").strip()
-    if not all([name, student_id, class_name, new_password]):
+    if not all([name, student_id, class_name, old_password, new_password]):
         raise HTTPException(status_code=400, detail="参数不完整")
     if len(new_password) < 4:
         raise HTTPException(status_code=400, detail="密码至少4位")
+    if old_password == new_password:
+        raise HTTPException(status_code=400, detail="新密码不能与旧密码相同")
     from services.question_service import check_roster
     ok, _ = check_roster(name, student_id)
     if not ok:
         raise HTTPException(status_code=403, detail="身份校验失败")
     from auth import change_student_password
-    change_student_password(class_name, student_id, new_password)
+    success, msg = change_student_password(class_name, student_id, old_password, new_password)
+    if not success:
+        raise HTTPException(status_code=400, detail=msg)
     return {"ok": True}
 
 

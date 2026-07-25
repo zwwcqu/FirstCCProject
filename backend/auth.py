@@ -176,26 +176,30 @@ def verify_student_password(class_name: str, student_id: str, password: str) -> 
     return False, False
 
 
-def change_student_password(class_name: str, student_id: str, new_password: str) -> bool:
-    """修改学生密码。返回是否成功"""
+def change_student_password(class_name: str, student_id: str,
+                           old_password: str, new_password: str) -> tuple[bool, str]:
+    """
+    修改学生密码。先验证旧密码，再设置新密码。
+    返回 (成功, 错误消息)
+    """
     auth_data = _read_student_auth(class_name)
+
+    # 先验证旧密码
+    ok, _ = verify_student_password(class_name, student_id, old_password)
+    if not ok:
+        return False, "旧密码错误"
+
+    # 设置新密码
+    hashed, salt = _hash_password(new_password)
     if student_id not in auth_data:
-        # 如果没有记录，创建一个
-        hashed, salt = _hash_password(new_password)
-        auth_data[student_id] = {
-            "password_hash": hashed,
-            "salt": salt,
-            "password_changed": True,
-        }
-    else:
-        hashed, salt = _hash_password(new_password)
-        auth_data[student_id]["password_hash"] = hashed
-        auth_data[student_id]["salt"] = salt
-        auth_data[student_id]["password_changed"] = True
+        auth_data[student_id] = {}
+    auth_data[student_id]["password_hash"] = hashed
+    auth_data[student_id]["salt"] = salt
+    auth_data[student_id]["password_changed"] = True
 
     _write_student_auth(class_name, auth_data)
     logger.info(f"学生 {student_id} 密码已修改")
-    return True
+    return True, ""
 
 
 # ── Session 文件持久化辅助 ──────────────────────────────

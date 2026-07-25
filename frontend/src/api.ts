@@ -44,10 +44,10 @@ export function studentLogin(name: string, studentId: string, password: string) 
 }
 
 // 学生修改密码
-export function studentChangePassword(name: string, studentId: string, className: string, newPassword: string) {
+export function studentChangePassword(name: string, studentId: string, className: string, oldPassword: string, newPassword: string) {
   return api("/api/student/change-password", {
     method: "POST",
-    body: JSON.stringify({ name, student_id: studentId, class_name: className, new_password: newPassword }),
+    body: JSON.stringify({ name, student_id: studentId, class_name: className, old_password: oldPassword, new_password: newPassword }),
   });
 }
 
