@@ -130,6 +130,7 @@ export default function TeacherDashboard() {
   const [refPdf, setRefPdf] = useState<File | null>(null);
   const [submissionType, setSubmissionType] = useState("pdf");  // 学生提交文件类型：pdf / image
   const [qClasses, setQClasses] = useState<string[]>([]);     // 适用班别（复选框）
+  const [deadline, setDeadline] = useState("");               // 提交截止时间
   const [existingImages, setExistingImages] = useState<string[]>([]);
   const [existingRefPdf, setExistingRefPdf] = useState<string | null>(null);
 
@@ -203,6 +204,7 @@ export default function TeacherDashboard() {
     setRefPdf(null);
     setSubmissionType("pdf");
     setQClasses([]);
+    setDeadline("");
     setExistingImages([]);
     setExistingRefPdf(null);
     setEditingId(null);
@@ -219,6 +221,7 @@ export default function TeacherDashboard() {
     fd.append("knowledge", knowledge);
     fd.append("submission_type", submissionType);
     fd.append("classes", qClasses.join(","));
+    fd.append("deadline", deadline);
     if (image) fd.append("image", image);
     if (refPdf) fd.append("reference_pdf", refPdf);
     try {
@@ -241,6 +244,7 @@ export default function TeacherDashboard() {
     fd.append("knowledge", knowledge);
     fd.append("submission_type", submissionType);
     fd.append("classes", qClasses.join(","));
+    fd.append("deadline", deadline);
     if (image) fd.append("image", image);
     if (refPdf) fd.append("reference_pdf", refPdf);
     try {
@@ -275,6 +279,7 @@ export default function TeacherDashboard() {
       setKnowledge(detail.files?.knowledge || "");
       setSubmissionType(detail.submission_type || "pdf");
       setQClasses(((q as any).classes || "").split(",").filter(Boolean));
+      setDeadline((q as any).deadline || "");
       setImage(null);
       setRefPdf(null);
       setExistingImages(detail.files?.images || []);
@@ -963,6 +968,12 @@ export default function TeacherDashboard() {
                       disabled className="w-full border rounded px-3 py-1.5 text-sm bg-gray-100 text-gray-600"
                     />
                   </div>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">提交截止时间</label>
+                  <input type="datetime-local" value={deadline} onChange={(e) => setDeadline(e.target.value)}
+                    className="w-full border rounded px-3 py-1.5 text-sm" />
+                  <p className="text-xs text-gray-400 mt-0.5">留空则不限制提交时间</p>
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">学生提交文件类型</label>

@@ -267,6 +267,17 @@ async def upload_submission(
     if q is None:
         raise HTTPException(status_code=404, detail="题目不存在")
 
+    # 检查提交截止时间
+    deadline = q.get("deadline", "").strip()
+    if deadline and mode == "submit":
+        from datetime import datetime as _dt
+        try:
+            dl = _dt.fromisoformat(deadline)
+            if _dt.now() > dl:
+                raise HTTPException(status_code=400, detail=f"提交已截止（{deadline}），无法再提交作业")
+        except ValueError:
+            pass
+
     is_test = mode == "test"
 
     if not is_test:

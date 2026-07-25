@@ -24,7 +24,8 @@ interface Question {
   title: string;
   submission_type?: string;  // pdf / image
   classes?: string;          // 适用班别（逗号分隔）
-  teacher?: string;          // 创建教师
+  teacher?: string;
+  deadline?: string;
   files?: { description: string; phase1_criteria: string; phase2_criteria: string; images: string[] };
 }
 
@@ -682,10 +683,11 @@ export default function StudentPage() {
           <div className="flex flex-wrap gap-2">
             {questions.map((q) => (
               <button key={q.id} onClick={() => selectQuestion(q.id)}
-                className={`px-4 py-2 rounded text-sm ${
+                className={`px-4 py-2 rounded text-sm text-left ${
                   selectedQid === q.id ? "bg-blue-600 text-white" : "bg-gray-100 hover:bg-gray-200"
                 }`}>
-                {q.id}: {q.title}
+                <div>{q.id}: {q.title}</div>
+                {q.deadline && <div className="text-xs mt-0.5 opacity-70">截止 {new Date(q.deadline).toLocaleString("zh-CN", {month:"numeric", day:"numeric", hour:"2-digit", minute:"2-digit"})}</div>}
                 {!identity.isTest && getStatusBadge(q.id)}
               </button>
             ))}
@@ -735,6 +737,19 @@ export default function StudentPage() {
               {identity.isTest ? "测试提交" : "提交作业"}
             </h2>
 
+            {!identity.isTest && (() => {
+              const qIdx = questions.find(q => q.id === selectedQid);
+              if (qIdx?.deadline && new Date(qIdx.deadline) < new Date()) {
+                return <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded text-sm text-red-600">⏰ 提交已截止，无法再提交作业</div>;
+              }
+              return null;
+            })()}
+
+            {(() => {
+              const qIdx = questions.find(q => q.id === selectedQid);
+              const expired = !identity.isTest && qIdx?.deadline && new Date(qIdx.deadline) < new Date();
+              if (expired) return null;
+              return (
             <div className="mb-4">
               <label className="block text-sm font-medium text-gray-700 mb-1">
                 上传工程图 ({question?.submission_type === "image" ? "图片" : "PDF"})
@@ -747,6 +762,8 @@ export default function StudentPage() {
               />
               {error && <p className="text-red-500 mt-2 text-sm">{error}</p>}
             </div>
+              );
+            })()}
 
             {/* 上传中提示 */}
             {uploading && (

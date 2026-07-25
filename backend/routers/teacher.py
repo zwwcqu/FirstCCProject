@@ -197,13 +197,15 @@ async def create_question_handler(
     reference_pdf: Optional[UploadFile] = File(None),   # 参考工程图（可选）
     submission_type: str = Form("pdf"),                  # 学生提交文件类型：pdf / image
     classes: str = Form(""),                             # 适用班别（逗号分隔）
+    deadline: str = Form(""),                            # 提交截止时间 ISO 格式
 ):
     """新增题目"""
     _require_auth(request)
     teacher = _get_teacher_username(request)
     try:
         entry = create_question(qid, title, description, phase1_criteria, phase2_criteria,
-                                knowledge, submission_type, teacher=teacher, classes=classes)
+                                knowledge, submission_type, teacher=teacher, classes=classes,
+                                deadline=deadline)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     if image and image.filename:
@@ -229,13 +231,15 @@ async def update_question_handler(
     reference_pdf: Optional[UploadFile] = File(None),
     submission_type: str = Form("pdf"),                  # 学生提交文件类型：pdf / image
     classes: str = Form(""),                             # 适用班别（逗号分隔）
+    deadline: str = Form(""),                            # 提交截止时间 ISO 格式
 ):
     """编辑已有题目"""
     _require_auth(request)
     teacher = _get_teacher_username(request)
     try:
         entry = update_question(qid, title, description, phase1_criteria, phase2_criteria,
-                                knowledge, submission_type, teacher=teacher, classes=classes)
+                                knowledge, submission_type, teacher=teacher, classes=classes,
+                                deadline=deadline)
     except PermissionError as e:
         raise HTTPException(status_code=403, detail=str(e))
     if entry is None:
