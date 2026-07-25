@@ -282,6 +282,9 @@ export default function TeacherDashboard() {
     }
   };
 
+  // 当前查看的成绩表是否属于自己
+  const [isGradeOwner, setIsGradeOwner] = useState(true);
+
   const handleViewGrades = async (qid: string) => {
     try {
       const data = await getGrades(qid);
@@ -289,6 +292,11 @@ export default function TeacherDashboard() {
       setGradeColumns(data.columns || []);
       setGradesView(qid);
       setSelectedStudents(new Set());
+      // 检查所有权
+      const q = questions.find(x => x.id === qid);
+      const myUsername = sessionStorage.getItem("teacher_username") || "";
+      const owner = (q as any)?.teacher || "";
+      setIsGradeOwner(!owner || owner === myUsername || !myUsername);
     } catch (e: any) {
       alert(e.message);
     }
@@ -1032,20 +1040,21 @@ export default function TeacherDashboard() {
                   >{refreshing ? "刷新中…" : "刷新"}</button>
                   <button
                     onClick={() => { setSupplementModal(true); setSupplementFile(null); setSupplementParsed(null); }}
-                    className="px-3 py-1 bg-orange-500 text-white rounded hover:bg-orange-600 text-sm"
+                    disabled={!isGradeOwner}
+                    className="px-3 py-1 bg-orange-500 text-white rounded hover:bg-orange-600 text-sm disabled:opacity-50"
                   >
                     补充提交
                   </button>
                   <button
                     onClick={handleBatchGrade}
-                    disabled={selectedStudents.size === 0 || batchGrading}
+                    disabled={!isGradeOwner || selectedStudents.size === 0 || batchGrading}
                     className="px-4 py-1 bg-green-600 text-white rounded hover:bg-green-700 disabled:opacity-50 text-sm"
                   >
                     {batchGrading ? "提交中…" : `批量评分 (${selectedStudents.size})`}
                   </button>
                   <button
                     onClick={handleBatchClear}
-                    disabled={selectedStudents.size === 0 || batchClearing}
+                    disabled={!isGradeOwner || selectedStudents.size === 0 || batchClearing}
                     className="px-4 py-1 bg-red-600 text-white rounded hover:bg-red-700 disabled:opacity-50 text-sm"
                   >
                     {batchClearing ? "清除中…" : `清除评分 (${selectedStudents.size})`}
@@ -1113,7 +1122,7 @@ export default function TeacherDashboard() {
                           </td>
                           {gradeColumns.map((col: string, j: number) => {
                             const isEditing = editingCell?.sid === sid && editingCell?.col === col;
-                            const editable = isGraded && ["阶段1相似度", "阶段2评分"].includes(col);
+                            const editable = isGraded && isGradeOwner && ["阶段1相似度", "阶段2评分"].includes(col);
                             return (
                               <td key={j} className="p-2 max-w-[120px] truncate"
                                 onDoubleClick={() => editable && startEdit(sid, col, row[col] || "")}>
@@ -1280,11 +1289,14 @@ export default function TeacherDashboard() {
                     <button onClick={() => handlePrint("print-review-hw")}
                       onMouseDown={(e) => e.stopPropagation()}
                       className="px-3 py-1 text-xs bg-gray-100 text-gray-600 rounded hover:bg-gray-200">打印</button>
-                    <button onClick={handleSave} disabled={saving}
-                      onMouseDown={(e) => e.stopPropagation()}
-                      className="px-4 py-1 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50 text-sm">
-                      {saving ? "保存中…" : "保存"}
-                    </button>
+                    {isGradeOwner && (
+                      <button onClick={handleSave} disabled={saving}
+                        onMouseDown={(e) => e.stopPropagation()}
+                        className="px-4 py-1 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50 text-sm">
+                        {saving ? "保存中…" : "保存"}
+                      </button>
+                    )}
+                    {!isGradeOwner && <span className="text-xs text-gray-400">只读</span>}
                     {savedText && <span className="text-xs text-green-600">{savedText}</span>}
                     <button onClick={() => setReviewSid(null)}
                       onMouseDown={(e) => e.stopPropagation()}
@@ -1385,7 +1397,8 @@ export default function TeacherDashboard() {
                       <select
                         value={reviewGrade}
                         onChange={(e) => setReviewGrade(e.target.value)}
-                        className="border rounded px-2 py-1 text-sm"
+                        disabled={!isGradeOwner}
+                        className="border rounded px-2 py-1 text-sm disabled:bg-gray-100"
                       >
                         {GRADE_OPTIONS.map((g) => (
                           <option key={g} value={g}>{g}</option>
@@ -1425,9 +1438,10 @@ export default function TeacherDashboard() {
                       <textarea
                         value={reviewComment}
                         onChange={(e) => setReviewComment(e.target.value)}
+                        disabled={!isGradeOwner}
                         rows={4}
-                        className="w-full border rounded px-3 py-2 text-sm"
-                        placeholder="输入教师评语…"
+                        className="w-full border rounded px-3 py-2 text-sm disabled:bg-gray-100"
+                        placeholder={isGradeOwner ? "输入教师评语…" : "只读"}
                       />
                     </div>
                   </div>

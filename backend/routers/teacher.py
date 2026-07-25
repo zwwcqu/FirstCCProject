@@ -68,6 +68,19 @@ def _get_teacher_username(request: Request) -> str:
     return ""
 
 
+def _check_question_ownership(request: Request, qid: str) -> None:
+    """检查当前教师是否拥有该题目，不拥有则抛出 403"""
+    teacher = _get_teacher_username(request)
+    if not teacher:
+        return  # 旧版 session 无用户名，放行
+    questions = read_questions_index()
+    for q in questions:
+        if q["id"] == qid:
+            owner = q.get("teacher", "")
+            if owner and owner != teacher:
+                raise HTTPException(status_code=403, detail=f"题目 [{qid}] 由 {owner} 创建，您无权修改")
+
+
 def _run_reference_analysis(qid: str) -> None:
     """
     教师参考图分析，通过任务队列以最高优先级执行。
@@ -599,8 +612,9 @@ async def refresh_grades(request: Request, qid: str):
 
 @router.put("/grades/{qid}/{student_id}")
 async def edit_grade(request: Request, qid: str, student_id: str):
-    """修改单个学生的成绩字段"""
+    """修改单个学生的成绩字段。仅题目创建者可修改"""
     _require_auth(request)
+    _check_question_ownership(request, qid)
     body = await request.json()
     row = get_student_grade(qid, student_id)
     if row is None:
