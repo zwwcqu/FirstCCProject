@@ -82,10 +82,12 @@ export default function StudentPage() {
   const [entryError, setEntryError] = useState("");
   const [checking, setChecking] = useState(false);
 
-  // 强制修改密码
+  // 强制修改密码 & 设置页
   const [mustChangePwd, setMustChangePwd] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
   const [newPwd, setNewPwd] = useState("");
   const [pwdError, setPwdError] = useState("");
+  const [oldPwd, setOldPwd] = useState("");  // 主动修改密码时需验证旧密码
 
   // 题目 + 历史
   const [questions, setQuestions] = useState<Question[]>([]);
@@ -188,14 +190,16 @@ export default function StudentPage() {
     await loadData();
   };
 
-  const handleChangePwd = async () => {
+  const handleChangePwd = async (isVoluntary = false) => {
     if (!newPwd || newPwd.length < 4) { setPwdError("密码至少4位"); return; }
     if (!identity) return;
     setPwdError("");
     try {
       await studentChangePassword(identity.name, identity.id, identity.className, newPwd.trim());
       setMustChangePwd(false);
+      setShowSettings(false);
       setNewPwd("");
+      setOldPwd("");
     } catch (e: any) {
       setPwdError(e.message);
     }
@@ -575,13 +579,52 @@ export default function StudentPage() {
     );
   }
 
+  // ── 设置弹窗（修改密码）────────────────────────────
+
+  if (showSettings) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+        <div className="bg-white rounded-lg shadow p-8 w-full max-w-sm">
+          <h2 className="text-lg font-bold text-center mb-4">修改密码</h2>
+          <div className="space-y-3">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">新密码</label>
+              <input type="password" value={newPwd} onChange={(e) => setNewPwd(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && handleChangePwd(true)}
+                className="w-full border rounded px-3 py-2" placeholder="请输入新密码（至少4位）" />
+            </div>
+            {pwdError && <p className="text-red-500 text-sm">{pwdError}</p>}
+            <div className="flex gap-2">
+              <button onClick={() => handleChangePwd(true)}
+                className="flex-1 bg-blue-600 text-white py-2 rounded hover:bg-blue-700">
+                确认修改
+              </button>
+              <button onClick={() => { setShowSettings(false); setNewPwd(""); setPwdError(""); }}
+                className="flex-1 bg-gray-200 text-gray-700 py-2 rounded hover:bg-gray-300">
+                返回
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   // ── 主界面 ──────────────────────────────────────────
 
   return (
     <div className="min-h-screen bg-gray-50">
       <header className="bg-blue-700 text-white px-3 py-1.5 shadow sticky top-0 z-10">
         <div className="max-w-3xl mx-auto flex items-center justify-between text-sm">
-          <button onClick={handleLogout} className="hover:underline opacity-70 hover:opacity-100">&larr;退出</button>
+          <div className="flex items-center gap-3">
+            <button onClick={handleLogout} className="hover:underline opacity-70 hover:opacity-100">&larr;退出</button>
+            {!identity.isTest && (
+              <button onClick={() => { setShowSettings(true); setNewPwd(""); setOldPwd(""); setPwdError(""); }}
+                className="opacity-70 hover:opacity-100 text-lg" title="设置">
+                ⚙
+              </button>
+            )}
+          </div>
           <div>
             {identity.isTest ? (
               <span>测试模式</span>
