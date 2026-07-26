@@ -64,6 +64,8 @@ TEMPLATE_NAMES = [
 
 # 文件校验常量
 PDF_MAGIC = b"%PDF"  # PDF 文件头魔数
+DXF_EXTENSIONS = {".dxf"}  # DXF 文件后缀
+DXF_MAGIC_PREFIXES = (b"  0\x0d\x0aSECTION", b"  0\x0aSECTION", b"0\x0d\x0aSECTION", b"0\x0aSECTION")  # DXF 文件头特征
 
 
 def _copy_template_csv(template_name: str, subdir: str, target_name: str) -> None:
@@ -155,7 +157,7 @@ def _migrate_settings() -> None:
     except Exception:
         return
 
-    migrate_keys = ["llm_params", "image_params", "grade_thresholds",
+    migrate_keys = ["llm_params", "image_params", "dxf_params", "grade_thresholds",
                     "prompt_templates", "scoring_templates"]
 
     current = read_settings()
@@ -242,6 +244,18 @@ def get_image_params() -> dict:
         "analysis_jpeg_quality": 85,
     }
     return {**defaults, **read_settings().get("image_params", {})}
+
+
+def get_dxf_params() -> dict:
+    """读取 DXF 处理参数"""
+    defaults = {
+        "preview_dpi": 150,
+        "preview_max_size": 2048,
+        "preview_bg": "#FFFFFF",
+        "preview_fg": "#000000",
+        "preview_linewidth_scale": 1.0,
+    }
+    return {**defaults, **read_settings().get("dxf_params", {})}
 
 
 def _clean_settings(data: dict) -> dict:

@@ -49,6 +49,20 @@
     "_analysis_jpeg_quality": "分析用图 JPEG 质量 (1-100)"
   },
 
+  "dxf_params": {
+    "_说明": "DXF 文件处理参数",
+    "preview_dpi": 150,
+    "_preview_dpi": "DXF 渲染为 PNG 预览图的 DPI 分辨率",
+    "preview_max_size": 2048,
+    "_preview_max_size": "DXF 预览图长边最大像素数",
+    "preview_bg": "#FFFFFF",
+    "_preview_bg": "DXF 预览图背景色",
+    "preview_fg": "#000000",
+    "_preview_fg": "DXF 预览图前景色",
+    "preview_linewidth_scale": 1.0,
+    "_preview_linewidth_scale": "DXF 预览图线宽缩放系数"
+  },
+
   "grade_thresholds": {
     "_说明": "评分等级阈值，总分 >= 阈值即对应等级，低于最低阈值则为 F",
     "A+": 90,

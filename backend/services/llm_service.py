@@ -785,6 +785,168 @@ def analyze_and_grade(
     return result
 
 
+# ── DXF 评分（单次 LLM 调用：图片 + 结构化数据对比）─────────
+
+def _simplify_dxf_data(data: dict) -> dict:
+    """精简 DXF 提取数据，保留评分所需的关键统计和结构信息，减少 token 消耗"""
+    simplified: dict = {
+        "entity_counts": data.get("entity_counts", {}),
+        "bounds": data.get("bounds", {}),
+    }
+
+    # 图层摘要（名称 + 实体数统计 + 线型/颜色概要）
+    layer_summary = {}
+    all_entities = data.get("entities", {})
+    # 从全部 entities 按图层统计
+    for category in ("lines", "circles", "arcs", "centerlines", "hatches"):
+        for ent in all_entities.get(category, []):
+            lname = ent.get("layer", "")
+            if lname not in layer_summary:
+                layer_summary[lname] = {"count": 0, "types": set()}
+            layer_summary[lname]["count"] += 1
+            layer_summary[lname]["types"].add(category.rstrip('s'))
+
+    simplified["layer_summary"] = {
+        name: {"entity_count": info["count"], "entity_types": sorted(info["types"])}
+        for name, info in sorted(layer_summary.items())
+    }
+
+    # 尺寸摘要
+    dims = data.get("dimensions", [])
+    if dims:
+        dim_types = {}
+        for d in dims:
+            t = d.get("type", "unknown")
+            dim_types[t] = dim_types.get(t, 0) + 1
+        simplified["dimension_summary"] = {
+            "total": len(dims),
+            "by_type": dim_types,
+        }
+        # 保留尺寸列表（每条仅保留关键字段）
+        simplified["dimensions"] = [
+            {"type": d.get("type", ""), "text": d.get("text", ""),
+             "measurement": d.get("measurement"), "layer": d.get("layer", "")}
+            for d in dims
+        ]
+
+    # 文本摘要
+    texts = data.get("texts", [])
+    if texts:
+        simplified["text_count"] = len(texts)
+        # 保留前 30 条文本
+        simplified["texts"] = [
+            {"content": t.get("content", ""), "layer": t.get("layer", ""), "height": t.get("height", 0)}
+            for t in texts[:30]
+        ]
+
+    return simplified
+
+
+def grade_dxf(
+    ref_data: dict,
+    stu_data: dict,
+    ref_preview_path: Path,
+    stu_preview_path: Path,
+    phase1_criteria: str,
+    phase2_criteria: str,
+    *,
+    knowledge: str = "",
+) -> dict:
+    """
+    单次 LLM 调用完成 DXF 评分。
+    输入：参考图和学生图的 DXF 提取数据 + PNG 预览图
+    输出：phase1_similarity, phase2_criteria, total_score, grade 及各维评语
+
+    DXF 评分流程（不同于 PDF/图片流程）：
+    - 不需要 LLM 识读（ezdxf 已提取精确结构化数据）
+    - 将预览图发给 LLM 做视觉相似度对比（Phase 1）
+    - 将结构化数据发给 LLM 做量化对比（Phase 2）
+    - 单次调用同时完成 Phase 1 + Phase 2
+    """
+    client = _build_client()
+    model = _get_model()
+    templates = get_prompt_templates()
+    grading_guide = templates.get("grading_guide",
+        "你是一位工程图批阅老师。请对比学生图和参考图，从结构完整性和标注准确性两方面综合评分。")
+
+    ref_simple = _simplify_dxf_data(ref_data)
+    stu_simple = _simplify_dxf_data(stu_data)
+
+    kn_block = f"【补充知识】\n{knowledge}\n\n" if knowledge else ""
+
+    prompt_text = f"""{kn_block}{grading_guide}
+
+以下是从 DXF 工程图文件中自动提取的结构化数据以及对应的预览图片。结构化数据是精确的 CAD 数据（ezdxf 提取），
+可直接用于定量对比。预览图用于视觉相似度判断。
+
+【参考图 — DXF 结构化数据】
+{json.dumps(ref_simple, ensure_ascii=False, indent=2)}
+
+【学生图 — DXF 结构化数据】
+{json.dumps(stu_simple, ensure_ascii=False, indent=2)}
+
+【评分标准】
+阶段一（图形相似度 — 结合预览图判断整体结构相似性）：
+{phase1_criteria}
+
+阶段二（量化标注 — 结合结构化数据进行精确对比）：
+{phase2_criteria}
+
+说明：
+- 阶段一主要看预览图，对比两个图形的整体轮廓、视图布局、结构完整性。
+  结构化数据中的 entity_counts 和 bounds 可作为辅助参考。
+- 阶段二主要看结构化数据中的尺寸标注（dimension_summary + dimensions 列表），
+  对比数量是否接近、数值是否匹配。图层信息可用于判断绘图规范性。
+- 文本内容（技术要求等）可辅助判断技术要求的完整性。
+
+请严格按以下 JSON 格式输出，不要用 markdown 代码块包裹，不要输出其他文字：
+{{
+  "phase1_similarity": 85,
+  "phase1_comment": "与参考图相比的图形相似度评价，着重说明结构完整性和绘图规范性",
+  "phase2_criteria": 80,
+  "图样表达": "评价图样表达是否清晰规范",
+  "尺寸标注": "评价尺寸标注是否齐全、正确，数量是否匹配",
+  "尺寸公差": "评价公差标注情况（如数据中有则评价）",
+  "表面质量": "评价粗糙度等标注情况",
+  "形位公差": "评价形位公差标注情况",
+  "技术要求": "评价技术要求文本的完整性和相似度",
+  "phase2_comment": "阶段二的综合评价",
+  "总评": "综合两阶段的整体评价"
+}}"""
+
+    # DXF 预览图转 base64
+    p1_size = _phase1_max_size()
+    p1_qual = _phase1_jpeg_quality()
+    ref_b64 = image_to_base64(ref_preview_path, max_size=p1_size, quality=p1_qual)
+    stu_b64 = image_to_base64(stu_preview_path, max_size=p1_size, quality=p1_qual)
+
+    content: list[dict] = [
+        {"type": "text", "text": prompt_text},
+        {"type": "text", "text": "\n【参考工程图预览】："},
+        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{ref_b64}"}},
+        {"type": "text", "text": "\n【学生工程图预览】："},
+        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{stu_b64}"}},
+    ]
+
+    logger.info(f"DXF 评分中（模型: {model}）…")
+    result = _call_and_parse(client, model,
+        [{"role": "user", "content": content}],
+        _parse_json_response)
+    logger.info("DXF 评分完成")
+
+    p1 = float(result.get("phase1_similarity", 0))
+    p2 = float(result.get("phase2_criteria", 0))
+    total = round((p1 * p2) ** 0.5, 1)
+    grade = _compute_grade(total)
+
+    result["phase1_similarity"] = p1
+    result["phase2_criteria"] = p2
+    result["total_score"] = total
+    result["grade"] = grade
+    result["_model"] = result.get("_model", model)
+    return result
+
+
 def grade_combined(
     stu_analysis: dict,
     ref_analysis: dict,

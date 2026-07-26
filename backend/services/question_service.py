@@ -34,6 +34,7 @@ from config import (
     DATA_DIR,
     CONFIG_DIR,
     STUDENT_INFO_DIR,
+    DXF_EXTENSIONS,
     read_questions_index,
     write_questions_index,
     get_question_dir,
@@ -198,6 +199,15 @@ def save_reference_pdf(qid: str, file_bytes: bytes, filename: str) -> str:
     return str(path)
 
 
+def save_reference_dxf(qid: str, file_bytes: bytes, filename: str) -> str:
+    """保存参考工程图 DXF"""
+    qdir = get_question_dir(qid)
+    qdir.mkdir(parents=True, exist_ok=True)
+    path = qdir / "参考工程图.dxf"
+    path.write_bytes(file_bytes)
+    return str(path)
+
+
 def get_question_files(qid: str) -> dict:
     """读取题目的所有内容文件和附件信息"""
     qdir = get_question_dir(qid)
@@ -232,6 +242,8 @@ def get_question_files(qid: str) -> dict:
             result["images"].append(f.name)
         if f.name == "参考工程图.pdf":
             result["reference_pdf"] = f.name
+        if f.name == "参考工程图.dxf":
+            result["reference_dxf"] = f.name
 
     return result
 
@@ -280,6 +292,15 @@ def save_student_submission(qid: str, student_id: str, name: str, file_bytes: by
         except Exception as e:
             raise ValueError(f"PDF 文件无效: {e}")
 
+    elif ext == ".dxf":
+        # DXF 基础校验：检查文件头和 ASCII/二进制标记
+        try:
+            text = file_bytes[:200].decode("ascii", errors="ignore")
+            if not text.strip().upper().startswith("0") or "SECTION" not in text.upper():
+                raise ValueError("DXF 文件格式无效：缺少 SECTION 标记")
+        except Exception as e:
+            raise ValueError(f"DXF 文件无效: {e}")
+
     elif ext in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"):
         # 校验图片可被 PIL 打开
         try:
@@ -299,7 +320,7 @@ def save_student_submission(qid: str, student_id: str, name: str, file_bytes: by
             file_bytes = buf.getvalue()
             ext = ".png"
     else:
-        raise ValueError(f"不支持的文件格式: {ext}，请上传 PDF 或图片文件")
+        raise ValueError(f"不支持的文件格式: {ext}，请上传 PDF、图片或 DXF 文件")
 
     path = student_dir / f"{safe_name}_{safe_id}{ext}"
     path.write_bytes(file_bytes)
@@ -317,6 +338,12 @@ def submit_student_work(qid: str, student_id: str, name: str,
     if Path(saved_name).suffix.lower() == ".pdf":
         from services.llm_service import save_as_png
         save_as_png(Path(student_path), Path(student_path).with_suffix(".png"))
+    elif Path(saved_name).suffix.lower() == ".dxf":
+        from services.dxf_service import render_dxf_preview
+        try:
+            render_dxf_preview(Path(student_path), Path(student_path).with_suffix(".png"))
+        except Exception as e:
+            logger.warning(f"DXF 预览渲染失败（文件仍可正常使用）: {e}")
 
     # 提交时即记录班级信息
     class_name = find_student_class(name, student_id)
@@ -326,7 +353,7 @@ def submit_student_work(qid: str, student_id: str, name: str,
 
 
 def get_student_submission_path(qid: str, student_id: str, name: str) -> Path | None:
-    """查找学生已提交的文件路径，优先返回原始 PDF，其次 PNG"""
+    """查找学生已提交的文件路径，优先返回原始文件（PDF > DXF > PNG）"""
     student_dir = get_student_dir(qid)
     if not student_dir.exists():
         return None
@@ -337,6 +364,11 @@ def get_student_submission_path(qid: str, student_id: str, name: str) -> Path | 
     pdf = student_dir / f"{stem}.pdf"
     if pdf.exists():
         return pdf
+    # 其次 DXF
+    dxf = student_dir / f"{stem}.dxf"
+    if dxf.exists():
+        return dxf
+    # 最后图片
     png = student_dir / f"{stem}.png"
     if png.exists():
         return png
@@ -699,7 +731,7 @@ def sync_submissions_from_disk(qid: str) -> int:
 
     submissions = get_submissions(qid)
     added = 0
-    valid_exts = (".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")
+    valid_exts = (".pdf", ".dxf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")
     corrupt_stems: set[str] = set()
     submission_dirty = False
 
@@ -727,13 +759,17 @@ def sync_submissions_from_disk(qid: str) -> int:
             corrupt_stems.add(stem)
             continue
 
-        # 非 PNG 格式 → 转换为 3508px PNG，保留原始文件
+        # 非 PNG 格式 → 转换为 PNG，保留原始文件
         if ext != ".png":
             png_path = f.with_suffix(".png")
             if not png_path.exists():
                 try:
-                    from services.llm_service import save_as_png
-                    save_as_png(f, png_path)
+                    if ext == ".dxf":
+                        from services.dxf_service import render_dxf_preview
+                        render_dxf_preview(f, png_path)
+                    else:
+                        from services.llm_service import save_as_png
+                        save_as_png(f, png_path)
                     logger.info(f"[{qid}] 转换为 PNG: {f.name} → {png_path.name}")
                 except Exception as e:
                     logger.error(f"[{qid}] PNG 转换失败: {f.name}: {e}")

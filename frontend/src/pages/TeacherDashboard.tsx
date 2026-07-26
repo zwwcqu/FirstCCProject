@@ -344,7 +344,7 @@ export default function TeacherDashboard() {
       setImage(null);
       setRefPdf(null);
       setExistingImages(detail.files?.images || []);
-      setExistingRefPdf(detail.files?.reference_pdf || null);
+      setExistingRefPdf(detail.files?.reference_pdf || detail.files?.reference_dxf || null);
       // 加载题目的识读模板
       try {
         const tpl = await getQuestionTemplate(q.id);
@@ -440,9 +440,18 @@ export default function TeacherDashboard() {
 
   // 选择文件后解析文件名并查询班级
   const handleSupplementFile = async (file: File) => {
-    // 校验是否为真实 PDF
+    // 根据题目类型校验文件格式
+    const q = questions.find(x => x.id === gradesView);
+    const subType = (q as any)?.submission_type || "pdf";
+    const ext = file.name.split(".").pop()?.toLowerCase();
     const header = await file.slice(0, 4).text();
-    if (header !== "%PDF") {
+    if (subType === "dxf") {
+      if (ext !== "dxf") {
+        alert("本题要求提交 DXF 文件，请上传 .dxf 格式文件");
+        setSupplementFile(null);
+        return;
+      }
+    } else if (header !== "%PDF" && subType !== "image") {
       alert("仅支持 PDF 格式文件，请上传真实的 PDF 文件");
       setSupplementFile(null);
       return;
@@ -843,13 +852,65 @@ export default function TeacherDashboard() {
                 )}
 
                 {/* 参考工程图预览 */}
-                {q?.files?.reference_pdf && (
+                {(q?.files?.reference_pdf || q?.files?.reference_dxf) && (
                   <div className="mb-3">
                     <p className="text-xs text-gray-500 mb-1">参考工程图</p>
-                    <img src={getTeacherPreviewUrl(qid, q.files.reference_pdf, Date.now())}
+                    <img src={getTeacherPreviewUrl(qid, q.files.reference_pdf || q.files.reference_dxf, Date.now())}
                       alt="参考工程图" className="w-full rounded border" />
                   </div>
                 )}
+
+                {/* ── DXF 分析数据（ezdxf 提取） ── */}
+                {analysis.entities && analysis.entity_counts ? (
+                  <div className="space-y-2 text-xs">
+                    <div className="p-2 bg-blue-50 rounded border border-blue-100">
+                      <p className="text-xs text-blue-500 mb-1 font-medium">DXF 实体统计</p>
+                      <div className="grid grid-cols-4 gap-1">
+                        {Object.entries(analysis.entity_counts as Record<string,number>).map(([k, v]) => (
+                          <span key={k} className="text-gray-700">
+                            <span className="text-gray-400">{k}:</span> <strong>{v}</strong>
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+
+                    {analysis.dimensions && (analysis.dimensions as any[]).length > 0 && (
+                      <table className="w-full border">
+                        <thead><tr className="bg-green-50"><th colSpan={3} className="p-1 text-left text-green-800">尺寸标注（{(analysis.dimensions as any[]).length} 个）</th></tr></thead>
+                        <thead><tr className="bg-gray-50 border"><th className="p-1 text-left">类型</th><th className="p-1 text-left">文字</th><th className="p-1 text-left">测量值</th></tr></thead>
+                        <tbody>{(analysis.dimensions as any[]).map((d: any, i: number) => (
+                          <tr key={i} className="border"><td className="p-1">{d.type || "-"}</td><td className="p-1 font-mono">{d.text || "-"}</td><td className="p-1 font-mono">{d.measurement != null ? d.measurement : "-"}</td></tr>
+                        ))}</tbody>
+                      </table>
+                    )}
+
+                    {analysis.texts && (analysis.texts as any[]).length > 0 && (
+                      <div className="p-2 bg-yellow-50 rounded border border-yellow-100">
+                        <p className="text-xs text-yellow-600 mb-1 font-medium">文字内容（{(analysis.texts as any[]).length} 条）</p>
+                        <div className="space-y-1 max-h-32 overflow-auto">
+                          {(analysis.texts as any[]).slice(0, 30).map((t: any, i: number) => (
+                            <p key={i} className="text-gray-700 text-xs">{t.content}</p>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {analysis.layers && Object.keys(analysis.layers).length > 0 && (
+                      <table className="w-full border">
+                        <thead><tr className="bg-purple-50"><th colSpan={4} className="p-1 text-left text-purple-800">图层（{Object.keys(analysis.layers).length} 个）</th></tr></thead>
+                        <thead><tr className="bg-gray-50 border"><th className="p-1 text-left">名称</th><th className="p-1 text-left">颜色</th><th className="p-1 text-left">线型</th><th className="p-1 text-left">线宽</th></tr></thead>
+                        <tbody>{Object.entries(analysis.layers as Record<string,any>).map(([name, info]: [string, any]) => (
+                          <tr key={name} className="border"><td className="p-1">{name}</td><td className="p-1 font-mono">{info.color}</td><td className="p-1">{info.linetype || "-"}</td><td className="p-1 font-mono">{info.lineweight > 0 ? info.lineweight + "mm" : "-"}</td></tr>
+                        ))}</tbody>
+                      </table>
+                    )}
+
+                    {analysis.bounds && (
+                      <p className="text-xs text-gray-400">范围: X[{analysis.bounds.min_x} ~ {analysis.bounds.max_x}] Y[{analysis.bounds.min_y} ~ {analysis.bounds.max_y}]</p>
+                    )}
+                  </div>
+                ) : (
+                  <>
 
                 {/* 工程图概述 */}
                 {analysis.工程图概述 && (
@@ -972,6 +1033,8 @@ export default function TeacherDashboard() {
                   <summary className="text-xs text-gray-400 cursor-pointer hover:underline">原始 JSON（调试用）</summary>
                   <pre className="text-xs bg-gray-100 p-2 rounded mt-1 overflow-auto max-h-48 whitespace-pre-wrap">{JSON.stringify(analysis, null, 2)}</pre>
                 </details>
+                </>
+              )}
               </div>
             </div>
           );
@@ -1128,6 +1191,11 @@ export default function TeacherDashboard() {
                         checked={submissionType === "image"} onChange={(e) => setSubmissionType(e.target.value)} />
                       <span className="text-sm">图片文件</span>
                     </label>
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input type="radio" name="submission_type" value="dxf"
+                        checked={submissionType === "dxf"} onChange={(e) => setSubmissionType(e.target.value)} />
+                      <span className="text-sm">DXF 文件</span>
+                    </label>
                   </div>
                 </div>
                 <div>
@@ -1149,11 +1217,13 @@ export default function TeacherDashboard() {
                   </div>
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">参考工程图 (PDF)</label>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    参考工程图 ({submissionType === "dxf" ? "DXF" : "PDF"})
+                  </label>
                   <FileButton
-                    accept=".pdf"
+                    accept={submissionType === "dxf" ? ".dxf" : ".pdf"}
                     onChange={(file) => setRefPdf(file)}
-                    label="选择PDF"
+                    label={submissionType === "dxf" ? "选择DXF" : "选择PDF"}
                     fileName={refPdf?.name}
                   />
                   <div className="mt-2">
@@ -1346,12 +1416,13 @@ export default function TeacherDashboard() {
                 <div>
                   <label className="block text-sm text-gray-600 mb-1">作业文件</label>
                   <FileButton
-                    accept=".pdf"
+                    accept={(questions.find(x => x.id === gradesView) as any)?.submission_type === "dxf" ? ".dxf" :
+                            (questions.find(x => x.id === gradesView) as any)?.submission_type === "image" ? "image/*" : ".pdf"}
                     onChange={(file) => handleSupplementFile(file)}
                     label="选择作业文件"
                     fileName={supplementFile?.name}
                   />
-                  <p className="text-xs text-gray-400 mt-1">文件名需包含学号和姓名，如 2024001_张三.pdf</p>
+                  <p className="text-xs text-gray-400 mt-1">文件名需包含学号和姓名，如 2024001_张三{(questions.find(x => x.id === gradesView) as any)?.submission_type === "dxf" ? ".dxf" : ".pdf"}</p>
                 </div>
 
                 {/* 解析结果确认面板 */}
@@ -1521,8 +1592,41 @@ export default function TeacherDashboard() {
                 {studentAnalysis && (
                   <div className="border-t pt-3 mb-4">
                     <details className="mb-2" open>
-                      <summary className="text-sm font-medium text-blue-700 cursor-pointer hover:underline mb-2">工程图识读结果</summary>
+                      <summary className="text-sm font-medium text-blue-700 cursor-pointer hover:underline mb-2">
+                        {studentAnalysis.entities ? "DXF 提取数据" : "工程图识读结果"}
+                      </summary>
                       <div className="text-xs space-y-1">
+
+                        {/* ── DXF 分析 ── */}
+                        {studentAnalysis.entities && studentAnalysis.entity_counts ? (
+                          <div className="space-y-1">
+                            <div className="p-2 bg-blue-50 rounded border border-blue-100">
+                              <p className="text-xs text-blue-500 mb-1 font-medium">实体统计</p>
+                              <div className="grid grid-cols-4 gap-1">
+                                {Object.entries(studentAnalysis.entity_counts as Record<string,number>).map(([k, v]) => (
+                                  <span key={k} className="text-gray-700"><span className="text-gray-400">{k}:</span> <strong>{v}</strong></span>
+                                ))}
+                              </div>
+                            </div>
+                            {studentAnalysis.dimensions && (studentAnalysis.dimensions as any[]).length > 0 && (
+                              <table className="w-full border"><thead><tr className="bg-green-50"><th colSpan={3} className="p-1 text-left text-green-800">尺寸标注（{(studentAnalysis.dimensions as any[]).length} 个）</th></tr></thead>
+                                <thead><tr className="bg-gray-50 border"><th className="p-1">类型</th><th className="p-1">文字</th><th className="p-1">测量值</th></tr></thead>
+                                <tbody>{(studentAnalysis.dimensions as any[]).map((d: any, i: number) => (<tr key={i} className="border"><td className="p-1">{d.type || "-"}</td><td className="p-1 font-mono">{d.text || "-"}</td><td className="p-1 font-mono">{d.measurement != null ? d.measurement : "-"}</td></tr>))}</tbody></table>
+                            )}
+                            {studentAnalysis.texts && (studentAnalysis.texts as any[]).length > 0 && (
+                              <div className="p-2 bg-yellow-50 rounded border border-yellow-100">
+                                <p className="text-xs text-yellow-600 mb-1 font-medium">文字（{(studentAnalysis.texts as any[]).length} 条）</p>
+                                <div className="space-y-0.5 max-h-24 overflow-auto">
+                                  {(studentAnalysis.texts as any[]).slice(0, 15).map((t: any, i: number) => (<p key={i} className="text-gray-700">{t.content}</p>))}
+                                </div>
+                              </div>
+                            )}
+                            {studentAnalysis.bounds && (
+                              <p className="text-gray-400">范围: X[{studentAnalysis.bounds.min_x}~{studentAnalysis.bounds.max_x}] Y[{studentAnalysis.bounds.min_y}~{studentAnalysis.bounds.max_y}]</p>
+                            )}
+                          </div>
+                        ) : (
+                          <>
                         {studentAnalysis.工程图概述 && (
                           <div className="p-2 bg-blue-50 rounded border border-blue-100 mb-2">
                             <p className="text-xs text-blue-500 mb-1 font-medium">工程图概述</p>
@@ -1556,6 +1660,8 @@ export default function TeacherDashboard() {
                         {studentAnalysis.技术要求 && (
                           <div className="p-2 bg-yellow-50 rounded border border-yellow-100"><p className="text-yellow-600 mb-1 font-medium">技术要求</p><p className="text-gray-700 whitespace-pre-wrap">{studentAnalysis.技术要求}</p></div>
                         )}
+                        </>
+                      )}
                       </div>
                     </details>
                   </div>

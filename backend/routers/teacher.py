@@ -26,6 +26,7 @@ from auth import verify_password, create_session, validate_session, destroy_sess
 from config import CONFIG_DIR, PDF_MAGIC, get_question_dir, read_settings, write_settings, read_questions_index
 from services.question_service import (
     list_questions,
+    get_question,
     create_question,
     update_question,
     delete_question,
@@ -85,10 +86,22 @@ def _check_question_ownership(request: Request, qid: str) -> None:
 def _run_reference_analysis(qid: str) -> None:
     """
     教师参考图分析，通过任务队列以最高优先级执行。
+    根据题目的 submission_type 选择处理方式：
+    - dxf: ezdxf 提取结构化数据 + 渲染预览图（无需 LLM）
+    - pdf/image: LLM 视觉识读
     """
+    from config import get_question_template
+
+    q = get_question(qid)
+    sub_type = q.get("submission_type", "pdf") if q else "pdf"
+
+    if sub_type == "dxf":
+        _run_reference_dxf_analysis(qid)
+        return
+
+    # PDF/图片流程：使用 LLM
     from services.llm_service import analyze_merged
     from services.task_queue import enqueue, PRIORITY_TEACHER
-    from config import get_question_template
 
     # 立即删除旧分析文件，防止查询接口返回旧数据（新分析完成前返回"未就绪"）
     qdir = get_question_dir(qid)
@@ -124,6 +137,39 @@ def _run_reference_analysis(qid: str) -> None:
     enqueue(PRIORITY_TEACHER, _task,
             task_key=f"ref_analyze:{qid}",
             task_info={"type": "ref_analyze", "qid": qid})
+
+
+def _run_reference_dxf_analysis(qid: str) -> None:
+    """DXF 参考图分析：ezdxf 提取 + 渲染预览（同步完成，无需 LLM）"""
+    from services.dxf_service import extract_dxf, render_dxf_preview
+
+    qdir = get_question_dir(qid)
+    ref_dxf = qdir / "参考工程图.dxf"
+    if not ref_dxf.exists():
+        logger.warning(f"[{qid}] 参考 DXF 不存在，跳过分析")
+        return
+
+    # 清理旧分析文件
+    for old_name in ("参考图_分析.json", "参考图_结构分析.json", "参考图_量化分析.json"):
+        old_path = qdir / old_name
+        try:
+            old_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    try:
+        # 提取 DXF 结构化数据
+        logger.info(f"[{qid}] 开始 DXF 数据提取…")
+        dxf_data = extract_dxf(ref_dxf)
+        save_reference_analysis(qid, dxf_data)
+        logger.info(f"[{qid}] DXF 参考图分析完成")
+
+        # 渲染预览图
+        preview_path = qdir / "参考工程图.png"
+        render_dxf_preview(ref_dxf, preview_path)
+        logger.info(f"[{qid}] DXF 预览图已生成")
+    except Exception as e:
+        logger.error(f"[{qid}] DXF 参考图分析失败: {e}")
 
 
 # ── 登录 / 登出 ──────────────────────────────────────────
@@ -216,8 +262,13 @@ async def create_question_handler(
         img_bytes = await image.read()
         save_question_image(qid, img_bytes, image.filename)
     if reference_pdf and reference_pdf.filename:
-        pdf_bytes = await reference_pdf.read()
-        save_reference_pdf(qid, pdf_bytes, reference_pdf.filename)
+        ref_bytes = await reference_pdf.read()
+        ref_ext = Path(reference_pdf.filename).suffix.lower()
+        if ref_ext == ".dxf":
+            from services.question_service import save_reference_dxf
+            save_reference_dxf(qid, ref_bytes, reference_pdf.filename)
+        else:
+            save_reference_pdf(qid, ref_bytes, reference_pdf.filename)
         _run_reference_analysis(qid)   # 后台异步分析参考图
     return entry
 
@@ -257,8 +308,13 @@ async def update_question_handler(
         img_bytes = await image.read()
         save_question_image(qid, img_bytes, image.filename)
     if reference_pdf and reference_pdf.filename:
-        pdf_bytes = await reference_pdf.read()
-        save_reference_pdf(qid, pdf_bytes, reference_pdf.filename)
+        ref_bytes = await reference_pdf.read()
+        ref_ext = Path(reference_pdf.filename).suffix.lower()
+        if ref_ext == ".dxf":
+            from services.question_service import save_reference_dxf
+            save_reference_dxf(qid, ref_bytes, reference_pdf.filename)
+        else:
+            save_reference_pdf(qid, ref_bytes, reference_pdf.filename)
         _run_reference_analysis(qid)   # 参考图更新后重新分析
     return entry
 
@@ -294,8 +350,9 @@ async def trigger_analysis(request: Request, qid: str):
     _require_auth(request)
     qdir = get_question_dir(qid)
     ref_pdf = qdir / "参考工程图.pdf"
-    if not ref_pdf.exists():
-        raise HTTPException(status_code=400, detail="请先上传参考工程图 PDF")
+    ref_dxf = qdir / "参考工程图.dxf"
+    if not ref_pdf.exists() and not ref_dxf.exists():
+        raise HTTPException(status_code=400, detail="请先上传参考工程图（PDF 或 DXF）")
     # 诊断日志：记录当前激活模型
     from services.llm_service import _get_active_config
     active = _get_active_config()
@@ -412,7 +469,7 @@ async def batch_grade(request: Request, qid: str):
     if not student_ids:
         raise HTTPException(status_code=400, detail="请选择至少一名学生")
 
-    from services.llm_service import analyze_and_grade, grade_combined
+    from services.llm_service import analyze_and_grade, grade_combined, grade_dxf
     from services.task_queue import enqueue, PRIORITY_BATCH
     from config import get_question_template
 
@@ -430,7 +487,13 @@ async def batch_grade(request: Request, qid: str):
     knowledge = files.get("knowledge", "")
     qdir = get_question_dir(qid)
     ref_pdf = qdir / "参考工程图.pdf"
+    ref_dxf = qdir / "参考工程图.dxf"
+    ref_png = qdir / "参考工程图.png"
     template_text = get_question_template(qid)
+
+    # 判断是否为 DXF 题目
+    q_info = get_question(qid)
+    is_dxf = q_info.get("submission_type") == "dxf" if q_info else False
 
     def _grade_one(sid: str):
         from services.question_service import find_student_class, update_submission_record, save_student_analysis, reject_if_fake
@@ -447,34 +510,60 @@ async def batch_grade(request: Request, qid: str):
         if reject_if_fake(qid, sid, name, student_path, student_path.stem):
             return
 
-        # 检查是否有已有分析
-        stu_analysis = get_student_analysis(qid, sid, name)
-
-        update_submission_record(qid, sid, name, student_path.stem, "analyzing")
+        update_submission_record(qid, sid, name, student_path.stem, "analyzing" if not is_dxf else "grading")
         try:
-            if stu_analysis is not None:
-                result = grade_combined(
-                    stu_analysis=stu_analysis,
-                    ref_analysis=ref_analysis,
+            if is_dxf:
+                # DXF 流程：先提取学生 DXF 数据，再评分
+                from services.dxf_service import extract_dxf
+                student_dir = get_student_dir(qid)
+                stu_dxf_data = extract_dxf(student_path)
+                # 保存学生 DXF 分析
+                save_student_analysis(qid, sid, name, stu_dxf_data)
+
+                # 确保学生预览图存在
+                stu_png = student_path.with_suffix(".png")
+                if not stu_png.exists():
+                    from services.dxf_service import render_dxf_preview
+                    render_dxf_preview(student_path, stu_png)
+
+                ref_preview = ref_png if ref_png.exists() else ref_dxf
+                result = grade_dxf(
+                    ref_data=ref_analysis,
+                    stu_data=stu_dxf_data,
+                    ref_preview_path=ref_preview,
+                    stu_preview_path=stu_png,
                     phase1_criteria=phase1_criteria,
                     phase2_criteria=phase2_criteria,
-                    ref_image_path=ref_pdf,
-                    stu_image_path=student_path,
                     knowledge=knowledge,
                 )
             else:
-                result = analyze_and_grade(
-                    image_path=student_path,
-                    template_text=template_text,
-                    ref_analysis=ref_analysis,
-                    phase1_criteria=phase1_criteria,
-                    phase2_criteria=phase2_criteria,
-                    ref_image_path=ref_pdf,
-                    knowledge=knowledge,
-                )
-            # 识读数据（analyze_and_grade 路径才有新分析）
-            if "工程图概述" in result and not stu_analysis:
-                save_student_analysis(qid, sid, name, result)
+                # PDF/图片流程（现有逻辑）
+                stu_analysis = get_student_analysis(qid, sid, name)
+
+                if stu_analysis is not None:
+                    result = grade_combined(
+                        stu_analysis=stu_analysis,
+                        ref_analysis=ref_analysis,
+                        phase1_criteria=phase1_criteria,
+                        phase2_criteria=phase2_criteria,
+                        ref_image_path=ref_pdf,
+                        stu_image_path=student_path,
+                        knowledge=knowledge,
+                    )
+                else:
+                    result = analyze_and_grade(
+                        image_path=student_path,
+                        template_text=template_text,
+                        ref_analysis=ref_analysis,
+                        phase1_criteria=phase1_criteria,
+                        phase2_criteria=phase2_criteria,
+                        ref_image_path=ref_pdf,
+                        knowledge=knowledge,
+                    )
+                # 识读数据（analyze_and_grade 路径才有新分析）
+                if "工程图概述" in result and not stu_analysis:
+                    save_student_analysis(qid, sid, name, result)
+
             # 评分数据
             from services.question_service import save_student_grade
             save_student_grade(qid, sid, name, result)
@@ -572,9 +661,17 @@ async def supplement_submission(
     file_bytes = await file.read()
     fname = file.filename or "submission.pdf"
 
-    # 校验是否为真实 PDF
-    if not file_bytes.startswith(PDF_MAGIC):
-        raise HTTPException(status_code=400, detail="仅支持 PDF 格式文件，请上传真实的 PDF 文件")
+    # 校验文件类型（根据题目 submission_type）
+    ext = Path(fname).suffix.lower()
+    q_info = get_question(qid)
+    sub_type = q_info.get("submission_type", "pdf") if q_info else "pdf"
+
+    if sub_type == "dxf":
+        if ext != ".dxf":
+            raise HTTPException(status_code=400, detail="本题要求提交 DXF 文件")
+    else:
+        if not file_bytes.startswith(PDF_MAGIC) and ext not in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"):
+            raise HTTPException(status_code=400, detail="仅支持 PDF 或图片格式文件")
 
     from services.question_service import submit_student_work
     saved_name = submit_student_work(qid, student_id, name, file_bytes, fname)
@@ -759,7 +856,7 @@ async def teacher_student_analysis(request: Request, qid: str, student_id: str, 
 
 @router.get("/student-preview/{qid}/{student_id}")
 async def teacher_student_preview(request: Request, qid: str, student_id: str):
-    """教师查看学生提交的工程图预览（优先 PNG，回退实时转换）"""
+    """教师查看学生提交的工程图预览（优先 PNG，DXF 渲染，回退实时转换）"""
     _require_auth(request)
     from fastapi.responses import FileResponse, Response
     from services.question_service import get_student_dir, _sanitize_filename_part
@@ -778,6 +875,13 @@ async def teacher_student_preview(request: Request, qid: str, student_id: str):
             return FileResponse(str(png_path), media_type="image/png")
         student_path = get_student_submission_path(qid, student_id, name)
         if student_path is not None:
+            if student_path.suffix.lower() == ".dxf":
+                # DXF 实时渲染 PNG
+                from services.dxf_service import render_dxf_preview
+                png_path = student_path.with_suffix(".png")
+                if not png_path.exists():
+                    render_dxf_preview(student_path, png_path)
+                return FileResponse(str(png_path), media_type="image/png")
             from services.llm_service import image_to_base64
             b64 = image_to_base64(student_path)
             img_bytes = base64.b64decode(b64)
@@ -789,6 +893,14 @@ async def teacher_student_preview(request: Request, qid: str, student_id: str):
         for f in sorted(sdir.iterdir()):
             if f.suffix.lower() == ".png" and f.stem.endswith(f"_{safe_id}"):
                 return FileResponse(str(f), media_type="image/png")
+        # 再试 DXF
+        for f in sorted(sdir.iterdir()):
+            if f.suffix.lower() == ".dxf" and f.stem.endswith(f"_{safe_id}"):
+                from services.dxf_service import render_dxf_preview
+                png_path = f.with_suffix(".png")
+                if not png_path.exists():
+                    render_dxf_preview(f, png_path)
+                return FileResponse(str(png_path), media_type="image/png")
         # 再试 PDF
         for f in sorted(sdir.iterdir()):
             if f.suffix.lower() == ".pdf" and f.stem.endswith(f"_{safe_id}"):
@@ -1227,19 +1339,28 @@ async def serve_question_file(qid: str, filename: str, request: Request):
 
 @router.get("/preview/{qid}/{filename}")
 async def serve_question_preview(qid: str, filename: str, request: Request):
-    """将题目 PDF/图片转为 JPEG 预览图（用于前端缩略展示，参考工程图需登录）"""
+    """将题目 PDF/图片/DXF 转为 JPEG/PNG 预览图（用于前端缩略展示，参考工程图需登录）"""
     # 参考工程图不允许未登录访问（防止学生复制答案）
     if "参考" in filename or "reference" in filename.lower():
         _require_auth(request)
     from services.llm_service import image_to_base64
     import base64
-    from io import BytesIO
-    from fastapi.responses import Response
+    from fastapi.responses import Response, FileResponse
 
     qdir = get_question_dir(qid).resolve()
     filepath = _check_path_safe(qdir, Path(qdir / filename))
     if not filepath.is_file():
         raise HTTPException(status_code=404)
+
+    # DXF 优先返回预渲染的 PNG
+    if filepath.suffix.lower() == ".dxf":
+        png_path = filepath.with_suffix(".png")
+        if png_path.exists():
+            return FileResponse(str(png_path), media_type="image/png")
+        # 实时渲染
+        from services.dxf_service import render_dxf_preview
+        render_dxf_preview(filepath, png_path)
+        return FileResponse(str(png_path), media_type="image/png")
 
     b64 = image_to_base64(filepath)
     img_bytes = base64.b64decode(b64)

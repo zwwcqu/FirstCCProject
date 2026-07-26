@@ -304,13 +304,18 @@ export default function StudentPage() {
 
     // 根据题目设置校验文件格式
     const subType = question?.submission_type || "pdf";
+    const ext = selectedFile.name.split(".").pop()?.toLowerCase();
     const header = await selectedFile.slice(0, 4).text();
     const isPdfHeader = header === "%PDF";
-    if (subType === "pdf" && !isPdfHeader) {
+    if (subType === "dxf") {
+      if (ext !== "dxf") {
+        setError("本题要求提交 DXF 文件，请上传 .dxf 格式文件");
+        return;
+      }
+    } else if (subType === "pdf" && !isPdfHeader) {
       setError("本题要求提交 PDF 文件，请上传真实的 PDF 文件");
       return;
-    }
-    if (subType === "image" && isPdfHeader) {
+    } else if (subType === "image" && isPdfHeader) {
       setError("本题要求提交图片文件，不支持 PDF 格式");
       return;
     }
@@ -742,10 +747,10 @@ export default function StudentPage() {
               return (
             <div className="mb-4">
               <label className="block text-sm font-medium text-gray-700 mb-1">
-                上传工程图 ({question?.submission_type === "image" ? "图片" : "PDF"})
+                上传工程图 ({question?.submission_type === "dxf" ? "DXF" : question?.submission_type === "image" ? "图片" : "PDF"})
               </label>
               <FileButton
-                accept={question?.submission_type === "image" ? "image/*" : ".pdf"}
+                accept={question?.submission_type === "dxf" ? ".dxf" : question?.submission_type === "image" ? "image/*" : ".pdf"}
                 onChange={(file) => handleUpload(file)}
                 label="选择文件"
                 fileName={studentFilename || undefined}
@@ -822,6 +827,65 @@ export default function StudentPage() {
 {analysisData && (
               <div className="mt-4 border rounded p-3 bg-gray-50 text-xs">
                 <h3 className="text-sm font-semibold mb-3 text-green-700">图面分析完成</h3>
+
+                {/* ── DXF 分析数据展示 ── */}
+                {analysisData.entities && analysisData.entity_counts ? (
+                  <div className="space-y-2">
+                    {/* 实体统计 */}
+                    <div className="p-2 bg-blue-50 rounded border border-blue-100">
+                      <p className="text-xs text-blue-500 mb-1 font-medium">DXF 实体统计</p>
+                      <div className="grid grid-cols-4 gap-1">
+                        {Object.entries(analysisData.entity_counts as Record<string,number>).map(([k, v]) => (
+                          <span key={k} className="text-gray-700">
+                            <span className="text-gray-400">{k}:</span> <strong>{v}</strong>
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* 尺寸标注 */}
+                    {analysisData.dimensions && (analysisData.dimensions as any[]).length > 0 && (
+                      <table className="w-full border">
+                        <thead><tr className="bg-green-50"><th colSpan={3} className="p-1 text-left text-green-800">尺寸标注（{(analysisData.dimensions as any[]).length} 个）</th></tr></thead>
+                        <thead><tr className="bg-gray-50 border"><th className="p-1 text-left">类型</th><th className="p-1 text-left">文字</th><th className="p-1 text-left">测量值</th></tr></thead>
+                        <tbody>{(analysisData.dimensions as any[]).map((d: any, i: number) => (
+                          <tr key={i} className="border"><td className="p-1">{d.type || "-"}</td><td className="p-1 font-mono">{d.text || "-"}</td><td className="p-1 font-mono">{d.measurement != null ? d.measurement : "-"}</td></tr>
+                        ))}</tbody>
+                      </table>
+                    )}
+
+                    {/* 文本内容 */}
+                    {analysisData.texts && (analysisData.texts as any[]).length > 0 && (
+                      <div className="p-2 bg-yellow-50 rounded border border-yellow-100">
+                        <p className="text-xs text-yellow-600 mb-1 font-medium">文字内容（{(analysisData.texts as any[]).length} 条）</p>
+                        <div className="space-y-1 max-h-32 overflow-auto">
+                          {(analysisData.texts as any[]).slice(0, 20).map((t: any, i: number) => (
+                            <p key={i} className="text-gray-700 text-xs">{t.content}</p>
+                          ))}
+                          {(analysisData.texts as any[]).length > 20 && <p className="text-gray-400">… 还有 {(analysisData.texts as any[]).length - 20} 条</p>}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* 图层信息 */}
+                    {analysisData.layers && Object.keys(analysisData.layers).length > 0 && (
+                      <table className="w-full border">
+                        <thead><tr className="bg-purple-50"><th colSpan={4} className="p-1 text-left text-purple-800">图层（{Object.keys(analysisData.layers).length} 个）</th></tr></thead>
+                        <thead><tr className="bg-gray-50 border"><th className="p-1 text-left">名称</th><th className="p-1 text-left">颜色</th><th className="p-1 text-left">线型</th><th className="p-1 text-left">线宽</th></tr></thead>
+                        <tbody>{Object.entries(analysisData.layers as Record<string,any>).map(([name, info]: [string, any]) => (
+                          <tr key={name} className="border"><td className="p-1">{name}</td><td className="p-1 font-mono">{info.color}</td><td className="p-1">{info.linetype || "-"}</td><td className="p-1 font-mono">{info.lineweight > 0 ? info.lineweight + "mm" : "-"}</td></tr>
+                        ))}</tbody>
+                      </table>
+                    )}
+
+                    {/* 包围盒 */}
+                    {analysisData.bounds && (
+                      <p className="text-xs text-gray-400">范围: X[{analysisData.bounds.min_x} ~ {analysisData.bounds.max_x}] Y[{analysisData.bounds.min_y} ~ {analysisData.bounds.max_y}]</p>
+                    )}
+                  </div>
+                ) : (
+                  /* ── 原有 LLM 分析数据展示（PDF/图片）──── */
+                  <>
                 {studentFilename && (
                   <div className="mb-3">
                     <p className="text-xs text-gray-500 mb-1">你的作业</p>
@@ -915,6 +979,8 @@ export default function StudentPage() {
                   <summary className="text-xs text-gray-400 cursor-pointer hover:underline">原始 JSON（调试用）</summary>
                   <pre className="text-xs bg-gray-100 p-2 rounded mt-1 overflow-auto max-h-48 whitespace-pre-wrap">{JSON.stringify(analysisData, null, 2)}</pre>
                 </details>
+                  </>
+                )}
               </div>
             )}
           </div>

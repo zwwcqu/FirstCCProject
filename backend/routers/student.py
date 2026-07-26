@@ -38,6 +38,8 @@ from services.question_service import (
     save_student_analysis,
     get_student_analysis,
     reject_if_fake,
+    get_student_dir,
+    _sanitize_filename_part,
 )
 from services.llm_service import (
     analyze_merged,
@@ -295,7 +297,11 @@ async def upload_submission(
 
     # 根据题目设置的提交类型校验文件格式
     sub_type = q.get("submission_type", "pdf")  # 缺省 pdf
-    if sub_type == "pdf":
+    ext = Path(fname).suffix.lower()
+    if sub_type == "dxf":
+        if ext != ".dxf":
+            raise HTTPException(status_code=400, detail="本题要求提交 DXF 文件，请上传 .dxf 格式文件")
+    elif sub_type == "pdf":
         if not file_bytes.startswith(PDF_MAGIC):
             raise HTTPException(status_code=400, detail="本题要求提交 PDF 文件，请上传真实的 PDF 文件")
     elif sub_type == "image":
@@ -345,30 +351,50 @@ def _run_analyze(
     template_text: str,
     knowledge: str = "",
 ):
-    """后台线程：工程图识读 → 保存"""
+    """后台线程：工程图识读 → 保存（PDF/图片用 LLM，DXF 用 ezdxf 提取）"""
     try:
         set_status(qid, name, student_id, "analyze", "analyzing")
-        if is_test:
-            if not file_bytes:
-                raise RuntimeError("测试模式文件数据丢失，请重新上传")
-            analysis = analyze_merged_bytes(file_bytes, filename, template_text, knowledge=knowledge)
-        else:
+
+        # 判断是否为 DXF 题目
+        q = get_question(qid)
+        is_dxf = q.get("submission_type") == "dxf" if q else False
+
+        if is_dxf:
+            # DXF 流程：ezdxf 提取数据（无需 LLM）
+            if is_test:
+                raise RuntimeError("DXF 文件暂不支持测试模式，请使用正式提交")
             student_path = get_student_submission_path(qid, student_id, name)
             if student_path is None:
                 raise RuntimeError("学生提交文件不存在，请重新上传")
+            from services.dxf_service import extract_dxf
+            analysis = extract_dxf(student_path)
+            # DXF 分析无需校验概述字段（数据格式不同）
+            if not analysis.get("entity_counts"):
+                raise RuntimeError("DXF 数据提取结果为空，文件可能不包含有效实体")
+        else:
+            # PDF/图片流程：LLM 视觉识读
+            if is_test:
+                if not file_bytes:
+                    raise RuntimeError("测试模式文件数据丢失，请重新上传")
+                analysis = analyze_merged_bytes(file_bytes, filename, template_text, knowledge=knowledge)
+            else:
+                student_path = get_student_submission_path(qid, student_id, name)
+                if student_path is None:
+                    raise RuntimeError("学生提交文件不存在，请重新上传")
 
-            # 虚假作业判别
-            if reject_if_fake(qid, student_id, name, student_path,
-                              Path(filename).stem if not is_test else ""):
-                set_status(qid, name, student_id, "analyze", "done")
-                return
+                # 虚假作业判别
+                if reject_if_fake(qid, student_id, name, student_path,
+                                  Path(filename).stem if not is_test else ""):
+                    set_status(qid, name, student_id, "analyze", "done")
+                    return
 
-            analysis = analyze_merged(student_path, template_text, knowledge=knowledge)
+                analysis = analyze_merged(student_path, template_text, knowledge=knowledge)
 
-        # 校验：工程图概述为空或过短表示 LLM 未真正读图
-        overview = analysis.get("工程图概述", "")
-        if not overview or len(str(overview)) < 10:
-            raise RuntimeError("工程图识读结果为空（概述过短），模型可能未能正确识读图片，请稍后重试")
+            # 校验：工程图概述为空或过短表示 LLM 未真正读图
+            overview = analysis.get("工程图概述", "")
+            if not overview or len(str(overview)) < 10:
+                raise RuntimeError("工程图识读结果为空（概述过短），模型可能未能正确识读图片，请稍后重试")
+
         if not is_test:
             save_student_analysis(qid, student_id, name, analysis)
             from services.question_service import update_submission_record
@@ -445,7 +471,7 @@ def _run_grade(
     is_test: bool,
     stu_data: bytes | None, stu_filename: str,
 ):
-    """后台线程：评分。已有分析则直接用，否则先做识读。"""
+    """后台线程：评分。DXF 用 grade_dxf，PDF/图片用现有流程。"""
     set_status(qid, name, student_id, "grade", "processing")
     from services.question_service import update_submission_record
 
@@ -464,70 +490,117 @@ def _run_grade(
         knowledge = files.get("knowledge", "")
 
         qdir = _get_question_dir(qid)
-        ref_pdf = qdir / "参考工程图.pdf"
-        if not ref_pdf.exists():
-            raise RuntimeError("参考工程图不存在，请联系老师")
 
-        from config import get_question_template
-        template_text = get_question_template(qid)
+        # 判断是否为 DXF 题目
+        q = get_question(qid)
+        is_dxf = q.get("submission_type") == "dxf" if q else False
 
-        # 检查是否已有分析结果（预览分析已做过）
-        stu_analysis = get_student_analysis(qid, student_id, name)
-
-        if is_test:
-            if not stu_data:
-                raise RuntimeError("测试模式文件数据丢失，请重新上传")
-            import tempfile
-            ext = Path(stu_filename).suffix or ".png"
-            with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
-                tmp.write(stu_data)
-                tmp_path = Path(tmp.name)
-            stu_path = tmp_path
-        else:
+        if is_dxf:
+            # DXF 流程：ezdxf 数据已提取，直接用 grade_dxf
+            if is_test:
+                raise RuntimeError("DXF 文件暂不支持测试模式")
             stu_path = get_student_submission_path(qid, student_id, name)
             if stu_path is None:
                 raise RuntimeError("学生提交文件不存在，请重新上传")
-            # 虚假作业判别
-            if reject_if_fake(qid, student_id, name, stu_path,
-                              Path(stu_filename).stem if stu_filename else ""):
-                set_status(qid, name, student_id, "grade", "done")
-                return
 
-        try:
-            if stu_analysis is not None:
-                # 已有分析 → 只做评分
-                logger.info(f"[{qid}] 已有分析结果，直接评分")
-                result = grade_combined(
-                    stu_analysis=stu_analysis,
-                    ref_analysis=ref_analysis,
-                    phase1_criteria=phase1_criteria,
-                    phase2_criteria=phase2_criteria,
-                    ref_image_path=ref_pdf,
-                    stu_image_path=stu_path,
-                    knowledge=knowledge,
-                )
-            else:
-                # 无分析 → 识读+评分一起做
-                result = analyze_and_grade(
-                    image_path=stu_path,
-                    template_text=template_text,
-                    ref_analysis=ref_analysis,
-                    phase1_criteria=phase1_criteria,
-                    phase2_criteria=phase2_criteria,
-                    ref_image_path=ref_pdf,
-                    knowledge=knowledge,
-                )
-        finally:
+            stu_analysis = get_student_analysis(qid, student_id, name)
+            if stu_analysis is None:
+                raise RuntimeError("DXF 数据尚未提取，请先完成分析步骤")
+
+            # 参考预览图
+            ref_png = qdir / "参考工程图.png"
+            ref_dxf = qdir / "参考工程图.dxf"
+            ref_preview = ref_png if ref_png.exists() else ref_dxf
+            if not ref_preview.exists():
+                raise RuntimeError("参考 DXF 预览图不存在，请联系老师")
+
+            # 学生预览图
+            from services.question_service import get_student_dir
+            sdir = get_student_dir(qid)
+            safe_name = _sanitize_filename_part(name)
+            safe_id = _sanitize_filename_part(student_id)
+            stu_png = sdir / f"{safe_name}_{safe_id}.png"
+
+            from services.dxf_service import render_dxf_preview
+            if not stu_png.exists():
+                render_dxf_preview(stu_path, stu_png)
+
+            from services.llm_service import grade_dxf
+            result = grade_dxf(
+                ref_data=ref_analysis,
+                stu_data=stu_analysis,
+                ref_preview_path=ref_preview,
+                stu_preview_path=stu_png,
+                phase1_criteria=phase1_criteria,
+                phase2_criteria=phase2_criteria,
+                knowledge=knowledge,
+            )
+
+        else:
+            # PDF/图片流程（现有逻辑）
+            ref_pdf = qdir / "参考工程图.pdf"
+            if not ref_pdf.exists():
+                raise RuntimeError("参考工程图不存在，请联系老师")
+
+            from config import get_question_template
+            template_text = get_question_template(qid)
+
+            stu_analysis = get_student_analysis(qid, student_id, name)
+
             if is_test:
-                try:
-                    stu_path.unlink(missing_ok=True)
-                except Exception:
-                    pass
+                if not stu_data:
+                    raise RuntimeError("测试模式文件数据丢失，请重新上传")
+                import tempfile
+                ext = Path(stu_filename).suffix or ".png"
+                with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+                    tmp.write(stu_data)
+                    tmp_path = Path(tmp.name)
+                stu_path = tmp_path
+            else:
+                stu_path = get_student_submission_path(qid, student_id, name)
+                if stu_path is None:
+                    raise RuntimeError("学生提交文件不存在，请重新上传")
+                # 虚假作业判别
+                if reject_if_fake(qid, student_id, name, stu_path,
+                                  Path(stu_filename).stem if stu_filename else ""):
+                    set_status(qid, name, student_id, "grade", "done")
+                    return
 
-        # 校验
-        overview = result.get("工程图概述", "")
-        if not overview or len(str(overview)) < 10:
-            raise RuntimeError("工程图识读结果为空，模型可能未能正确识读图片")
+            try:
+                if stu_analysis is not None:
+                    # 已有分析 → 只做评分
+                    logger.info(f"[{qid}] 已有分析结果，直接评分")
+                    result = grade_combined(
+                        stu_analysis=stu_analysis,
+                        ref_analysis=ref_analysis,
+                        phase1_criteria=phase1_criteria,
+                        phase2_criteria=phase2_criteria,
+                        ref_image_path=ref_pdf,
+                        stu_image_path=stu_path,
+                        knowledge=knowledge,
+                    )
+                else:
+                    # 无分析 → 识读+评分一起做
+                    result = analyze_and_grade(
+                        image_path=stu_path,
+                        template_text=template_text,
+                        ref_analysis=ref_analysis,
+                        phase1_criteria=phase1_criteria,
+                        phase2_criteria=phase2_criteria,
+                        ref_image_path=ref_pdf,
+                        knowledge=knowledge,
+                    )
+            finally:
+                if is_test:
+                    try:
+                        stu_path.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+
+            # 校验（仅 PDF/图片流程）
+            overview = result.get("工程图概述", "")
+            if not overview or len(str(overview)) < 10:
+                raise RuntimeError("工程图识读结果为空，模型可能未能正确识读图片")
 
         grade = result.get("grade", "N/A")
         if not is_test:
@@ -535,8 +608,8 @@ def _run_grade(
             # 计算提交文件的 SHA-256
             import hashlib
             file_sha256 = hashlib.sha256(stu_path.read_bytes()).hexdigest() if not is_test else ""
-            # 识读数据存 _分析.json（新分析才有，grade_combined 路径无）
-            if "工程图概述" in result and not stu_analysis:
+            # 识读数据存 _分析.json（非 DXF 新分析才有，grade_combined 路径无；DXF 已在 analyze 阶段保存）
+            if not is_dxf and "工程图概述" in result and not stu_analysis:
                 save_student_analysis(qid, student_id, name, result)
             # 评分数据存 _评分.json
             save_student_grade(qid, student_id, name, result)
@@ -550,10 +623,10 @@ def _run_grade(
                                      total_score=str(result.get("total_score", "")))
 
         set_status(qid, name, student_id, "grade", "done")
-        logger.info(f"[{qid}] 合并分析+评分完成: {name}({student_id}) → {grade}")
+        logger.info(f"[{qid}] 评分完成: {name}({student_id}) → {grade}")
     except Exception as e:
         import traceback
-        logger.error(f"[{qid}] 合并分析+评分失败: {e}\n{traceback.format_exc()}")
+        logger.error(f"[{qid}] 评分失败: {e}\n{traceback.format_exc()}")
         set_status(qid, name, student_id, "grade", "error", str(e))
         if not is_test:
             from services.question_service import update_submission_record
