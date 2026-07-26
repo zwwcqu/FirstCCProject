@@ -461,8 +461,7 @@ export default function StudentPage() {
   // ── 步骤2：评分 ──────────────────────────────────────
 
   const handleGrade = async () => {
-    if (!analysisData) { setError("请先完成图面分析"); return; }
-    if (!submitKey) { setError("分析数据异常，请重新上传分析"); return; }
+    if (!submitKey) { setError("请先上传作业"); return; }
     if (!selectedQid) return;
 
     setGrading(true);
@@ -499,6 +498,12 @@ export default function StudentPage() {
           }
           if (s.step === "grade" && s.status === "done") {
             clearPolling();
+            // 加载分析结果（analyze_and_grade 同时保存了分析）
+            try {
+              const ar = await getStudentAnalysisResult(capturedQid, capturedKey.name, capturedKey.id);
+              if (ar.analysis) setAnalysisData(ar.analysis);
+            } catch {}
+            // 加载评分结果
             const r = await getStudentResult(capturedQid, capturedKey.id);
             if (r) {
               setResult({
@@ -810,19 +815,20 @@ export default function StudentPage() {
               </div>
             )}
 
-            {!analysisData ? (
+            <div className="flex gap-2 flex-wrap">
               <button onClick={handleStartAnalysis} disabled={!uploaded || !!submitStatus}
-                className="bg-blue-600 text-white px-6 py-2 rounded hover:bg-blue-700 disabled:opacity-50">
-                {!uploaded ? "请先上传作业" : submitStatus ? "处理中…" : "开始分析"}
+                className="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700 disabled:opacity-50 text-sm">
+                {!uploaded ? "请先上传作业" : submitStatus ? "处理中…" : "预览分析"}
               </button>
-            ) : result ? (
-              <p className="text-green-600 font-medium text-sm">评分已完成</p>
-            ) : (
-              <button onClick={handleGrade} disabled={grading || !!submitStatus}
-                className="bg-green-600 text-white px-6 py-2 rounded hover:bg-green-700 disabled:opacity-50">
-                {grading || submitStatus ? "处理中…" : "提交评分"}
-              </button>
-            )}
+              {result ? (
+                <p className="text-green-600 font-medium text-sm self-center">评分已完成</p>
+              ) : (
+                <button onClick={handleGrade} disabled={!uploaded || grading || !!submitStatus}
+                  className="bg-green-600 text-white px-6 py-2 rounded hover:bg-green-700 disabled:opacity-50">
+                  {!uploaded ? "请先上传作业" : grading || submitStatus ? "处理中…" : "提交评分"}
+                </button>
+              )}
+            </div>
             {/* 图面分析结果 */}
 
 {analysisData && (

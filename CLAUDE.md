@@ -4,12 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project overview
 
-工程图批阅系统 (Engineering Drawing Grading System) — a web app where teachers create drawing assignments, students submit PDF/image drawings, and an LLM vision model grades them via a three-stage pipeline:
+工程图批阅系统 (Engineering Drawing Grading System) — a web app where teachers create drawing assignments, students submit PDF/image drawings, and an LLM vision model grades them via a combined pipeline:
 
-1. **结构分析** (merged analysis) — single LLM call extracts geometric structure + quantitative data from the drawing image
-2. **阶段一** (Phase 1) — visual comparison of student vs reference drawing structure using thumbnails (768px)
-3. **阶段二** (Phase 2) — text-only comparison of quantitative JSON data (dimensions, tolerances, roughness)
-4. **评分** — Total = √(Phase1 × Phase2), mapped to 9-level grades (A+≥90 → F<50)
+1. **参考图分析** (teacher, once per question) — single LLM call extracts all drawing info from the reference
+2. **合并评分** (per student) — single LLM call does: drawing analysis + phase 1 (visual comparison) + phase 2 (quantitative comparison)
+3. **评分** — Total = √(Phase1 × Phase2), mapped to 9-level grades (A+≥90 → F<50)
 
 ## Commands
 
@@ -41,7 +40,7 @@ Browser (React SPA)
 - **`auth.py`** — Multi-teacher PBKDF2-SHA256 login (username+password from TeacherInfo CSV), student password system (default `cad123`, force change on first login), session management (in-memory + file). Student passwords stored per-class in `StudentAuth/{class}.json`.
 - **`routers/teacher.py`** — All under `/api/teacher`, requires `_require_auth` (session cookie). Question CRUD with ownership enforcement (only creator can edit/delete), grades CSV viewer/editor, batch grading, roster class management, reference analysis, file/preview serving, supplement submission, **student password reset**, **teacher profile editing**.
 - **`routers/student.py`** — Public `/api/student` endpoints. List questions (filtered by class), get detail, student login (name+ID+password), submit homework (`mode=test|submit`), three-step non-blocking flow (upload → analyze → grade) with status polling, result/analysis queries, file/preview serving. Rate limiting (50 req/min per IP). **Deadline enforcement on upload.**
-- **`services/llm_service.py`** — OpenAI-compatible client with dual-model support (local LM Studio + cloud). All parameters from settings. Key functions: `analyze_merged()` (single-call structure+quantitative), `grade_phase1()` (thumbnails at 768px), `grade_phase2()` (simplified JSON comparison), `run_two_phase_grading()`. PDF→PNG conversion (pdf2image + poppler), image resize.
+- **`services/llm_service.py`** — OpenAI-compatible client with dual-model support (local LM Studio + cloud). Key functions: `analyze_merged()` (reference analysis, 1 call), `analyze_and_grade()` (student analysis + grading, 1 combined call), `analyze_merged_bytes()` (test mode). PDF→PNG conversion, image resize.
 - **`services/question_service.py`** — Question CRUD with deadline, knowledge, teacher ownership, and class filtering.
 - **`services/grade_service.py`** — CSV grade persistence with fcntl file locking. 18-column format.
 - **`services/task_queue.py`** — Priority-based task queue with configurable concurrency.
@@ -64,7 +63,7 @@ Browser (React SPA)
 - `llm_params` — temperature, max_tokens, enable_thinking, client_timeout
 - `image_params` — analysis_max_size, analysis_dpi, phase1_max_size, phase1_jpeg_quality, analysis_jpeg_quality
 - `grade_thresholds` — A+/A/B+/B/C+/C/D+/D score boundaries
-- `prompt_templates` — 7 templates (structure analysis ×2, quantitative ×2, phase1/2 guides, phase2 correction hint)
+- `prompt_templates` — `grading_guide` (scoring guidance for LLM)
 - `scoring_templates` — Default scoring criteria for new questions
 
 ### `settings_debug.json` (server-side only)
@@ -101,6 +100,11 @@ data/
   settings.json               — System settings (teacher-configurable)
   settings_debug.json          — Debug/ops parameters
   questions.json               — [{id, title, submission_type, teacher, classes, deadline}, ...]
+  templates/                   — Global template work copies (copied from config/ on init)
+    零件图识读模板.txt
+    装配图识读模板.txt
+    平面图识读模板.txt
+    组合体三视图识读模板.txt
   StudentInfo/
     _模版.csv                  — Template (header: 姓名,学号)
     {班级名}.csv               — Per-class roster
@@ -116,10 +120,10 @@ data/
     阶段1评分标准.md            — Phase 1 grading criteria
     阶段2评分标准.md            — Phase 2 grading criteria
     补充知识.md                 — Supplementary knowledge for LLM (optional)
+    识读模板.txt                — Per-question analysis template (copied from global)
     题目图片.png                — Question illustration (optional)
     参考工程图.pdf              — Reference drawing (optional)
-    参考图_结构分析.json         — Cached structure analysis
-    参考图_量化分析.json         — Cached quantitative analysis
+    参考图_分析.json             — Cached reference analysis
     成绩+{qid}.csv              — Grades CSV (18 columns)
     submissions.json            — Per-student submission records
     student/                    — Student submissions + analysis JSONs
@@ -129,15 +133,14 @@ config/                        — Config templates (checked into repo)
   app.dirconfig.json            — Points to data/ directory
   settings.example.json         — Full settings template
   settings_debug.example.json   — Debug settings template
-  结构分析模版.txt              — Reference structure analysis prompt
-  结构分析_学生.txt             — Student structure analysis prompt
-  量化分析模版.txt              — Reference quantitative analysis prompt
-  量化分析_学生.txt             — Student quantitative analysis prompt
+  零件图识读模板.txt            — Part drawing analysis template (8 data categories)
+  装配图识读模板.txt            — Assembly drawing analysis template
+  平面图识读模板.txt            — 2D flat/beginner drawing template
+  组合体三视图识读模板.txt       — Combined 3-view drawing template
   评分模版1.md / 评分模版2.md   — Scoring template defaults
-  二阶段修正提示词.txt           — Phase 2 correction hints
+  DrawingForCheck.png          — Test reference drawing
   学生名单模版.csv              — Student roster CSV template
   教师名单模版.csv              — Teacher roster CSV template
-  DrawingForCheck.png          — Test reference drawing
 ```
 
 ## Key constraints
@@ -147,7 +150,8 @@ config/                        — Config templates (checked into repo)
 - PDF handling requires `pdf2image` + poppler installed on the host
 - No database — all storage is file-system based (JSON, CSV, Markdown, images/PDFs)
 - fcntl file locking for concurrent grade CSV writes
-- Student submissions auto-convert non-PNG images to PNG; PDFs get PNG preview
+- Student grading: single `analyze_and_grade()` call combines analysis + phase1 + phase2
+- Student image sent twice: large (3508px) for analysis, thumbnail (768px) for comparison
+- Reference image cached as `参考图_分析.json`, reused across all students
 - Task queue: teacher priority (0) > batch (5) > student (10)
 - Rate limiting on student submit endpoints: 50 req/min per IP
-- All numeric parameters are configurable — no hardcoded magic numbers

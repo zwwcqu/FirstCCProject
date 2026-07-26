@@ -81,8 +81,11 @@ def get_question(qid: str) -> dict | None:
 def create_question(qid: str, title: str, description: str,
                     phase1_criteria: str, phase2_criteria: str,
                     knowledge: str = "", submission_type: str = "pdf",
-                    teacher: str = "", classes: str = "", deadline: str = "") -> dict:
-    """创建题目：写索引 + 创建目录 + 写内容文件。deadline=提交截止时间 ISO 格式"""
+                    teacher: str = "", classes: str = "", deadline: str = "",
+                    template_type: str = "零件图识读模板.txt",
+                    template_content: str = "") -> dict:
+    """创建题目：写索引 + 创建目录 + 写内容文件 + 复制模板。deadline=提交截止时间 ISO 格式
+    template_content 非空时使用自定义内容，否则从全局模板复制。"""
     if not qid.isdigit():
         raise ValueError("题号必须为非负整数")
     questions = read_questions_index()
@@ -98,6 +101,13 @@ def create_question(qid: str, title: str, description: str,
     (qdir / "阶段1评分标准.md").write_text(phase1_criteria, encoding="utf-8")
     (qdir / "阶段2评分标准.md").write_text(phase2_criteria, encoding="utf-8")
     (qdir / "补充知识.md").write_text(knowledge, encoding="utf-8")
+
+    # 复制识读模板到题目目录
+    from config import get_template, save_question_template
+    tpl_content = template_content.strip() if template_content else get_template(template_type)
+    save_question_template(qid, tpl_content)
+    logger.info(f"题目 [{qid}] 已复制模板类型: {template_type}" +
+                ("（自定义内容）" if template_content.strip() else ""))
 
     entry = {"id": qid, "title": title, "submission_type": submission_type,
              "teacher": teacher, "classes": classes, "deadline": deadline}
@@ -423,44 +433,43 @@ def find_student_class(name: str, student_id: str) -> str:
 
 def save_reference_analysis(qid: str, analysis: dict) -> None:
     """
-    保存参考图的分析结果。
-    analysis 应包含 structure 和 quantitative 两个 key，以及可选的 _model、_usage 元数据。
-    写入 data/{qid}/参考图_结构分析.json 和 参考图_量化分析.json。
-    元数据（_model, _usage）会嵌入 structure 和 quantitative 内部，供前端展示。
+    保存参考图的完整分析结果到 data/{qid}/参考图_分析.json。
+    analysis 为 analyze_merged() 的完整返回（包含 工程图概述、基本信息、
+    几何特征、尺寸、几何公差、表面粗糙度、尺寸公差、技术要求 等）。
     """
     qdir = get_question_dir(qid)
     qdir.mkdir(parents=True, exist_ok=True)
-    struct_path = qdir / "参考图_结构分析.json"
-    quant_path = qdir / "参考图_量化分析.json"
-
-    structure = analysis.get("structure", {})
-    quantitative = analysis.get("quantitative", {})
-
-    # 将元数据嵌入 structure 和 quantitative 内部，确保前端可以读取
-    for key in ("_model", "_usage"):
-        if key in analysis and analysis[key]:
-            structure[key] = analysis[key]
-            quantitative[key] = analysis[key]
-
-    struct_path.write_text(json.dumps(structure, ensure_ascii=False, indent=2), encoding="utf-8")
-    quant_path.write_text(json.dumps(quantitative, ensure_ascii=False, indent=2), encoding="utf-8")
+    path = qdir / "参考图_分析.json"
+    # 同时清理旧格式文件（如果存在）
+    for old_name in ("参考图_结构分析.json", "参考图_量化分析.json"):
+        old_path = qdir / old_name
+        try:
+            old_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+    path.write_text(json.dumps(analysis, ensure_ascii=False, indent=2), encoding="utf-8")
     logger.info(f"参考图分析结果已保存: [{qid}]")
 
 
 def get_reference_analysis(qid: str) -> dict | None:
     """
-    读取参考图的分析结果。
-    返回 {"structure": ..., "quantitative": ...} 或 None（分析文件不存在时）
+    读取参考图的完整分析结果。
+    返回 analyze_merged() 的完整输出 dict，或 None（分析不存在时）。
+    向后兼容旧的分离格式（参考图_结构分析.json + 参考图_量化分析.json）。
     """
     qdir = get_question_dir(qid)
-    struct_path = qdir / "参考图_结构分析.json"
-    quant_path = qdir / "参考图_量化分析.json"
-    if not struct_path.exists() or not quant_path.exists():
-        return None
-    return {
-        "structure": json.loads(struct_path.read_text(encoding="utf-8")),
-        "quantitative": json.loads(quant_path.read_text(encoding="utf-8")),
-    }
+    path = qdir / "参考图_分析.json"
+    if path.exists():
+        return json.loads(path.read_text(encoding="utf-8"))
+    # 向后兼容：旧格式
+    old_struct = qdir / "参考图_结构分析.json"
+    old_quant = qdir / "参考图_量化分析.json"
+    if old_struct.exists() and old_quant.exists():
+        return {
+            "structure": json.loads(old_struct.read_text(encoding="utf-8")),
+            "quantitative": json.loads(old_quant.read_text(encoding="utf-8")),
+        }
+    return None
 
 
 # ── 提交记录（submissions.json）─────────────────────────
@@ -542,50 +551,61 @@ def clear_student_data(qid: str, student_id: str, name: str) -> str:
     return stem
 
 
-def save_student_analysis(qid: str, student_id: str, name: str, analysis: dict) -> None:
+def save_student_result(qid: str, student_id: str, name: str, result: dict) -> None:
     """
-    保存学生图的分析结果。
-    analysis 应包含 structure 和 quantitative 两个 key，以及可选的 _model、_usage 元数据。
-    写入 data/{qid}/student/{姓名}_{学号}_结构分析.json 和 _量化分析.json。
-    元数据（_model, _usage）会嵌入 structure 和 quantitative 内部，供前端展示。
+    保存学生的完整批阅结果（分析+评分），写入 data/{qid}/student/{姓名}_{学号}.json。
+    同时清理旧的分离格式文件。
     """
     student_dir = get_student_dir(qid)
     student_dir.mkdir(parents=True, exist_ok=True)
     safe_name = _sanitize_filename_part(name)
     safe_id = _sanitize_filename_part(student_id)
-    struct_path = student_dir / f"{safe_name}_{safe_id}_结构分析.json"
-    quant_path = student_dir / f"{safe_name}_{safe_id}_量化分析.json"
-
-    structure = analysis.get("structure", {})
-    quantitative = analysis.get("quantitative", {})
-
-    # 将元数据嵌入 structure 和 quantitative 内部，确保前端可以读取
-    for key in ("_model", "_usage"):
-        if key in analysis and analysis[key]:
-            structure[key] = analysis[key]
-            quantitative[key] = analysis[key]
-
-    struct_path.write_text(json.dumps(structure, ensure_ascii=False, indent=2), encoding="utf-8")
-    quant_path.write_text(json.dumps(quantitative, ensure_ascii=False, indent=2), encoding="utf-8")
-    logger.info(f"学生图分析结果已保存: [{qid}] {name}({student_id})")
+    path = student_dir / f"{safe_name}_{safe_id}.json"
+    # 清理旧格式文件
+    for old_suffix in ("_分析.json", "_结构分析.json", "_量化分析.json", "_结果.json"):
+        old_path = student_dir / f"{safe_name}_{safe_id}{old_suffix}"
+        try:
+            old_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+    path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    logger.info(f"学生批阅结果已保存: [{qid}] {name}({student_id})")
 
 
-def get_student_analysis(qid: str, student_id: str, name: str) -> dict | None:
+def get_student_result(qid: str, student_id: str, name: str) -> dict | None:
     """
-    读取学生图的分析结果。
-    返回 {"structure": ..., "quantitative": ...} 或 None
+    读取学生的完整批阅结果（分析+评分），返回完整 dict 或 None。
+    向后兼容旧的 _分析.json 和分离格式。
     """
     student_dir = get_student_dir(qid)
     safe_name = _sanitize_filename_part(name)
     safe_id = _sanitize_filename_part(student_id)
-    struct_path = student_dir / f"{safe_name}_{safe_id}_结构分析.json"
-    quant_path = student_dir / f"{safe_name}_{safe_id}_量化分析.json"
-    if not struct_path.exists() or not quant_path.exists():
-        return None
-    return {
-        "structure": json.loads(struct_path.read_text(encoding="utf-8")),
-        "quantitative": json.loads(quant_path.read_text(encoding="utf-8")),
-    }
+    stem = f"{safe_name}_{safe_id}"
+
+    # 优先新格式：{name}_{id}.json
+    path = student_dir / f"{stem}.json"
+    if path.exists():
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    # 向后兼容：{name}_{id}_分析.json
+    alt = student_dir / f"{stem}_分析.json"
+    if alt.exists():
+        return json.loads(alt.read_text(encoding="utf-8"))
+
+    # 向后兼容：旧分离格式
+    old_struct = student_dir / f"{stem}_结构分析.json"
+    old_quant = student_dir / f"{stem}_量化分析.json"
+    if old_struct.exists() and old_quant.exists():
+        return {
+            "structure": json.loads(old_struct.read_text(encoding="utf-8")),
+            "quantitative": json.loads(old_quant.read_text(encoding="utf-8")),
+        }
+    return None
+
+
+# 别名，保持向后兼容
+save_student_analysis = save_student_result
+get_student_analysis = get_student_result
 
 
 def _read_csv(path: Path) -> list[dict]:

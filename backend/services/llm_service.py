@@ -301,17 +301,6 @@ def check_if_photo(image_path: Path) -> tuple[bool, str]:
     return False, ""
 
 
-def _pixel_similarity(img1: Image.Image, img2: Image.Image, threshold: int = 20) -> float:
-    """两图逐像素相似度 (0-100)。threshold 为单通道容差"""
-    p1 = list(img1.getdata())
-    p2 = list(img2.getdata())
-    diff = sum(1 for i in range(len(p1))
-               if abs(p1[i][0] - p2[i][0]) > threshold
-               or abs(p1[i][1] - p2[i][1]) > threshold
-               or abs(p1[i][2] - p2[i][2]) > threshold)
-    return (1 - diff / len(p1)) * 100
-
-
 # ── LLM 调用 + JSON 解析（自动重试）─────────────────────
 
 def _call_and_parse(client, model, messages, parse_fn, temperature=None, max_tokens=None, max_retries=None):
@@ -365,45 +354,7 @@ def _strip_meta(d: dict) -> dict:
     return {k: v for k, v in d.items() if not k.startswith("_")}
 
 
-# ── Prompt 构建 ──────────────────────────────────────────
-
-def _build_prompt(description: str, phase1_criteria: str, phase2_criteria: str) -> str:
-    """组装两阶段评分 Prompt 文本"""
-    thresholds = get_grade_thresholds()
-    threshold_text = "，".join(f"{name}≥{score}" for score, name in thresholds) + "，F<" + str(int(thresholds[-1][0]) if thresholds else 50)
-    return f"""你是一位工程图批阅老师。请根据以下信息，分两阶段批阅学生提交的工程图。
-
-【题目】{description}
-
-## 评分流程（两阶段）
-
-### 第一阶段：图形相似度评分
-{phase1_criteria}
-
-### 第二阶段：按批改要求评分
-{phase2_criteria}
-
-### 第三阶段：计算总分
-总分 = √(第一阶段分数 × 第二阶段分数)
-根据总分映射到等级（100~50 线性分布为 A+~D 八档，50以下为F）：
-{threshold_text}
-
-请严格按以下 JSON 格式输出，不要包含其他文字：
-{{
-  "phase1_similarity": 85,
-  "phase1_comment": "与参考图相比的相似度评价",
-  "phase2_criteria": 80,
-  "图样表达": "评价...",
-  "尺寸标注": "评价...",
-  "尺寸公差": "评价...",
-  "表面质量": "评价...",
-  "形位公差": "评价...",
-  "phase2_comment": "按批改要求的综合评价",
-  "总评": "综合两阶段的整体评价"
-}}"""
-
-
-# ── LLM 输出解析 ────────────────────────────────────────
+# ── 元数据清洗 ───────────────────────────────────────────
 
 def _repair_json_text(text: str) -> str:
     """修复 LLM 常见的 JSON 格式错误"""
@@ -443,25 +394,6 @@ def _parse_json_response(text: str) -> dict:
     raise ValueError(f"JSON 解析失败，原文前200字符: {repaired[:200]}")
 
 
-def _parse_llm_response(text: str) -> dict:
-    """从 LLM 输出中提取含 phase1_similarity 的 JSON 对象，容错解析"""
-    text = text.strip()
-    match = re.search(r'\{[\s\S]*"phase1_similarity"[\s\S]*\}', text, re.DOTALL)
-    if match:
-        text = match.group(0)
-    repaired = _repair_json_text(text)
-    try:
-        return json.loads(repaired)
-    except json.JSONDecodeError:
-        pass
-    try:
-        import json5
-        return json5.loads(repaired)
-    except Exception:
-        pass
-    raise ValueError(f"评分 JSON 解析失败，原文前200字符: {repaired[:200]}")
-
-
 # ── 等级计算 ─────────────────────────────────────────────
 
 def _compute_grade(total: float) -> str:
@@ -475,196 +407,22 @@ def _compute_grade(total: float) -> str:
 
 # ── 核心批阅流程 ────────────────────────────────────────
 
-def grade_submission(
-    description: str,
-    phase1_criteria: str,
-    phase2_criteria: str,
-    reference_paths: list[Path],
-    student_submission_path: Path,
-) -> dict:
-    """
-    两阶段批阅主流程。
-    返回 dict 包含 phase1_similarity, phase2_criteria, total_score, grade 及各维度评语。
-    """
-    client = _build_client()
-    model = _get_model()
-    prompt_text = _build_prompt(description, phase1_criteria, phase2_criteria)
-
-    # 组装多模态消息：[文本 Prompt] + [参考图（可选）] + [学生作业]
-    content: list[dict] = [{"type": "text", "text": prompt_text}]
-
-    if reference_paths:
-        content.append({"type": "text", "text": "\n【参考工程图】："})
-        for ref_path in reference_paths:
-            if ref_path.exists():
-                b64 = image_to_base64(ref_path)
-                content.append({
-                    "type": "image_url",
-                    "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
-                })
-
-    student_b64 = image_to_base64(student_submission_path)
-    content.append({"type": "text", "text": "\n【学生提交的工程图】："})
-    content.append({
-        "type": "image_url",
-        "image_url": {"url": f"data:image/jpeg;base64,{student_b64}"},
-    })
-
-    logger.info(f"正在调用 LLM 批阅（模型: {model}）…")
-    result = _call_and_parse(client, model,
-        [{"role": "user", "content": content}],
-        _parse_llm_response)
-
-    # 计算总分和等级
-    p1 = float(result.get("phase1_similarity", 0))
-    p2 = float(result.get("phase2_criteria", 0))
-    total = round((p1 * p2) ** 0.5, 1)
-    grade = _compute_grade(total)
-
-    result["grade"] = grade
-    result["phase1_similarity"] = p1
-    result["phase2_criteria"] = p2
-    result["total_score"] = total
-
-    logger.info(f"LLM 批阅完成 → 总分 {total}% 等级 {grade}")
-    return result
+# grade_submission() has been removed. Use analyze_and_grade() instead.
 
 
-# ── 工程图预分析（参考图 / 学生图）────────────────────────
+# ── 合并分析（单次调用完成全部提取）───────────────────────
 
-def analyze_structure(image_path: Path, template_path: Path, knowledge: str = "") -> dict:
-    """
-    对工程图进行结构分析。
-    发送图片 + 结构分析模版 → LLM → 返回结构特征 JSON。
-    返回 dict 包含 title_block, views, features, overall_shape, technical_notes 等。
-    """
-    client = _build_client()
-    model = _get_model()
-    prompt_text = template_path.read_text(encoding="utf-8")
-    if knowledge:
-        prompt_text = f"【补充知识】\n{knowledge}\n\n{prompt_text}"
-    b64 = image_to_base64(image_path)
-
-    content: list[dict] = [
-        {"type": "text", "text": prompt_text},
-        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
-    ]
-
-    logger.info(f"结构分析中（模型: {model}）…")
-    result = _call_and_parse(client, model,
-        [{"role": "user", "content": content}],
-        _parse_json_response)
-    logger.info("结构分析完成")
-    return result
-
-
-def analyze_structure_bytes(data: bytes, filename: str, template_path: Path, knowledge: str = "") -> dict:
-    """结构分析（bytes 版本，不读磁盘）。测试模式使用"""
-    client = _build_client()
-    model = _get_model()
-    prompt_text = template_path.read_text(encoding="utf-8")
-    if knowledge:
-        prompt_text = f"【补充知识】\n{knowledge}\n\n{prompt_text}"
-    b64 = bytes_to_base64(data, filename)
-
-    content: list[dict] = [
-        {"type": "text", "text": prompt_text},
-        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
-    ]
-
-    logger.info(f"结构分析中（模型: {model}）…")
-    return _call_and_parse(client, model,
-        [{"role": "user", "content": content}],
-        _parse_json_response)
-
-
-def analyze_quantitative_bytes(data: bytes, filename: str, template_path: Path, structure_json: dict, knowledge: str = "") -> dict:
-    """量化分析（bytes 版本，不读磁盘）。测试模式使用"""
-    client = _build_client()
-    model = _get_model()
-    template_text = template_path.read_text(encoding="utf-8")
-    prompt_text = template_text.replace("__STRUCTURE_JSON__", json.dumps(_strip_meta(structure_json), ensure_ascii=False, indent=2))
-    if knowledge:
-        prompt_text = f"【补充知识】\n{knowledge}\n\n{prompt_text}"
-    b64 = bytes_to_base64(data, filename)
-
-    content: list[dict] = [
-        {"type": "text", "text": prompt_text},
-        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
-    ]
-
-    logger.info(f"量化分析中（模型: {model}）…")
-    return _call_and_parse(client, model,
-        [{"role": "user", "content": content}],
-        _parse_json_response)
-
-
-def analyze_quantitative(image_path: Path, template_path: Path, structure_json: dict, knowledge: str = "") -> dict:
-    """
-    对工程图进行量化分析（依赖结构分析结果）。
-    将 __STRUCTURE_JSON__ 替换为实际结构 JSON → 发送图片 + 填充模版 → LLM → 返回量化 JSON。
-    返回 dict 包含 dimensions, surface_roughness, geometric_tolerances, thread_specs 等。
-    """
-    client = _build_client()
-    model = _get_model()
-    template_text = template_path.read_text(encoding="utf-8")
-    prompt_text = template_text.replace("__STRUCTURE_JSON__", json.dumps(_strip_meta(structure_json), ensure_ascii=False, indent=2))
-    if knowledge:
-        prompt_text = f"【补充知识】\n{knowledge}\n\n{prompt_text}"
-    b64 = image_to_base64(image_path)
-
-    content: list[dict] = [
-        {"type": "text", "text": prompt_text},
-        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
-    ]
-
-    logger.info(f"量化分析中（模型: {model}）…")
-    result = _call_and_parse(client, model,
-        [{"role": "user", "content": content}],
-        _parse_json_response)
-    logger.info("量化分析完成")
-    return result
-
-
-# ── 合并分析（单次调用完成结构+量化）───────────────────────
-
-def _build_merged_prompt(struct_template: str, quant_template: str) -> str:
-    """构建合并分析 Prompt：一次调用完成结构分析 + 量化分析"""
-    quant_part = quant_template.replace(
-        "__STRUCTURE_JSON__",
-        "【请直接使用你在任务一中输出的结构分析 JSON 作为本任务的输入依据】"
-    )
-    return (
-        "你是机械制图与检测专家。请一次性完成以下两项任务：\n\n"
-        "## 任务一：结构分析\n" + struct_template + "\n\n"
-        "## 任务二：量化分析（基于你在任务一中输出的结构特征）\n" + quant_part + "\n\n"
-        "请将两项结果合并为一个 JSON，不要用 markdown 代码块包裹：\n"
-        '{\n'
-        '  "structure": { ... 任务一的完整 JSON 输出 ... },\n'
-        '  "quantitative": { ... 任务二的完整 JSON 输出 ... }\n'
-        '}'
-    )
-
-
-def analyze_merged(image_path: Path, struct_template: Path, quant_template: Path,
+def analyze_merged(image_path: Path, template_text: str, *,
                    knowledge: str = "") -> dict:
     """
-    合并分析：单次 LLM 调用同时完成结构分析和量化分析。
-    返回 {"structure": {...}, "quantitative": {...}, "_model": ..., "_usage": ...}
-    优先使用 settings 中的模板，settings 为空时回退到文件。
+    单次 LLM 调用完成工程图识读。
+    template_text: 识读模板的完整文本（来自 data/{qid}/识读模板.txt）
+    返回 dict 包含 LLM 输出的全部字段，以及 _model、_usage 元数据。
     """
     client = _build_client()
     model = _get_model()
-    templates = get_prompt_templates()
-    # 根据文件名判断使用哪个模板 key
-    def _read_tpl(tpl_path: Path, settings_key: str) -> str:
-        tpl = templates.get(settings_key, "")
-        if tpl:
-            return tpl
-        return tpl_path.read_text(encoding="utf-8")
-    struct_tpl = _read_tpl(struct_template, "structure_analysis" if "学生" not in str(struct_template) else "structure_analysis_student")
-    quant_tpl = _read_tpl(quant_template, "quantitative_analysis" if "学生" not in str(quant_template) else "quantitative_analysis_student")
-    prompt_text = _build_merged_prompt(struct_tpl, quant_tpl)
+
+    prompt_text = template_text
     if knowledge:
         prompt_text = f"【补充知识】\n{knowledge}\n\n{prompt_text}"
     b64 = image_to_base64(image_path)
@@ -674,39 +432,29 @@ def analyze_merged(image_path: Path, struct_template: Path, quant_template: Path
         {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
     ]
 
-    logger.info(f"合并分析中（模型: {model}）…")
-    merged = _call_and_parse(client, model,
+    logger.info(f"工程图识读中（模型: {model}）…")
+    result = _call_and_parse(client, model,
         [{"role": "user", "content": content}],
         _parse_json_response)
-    logger.info("合并分析完成")
+    logger.info("工程图识读完成")
 
-    # 拆分并保留元数据
-    s = merged.get("structure", {})
-    q = merged.get("quantitative", {})
-    result = {
-        "structure": s if isinstance(s, dict) else {},
-        "quantitative": q if isinstance(q, dict) else {},
-    }
-    result["_model"] = merged.get("_model", model)
-    result["_usage"] = merged.get("_usage", {})
+    # 校验：工程图概述不能为空
+    overview = result.get("工程图概述", "")
+    if not overview or len(str(overview)) < 10:
+        logger.warning("工程图概述为空或过短（<10字符），模型可能未能正确识读图片")
+
+    result["_model"] = result.get("_model", model)
+    result["_usage"] = result.get("_usage", {})
     return result
 
 
-def analyze_merged_bytes(data: bytes, filename: str, struct_template: Path,
-                         quant_template: Path, knowledge: str = "") -> dict:
-    """合并分析（bytes 版本，测试模式使用）。
-    优先使用 settings 中的模板，settings 为空时回退到文件。"""
+def analyze_merged_bytes(data: bytes, filename: str, template_text: str, *,
+                          knowledge: str = "") -> dict:
+    """合并分析（bytes 版本，测试模式使用）。template_text 为识读模板文本。"""
     client = _build_client()
     model = _get_model()
-    templates = get_prompt_templates()
-    def _read_tpl(tpl_path: Path, settings_key: str) -> str:
-        tpl = templates.get(settings_key, "")
-        if tpl:
-            return tpl
-        return tpl_path.read_text(encoding="utf-8")
-    struct_tpl = _read_tpl(struct_template, "structure_analysis" if "学生" not in str(struct_template) else "structure_analysis_student")
-    quant_tpl = _read_tpl(quant_template, "quantitative_analysis" if "学生" not in str(quant_template) else "quantitative_analysis_student")
-    prompt_text = _build_merged_prompt(struct_tpl, quant_tpl)
+
+    prompt_text = template_text
     if knowledge:
         prompt_text = f"【补充知识】\n{knowledge}\n\n{prompt_text}"
     b64 = bytes_to_base64(data, filename)
@@ -716,26 +464,21 @@ def analyze_merged_bytes(data: bytes, filename: str, struct_template: Path,
         {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
     ]
 
-    logger.info(f"合并分析中（模型: {model}）…")
-    merged = _call_and_parse(client, model,
+    logger.info(f"工程图识读中（模型: {model}）…")
+    result = _call_and_parse(client, model,
         [{"role": "user", "content": content}],
         _parse_json_response)
-    logger.info("合并分析完成")
-
-    result = {
-        "structure": merged.get("structure", {}) if isinstance(merged.get("structure"), dict) else {},
-        "quantitative": merged.get("quantitative", {}) if isinstance(merged.get("quantitative"), dict) else {},
-    }
-    result["_model"] = merged.get("_model", model)
-    result["_usage"] = merged.get("_usage", {})
+    logger.info("工程图识读完成")
+    result["_model"] = result.get("_model", model)
+    result["_usage"] = result.get("_usage", {})
     return result
 
 
 # ── 两阶段评分（新版：基于分析结果）───────────────────────
 
 def grade_phase1(
-    ref_struct: dict,
-    stu_struct: dict,
+    ref_analysis: dict,
+    stu_analysis: dict,
     phase1_criteria: str,
     ref_image_path: Path,
     stu_image_path: Path,
@@ -746,21 +489,38 @@ def grade_phase1(
 ) -> dict:
     """
     阶段一：结构相似度评分（视觉对比）。
-    submit 模式用 stu_image_path；test 模式传 stu_data + stu_filename（不读磁盘）。
+    对比两份工程图识读结果的概述和几何特征，结合缩略图做视觉判断。
+    ref_analysis/stu_analysis: analyze_merged 的返回结果（新格式）。
     """
     client = _build_client()
     model = _get_model()
 
     kn_block = f"【补充知识】\n{knowledge}\n\n" if knowledge else ""
     templates = get_prompt_templates()
-    phase1_guide = templates.get("phase1_guide", "你是一位工程图批阅老师。请对比学生图和参考图的结构特征，评估图形相似度和画图质量。")
+    phase1_guide = templates.get("grading_guide", "你是一位工程图批阅老师。请对比学生图和参考图，从结构完整性和标注准确性两方面综合评分。")
+
+    # 提取阶段一相关的字段：概述、几何特征、各视图信息（如存在）
+    def _p1_fields(analysis: dict) -> dict:
+        fields = {}
+        for key in ("工程图概述", "基本信息", "几何特征"):
+            if key in analysis:
+                fields[key] = analysis[key]
+        if "各视图信息" in analysis:
+            fields["各视图信息"] = analysis["各视图信息"]
+        if "零件清单" in analysis:
+            fields["零件清单"] = analysis["零件清单"]
+        return fields
+
+    ref_p1 = _p1_fields(ref_analysis)
+    stu_p1 = _p1_fields(stu_analysis)
+
     prompt_text = f"""{kn_block}{phase1_guide}
 
-【参考工程图结构分析】
-{json.dumps(_strip_meta(ref_struct), ensure_ascii=False, indent=2)}
+【参考工程图分析】
+{json.dumps(_strip_meta(ref_p1), ensure_ascii=False, indent=2)}
 
-【学生工程图结构分析】
-{json.dumps(_strip_meta(stu_struct), ensure_ascii=False, indent=2)}
+【学生工程图分析】
+{json.dumps(_strip_meta(stu_p1), ensure_ascii=False, indent=2)}
 
 【评分标准】
 {phase1_criteria}
@@ -796,69 +556,84 @@ def grade_phase1(
 
 
 def _simplify_quantitative(data: dict) -> dict:
-    """精简量化分析 JSON，仅保留评分所需的关键字段，减少 token 消耗。"""
+    """精简量化分析 JSON，从新格式中提取评分所需字段，减少 token 消耗。"""
     simplified: dict = {}
 
-    # 尺寸标注：仅保留 count + 每条数值/公差
-    dims = data.get("dimensions", [])
-    simplified["尺寸数量"] = len(dims)
-    simplified["尺寸标注"] = [
-        {"数值": d.get("value"), "公差": d.get("tolerance")}
-        for d in dims
-    ]
+    # 尺寸标注：直接使用新格式的"尺寸"字段
+    dims = data.get("尺寸", [])
+    if dims:
+        simplified["尺寸数量"] = len(dims)
+        simplified["尺寸标注"] = [
+            {"类别": d.get("类别", ""), "数值": d.get("数值", "")}
+            for d in dims
+        ]
 
-    # 表面粗糙度：仅保留 count + 每条数值
-    roughness = data.get("surface_roughness", [])
-    simplified["粗糙度数量"] = len(roughness)
-    simplified["表面粗糙度"] = [{"数值": r.get("value")} for r in roughness]
+    # 表面粗糙度
+    roughness = data.get("表面粗糙度", [])
+    if roughness:
+        simplified["粗糙度数量"] = len(roughness)
+        simplified["表面粗糙度"] = [
+            {"类别": r.get("类别", ""), "数值": r.get("数值", "")}
+            for r in roughness
+        ]
 
-    # 形位公差：仅保留 count + 每条类型/数值/基准
-    geos = data.get("geometric_tolerances", [])
-    simplified["形位公差项数"] = len(geos)
-    simplified["形位公差"] = [
-        {"类型": g.get("type"), "数值": g.get("value")}
-        for g in geos
-    ]
+    # 几何公差
+    geos = data.get("几何公差", [])
+    if geos:
+        simplified["几何公差项数"] = len(geos)
+        simplified["几何公差"] = [
+            {"类别": g.get("类别", ""), "数值": g.get("数值", ""), "基准": g.get("基准", "")}
+            for g in geos
+        ]
 
+    # 尺寸公差
+    dim_tols = data.get("尺寸公差", [])
+    if dim_tols:
+        simplified["尺寸公差项数"] = len(dim_tols)
+        simplified["尺寸公差"] = [
+            {"公称尺寸": d.get("公称尺寸", ""), "公差": d.get("公差", "")}
+            for d in dim_tols
+        ]
+
+    # 技术要求
     if data.get("技术要求"):
         simplified["技术要求"] = data["技术要求"]
-    if "thread_specs" in data and data["thread_specs"]:
-        simplified["螺纹规格"] = data["thread_specs"]
+
+    # 装配图特有字段
+    if "配合关系" in data and data["配合关系"]:
+        simplified["配合关系数量"] = len(data["配合关系"])
+        simplified["配合关系"] = data["配合关系"]
+    if "外形尺寸" in data and data["外形尺寸"]:
+        simplified["外形尺寸"] = data["外形尺寸"]
+    if "零件清单" in data and data["零件清单"]:
+        simplified["零件总数"] = len(data["零件清单"])
 
     return simplified
 
 
 def grade_phase2(
-    ref_quant: dict,
-    stu_quant: dict,
+    ref_analysis: dict,
+    stu_analysis: dict,
     phase2_criteria: str,
     *,
     knowledge: str = "",
 ) -> dict:
     """
     阶段二：量化标注评分（纯文本对比，无需图片）。
-    先精简量化 JSON（去掉 id/feature_ref/description/location 等冗余字段），再发送评分。
-    返回 dict 包含 phase2_criteria, 图样表达, 尺寸标注, 尺寸公差, 表面质量, 形位公差, phase2_comment, 总评
+    先精简量化 JSON，再发送评分。
+    ref_analysis/stu_analysis: analyze_merged 的返回结果（新格式）。
     """
     client = _build_client()
     model = _get_model()
 
     templates = get_prompt_templates()
-    phase2_hint = templates.get("phase2_correction_hint", "")
-    # 如果 settings 中为空，回退到文件
-    if not phase2_hint:
-        from config import CONFIG_DIR
-        hint_path = CONFIG_DIR / "二阶段修正提示词.txt"
-        phase2_hint = hint_path.read_text(encoding="utf-8") if hint_path.exists() else ""
+    grading_guide = templates.get("grading_guide", "你是一位工程图批阅老师。请对比学生图和参考图，从结构完整性和标注准确性两方面综合评分。")
 
-    ref_simple = _simplify_quantitative(ref_quant)
-    stu_simple = _simplify_quantitative(stu_quant)
+    ref_simple = _simplify_quantitative(ref_analysis)
+    stu_simple = _simplify_quantitative(stu_analysis)
 
     kn_block = f"【补充知识】\n{knowledge}\n\n" if knowledge else ""
-    phase2_guide = templates.get("phase2_guide", "你是一位机械检测工程师。请逐项对比两份量化分析数据，评估学生标注的完整性和正确性。")
-    prompt_text = f"""{kn_block}{phase2_hint}
-
-{phase2_guide}
+    prompt_text = f"""{kn_block}{grading_guide}
 
 【参考图量化数据】
 {json.dumps(ref_simple, ensure_ascii=False, indent=2)}
@@ -890,11 +665,131 @@ def grade_phase2(
     return result
 
 
+# ── 合并评分（单次 LLM 调用完成识读+两阶段评分）────────────
+
+def analyze_and_grade(
+    image_path: Path,
+    template_text: str,
+    ref_analysis: dict,
+    phase1_criteria: str,
+    phase2_criteria: str,
+    ref_image_path: Path,
+    *,
+    knowledge: str = "",
+) -> dict:
+    """
+    单次 LLM 调用完成：工程图识读 + 阶段一评分（视觉对比）+ 阶段二评分（量化对比）。
+    返回包含所有分析字段、两个阶段评分、总分和等级的完整 dict。
+    """
+    client = _build_client()
+    model = _get_model()
+    templates = get_prompt_templates()
+
+    # ── 阶段一相关字段 ──
+    def _p1_fields(a: dict) -> dict:
+        fields = {}
+        for key in ("工程图概述", "基本信息", "几何特征"):
+            if key in a:
+                fields[key] = a[key]
+        if "各视图信息" in a:
+            fields["各视图信息"] = a["各视图信息"]
+        if "零件清单" in a:
+            fields["零件清单"] = a["零件清单"]
+        return fields
+
+    ref_simple = _simplify_quantitative(ref_analysis)
+
+    grading_guide = templates.get("grading_guide",
+        "你是一位工程图批阅老师。请对比学生图和参考图，从结构完整性和标注准确性两方面综合评分。")
+
+    kn_block = f"【补充知识】\n{knowledge}\n\n" if knowledge else ""
+
+    # ── 组装合并 prompt ──
+    prompt_text = f"""{kn_block}你是一位机械制图检测专家兼工程图批阅老师。请一次性完成以下三项任务。
+
+## 任务一：工程图识读（使用大图提取细节）
+{template_text}
+
+## 任务二：评分（使用缩略图对比结构）
+{grading_guide}
+
+【参考工程图分析（作为评分基准）】
+{json.dumps(_strip_meta(_p1_fields(ref_analysis)), ensure_ascii=False, indent=2)}
+
+【参考图量化数据】
+{json.dumps(ref_simple, ensure_ascii=False, indent=2)}
+
+【评分标准】
+阶段一（图形相似度）：
+{phase1_criteria}
+
+阶段二（量化标注）：
+{phase2_criteria}
+
+---
+
+请将三项任务的结果合并为一个 JSON 输出，不要用 markdown 代码块包裹：
+
+{{
+  "工程图概述": "...",
+  "基本信息": {{ "零件名称": "...", "材料": "...", "比例": "..." }},
+  "几何特征": [...],
+  "尺寸": [...],
+  "几何公差": [...],
+  "表面粗糙度": [...],
+  "尺寸公差": [...],
+  "技术要求": "...",
+  "phase1_similarity": 85,
+  "phase1_comment": "...",
+  "phase2_criteria": 80,
+  "图样表达": "...",
+  "尺寸标注": "...",
+  "尺寸公差": "...",
+  "表面质量": "...",
+  "形位公差": "...",
+  "phase2_comment": "...",
+  "总评": "..."
+}}"""
+
+    # ── 图片 ──
+    # 学生图传两次：大图用于识读（任务一），缩略图用于对比（任务二，与参考图同参数）
+    stu_large = image_to_base64(image_path, max_size=_analysis_max_size(), quality=_analysis_jpeg_quality())
+    stu_thumb = image_to_base64(image_path, max_size=_phase1_max_size(), quality=_phase1_jpeg_quality())
+    ref_thumb = image_to_base64(ref_image_path, max_size=_phase1_max_size(), quality=_phase1_jpeg_quality())
+
+    content: list[dict] = [
+        {"type": "text", "text": prompt_text},
+        {"type": "text", "text": "\n【学生工程图 — 用于识读（大图）】："},
+        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{stu_large}"}},
+        {"type": "text", "text": "\n【学生工程图对比 — 缩略图】："},
+        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{stu_thumb}"}},
+        {"type": "text", "text": "\n【参考工程图 — 缩略图】："},
+        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{ref_thumb}"}},
+    ]
+
+    logger.info(f"合并分析+评分中（模型: {model}）…")
+    result = _call_and_parse(client, model,
+        [{"role": "user", "content": content}],
+        _parse_json_response)
+    logger.info("合并分析+评分完成")
+
+    # ── 计算总分 ──
+    p1 = float(result.get("phase1_similarity", 0))
+    p2 = float(result.get("phase2_criteria", 0))
+    total = round((p1 * p2) ** 0.5, 1)
+    grade = _compute_grade(total)
+
+    result["phase1_similarity"] = p1
+    result["phase2_criteria"] = p2
+    result["total_score"] = total
+    result["grade"] = grade
+    result["_model"] = result.get("_model", model)
+    return result
+
+
 def run_two_phase_grading(
-    ref_struct: dict,
-    ref_quant: dict,
-    stu_struct: dict,
-    stu_quant: dict,
+    ref_analysis: dict,
+    stu_analysis: dict,
     phase1_criteria: str,
     phase2_criteria: str,
     ref_image_path: Path,
@@ -906,12 +801,13 @@ def run_two_phase_grading(
 ) -> dict:
     """
     执行完整的两阶段评分流程。
+    ref_analysis/stu_analysis: analyze_merged 的返回结果（新格式）。
     submit 模式传入 stu_image_path；test 模式传入 stu_data + stu_filename。
     """
-    p1 = grade_phase1(ref_struct, stu_struct, phase1_criteria, ref_image_path,
+    p1 = grade_phase1(ref_analysis, stu_analysis, phase1_criteria, ref_image_path,
                       stu_image_path, stu_data=stu_data, stu_filename=stu_filename,
                       knowledge=knowledge)
-    p2 = grade_phase2(ref_quant, stu_quant, phase2_criteria, knowledge=knowledge)
+    p2 = grade_phase2(ref_analysis, stu_analysis, phase2_criteria, knowledge=knowledge)
 
     # 提取元数据后再合并，避免 p2 覆盖 p1 的 _model 和 _usage
     p1_usage = p1.pop("_usage", None)

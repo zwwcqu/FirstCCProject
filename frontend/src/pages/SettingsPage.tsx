@@ -155,10 +155,90 @@ const TABS = [
   { key: "llm", label: "LLM 参数" },
   { key: "image", label: "图像处理" },
   { key: "grade", label: "等级阈值" },
-  { key: "analysis", label: "工程图分析模板" },
+  { key: "analysis", label: "识读模板管理" },
   { key: "scoring", label: "评分模板" },
   { key: "system", label: "系统管理" },
 ];
+
+// ------ 识读模板管理标签页 ------
+const TEMPLATE_NAMES = ["零件图识读模板.txt", "装配图识读模板.txt", "平面图识读模板.txt", "组合体三视图识读模板.txt"];
+const TEMPLATE_LABELS: Record<string, string> = {
+  "零件图识读模板.txt": "零件图",
+  "装配图识读模板.txt": "装配图",
+  "平面图识读模板.txt": "平面图",
+  "组合体三视图识读模板.txt": "组合体三视图",
+};
+
+function AnalysisTemplatesTab({ saving, setMsg }: { saving: boolean; setMsg: (m: string) => void }) {
+  const [templates, setTemplates] = useState<Record<string, string>>({});
+  const [activeTpl, setActiveTpl] = useState(TEMPLATE_NAMES[0]);
+  const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => {
+    fetch("/api/teacher/templates", { credentials: "include" })
+      .then(r => r.json())
+      .then(data => {
+        if (data.templates) {
+          setTemplates(data.templates);
+        }
+        setLoaded(true);
+      })
+      .catch(() => setLoaded(true));
+  }, []);
+
+  const saveCurrent = async () => {
+    try {
+      await fetch(`/api/teacher/templates/${encodeURIComponent(activeTpl)}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content: templates[activeTpl] || "" }),
+        credentials: "include",
+      });
+      setMsg("模板已保存");
+    } catch (e: any) {
+      setMsg("保存失败: " + e.message);
+    }
+  };
+
+  const sectionClass = "bg-white rounded-lg shadow p-6 space-y-4";
+  const inputClass = "w-full border rounded px-3 py-2 text-sm font-mono";
+
+  return (
+    <div className={sectionClass}>
+      <h2 className="text-lg font-semibold">识读模板管理</h2>
+      <p className="text-xs text-gray-400">
+        修改全局模板会影响新创建的题目默认值。已有题目的模板在题目编辑中单独修改。
+      </p>
+
+      {/* 模板类型切换 */}
+      <div className="flex gap-1 flex-wrap border-b pb-2">
+        {TEMPLATE_NAMES.map(name => (
+          <button key={name} onClick={() => setActiveTpl(name)}
+            className={`px-3 py-1 rounded text-sm whitespace-nowrap ${activeTpl === name ? "bg-blue-600 text-white font-medium" : "bg-gray-100 text-gray-600 hover:bg-gray-200"}`}>
+            {TEMPLATE_LABELS[name] || name}
+          </button>
+        ))}
+      </div>
+
+      {/* 当前选中模板的编辑区 */}
+      <div>
+        <label className="block text-sm font-medium text-gray-700 mb-1">
+          {TEMPLATE_LABELS[activeTpl] || activeTpl}
+          <span className="text-gray-400 font-normal ml-2 text-xs">— 全局默认模板</span>
+        </label>
+        <textarea rows={18} value={templates[activeTpl] || ""}
+          onChange={e => setTemplates({ ...templates, [activeTpl]: e.target.value })}
+          className={inputClass} />
+      </div>
+
+      <button onClick={saveCurrent} disabled={saving || !loaded}
+        className="bg-blue-600 text-white px-4 py-1.5 rounded hover:bg-blue-700 disabled:opacity-50 text-sm">
+        {saving ? "保存中…" : "保存模板"}
+      </button>
+    </div>
+  );
+}
+
 
 export default function SettingsPage() {
   const navigate = useNavigate();
@@ -496,32 +576,9 @@ export default function SettingsPage() {
           </div>
         )}
 
-        {/* ========== 工程图分析模板 ========== */}
+        {/* ========== 识读模板管理 ========== */}
         {tab === "analysis" && (
-          <div className={sectionClass}>
-            <h2 className="text-lg font-semibold">工程图分析模板</h2>
-            <p className="text-xs text-gray-400">控制 LLM 如何从工程图中提取结构特征和量化数据</p>
-            {[
-              ["structure_analysis", "结构分析（参考图）", "告诉 LLM 怎么从参考图中提取视图和结构特征"],
-              ["structure_analysis_student", "结构分析（学生图）", "学生版，要求 LLM 如实报告不虚构"],
-              ["quantitative_analysis", "量化分析（参考图）", "告诉 LLM 怎么提取尺寸/公差/粗糙度等"],
-              ["quantitative_analysis_student", "量化分析（学生图）", "学生版，要求 LLM 如实报告不虚构"],
-            ].map(([key, label, desc]) => (
-              <div key={key}>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  {label}
-                  <span className="text-gray-400 font-normal ml-2 text-xs">— {desc}</span>
-                </label>
-                <textarea rows={6} value={promptTemplates[key] || ""}
-                  onChange={e => setPromptTemplates({ ...promptTemplates, [key]: e.target.value })}
-                  className="w-full border rounded px-3 py-2 text-sm font-mono" />
-              </div>
-            ))}
-            <button onClick={() => saveSection("prompt_templates", promptTemplates)} disabled={saving}
-              className="bg-blue-600 text-white px-4 py-1.5 rounded hover:bg-blue-700 disabled:opacity-50 text-sm">
-              {saving ? "保存中…" : "保存分析模板"}
-            </button>
-          </div>
+          <AnalysisTemplatesTab saving={saving} setMsg={setMsg} />
         )}
 
         {/* ========== 评分模板 ========== */}
@@ -530,22 +587,16 @@ export default function SettingsPage() {
             <h2 className="text-lg font-semibold">评分模板</h2>
             <p className="text-xs text-gray-400">评分流程中的引导语、修正提示词，以及新建题目时的默认评分标准</p>
 
-            <h3 className="text-sm font-medium text-gray-700 mt-4">评分 Prompt 引导语</h3>
-            {[
-              ["phase1_guide", "阶段一评分引导语", "放在参考/学生结构 JSON 之前，引导 LLM 做相似度对比"],
-              ["phase2_guide", "阶段二评分引导语", "放在参考/学生量化 JSON 之前，引导 LLM 做量化对比"],
-              ["phase2_correction_hint", "阶段二修正提示词", "修正 LLM 阶段二评分行为，帮助更准确量化对比"],
-            ].map(([key, label, desc]) => (
-              <div key={key}>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  {label}
-                  <span className="text-gray-400 font-normal ml-2 text-xs">— {desc}</span>
-                </label>
-                <textarea rows={4} value={promptTemplates[key] || ""}
-                  onChange={e => setPromptTemplates({ ...promptTemplates, [key]: e.target.value })}
-                  className="w-full border rounded px-3 py-2 text-sm font-mono" />
-              </div>
-            ))}
+            <h3 className="text-sm font-medium text-gray-700 mt-4">评分引导语</h3>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                评分引导语
+                <span className="text-gray-400 font-normal ml-2 text-xs">— 引导 LLM 综合对比学生图和参考图</span>
+              </label>
+              <textarea rows={3} value={promptTemplates["grading_guide"] || ""}
+                onChange={e => setPromptTemplates({ ...promptTemplates, grading_guide: e.target.value })}
+                className="w-full border rounded px-3 py-2 text-sm font-mono" />
+            </div>
 
             <h3 className="text-sm font-medium text-gray-700 mt-6">新建题目默认评分标准</h3>
             <p className="text-xs text-gray-400">创建新题目时自动填入的评分标准，教师可在每题中覆盖</p>

@@ -251,11 +251,25 @@ def _write_teacher_auth(data: dict) -> None:
 
 
 def _ensure_teacher_auth() -> None:
-    """确保教师密码文件存在，不存在则从 CSV 初始化（默认密码 MechCAD）"""
+    """确保教师密码文件存在，不存在则从 CSV 初始化（默认密码 MechCAD）。
+    CSV 为空时自动创建默认管理员 admin。"""
     auth_data = _read_teacher_auth()
     teachers = _read_teacher_csv()
     changed = False
     default_hash, default_salt = _hash_password(_TEACHER_DEFAULT_PASSWORD)
+
+    # 始终确保存在默认管理员 admin（即使 CSV 已有其他教师）
+    if "admin" not in auth_data:
+        auth_data["admin"] = {
+            "姓名": "管理员",
+            "工号": "A001",
+            "password_hash": default_hash,
+            "salt": default_salt,
+            "password_changed": False,
+        }
+        changed = True
+        logger.info("已创建默认管理员: admin / MechCAD")
+
     for t in teachers:
         username = (t.get("用户名") or "").strip()
         if not username:

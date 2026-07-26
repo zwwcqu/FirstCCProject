@@ -52,45 +52,97 @@ SETTINGS_FILE = DATA_DIR / "settings.json"          # 系统设置（LLM配置�
 SETTINGS_DEBUG_FILE = DATA_DIR / "settings_debug.json"  # 调试/运维参数
 QUESTIONS_FILE = DATA_DIR / "questions.json"        # 题目索引列表
 STUDENT_INFO_DIR = DATA_DIR / "StudentInfo"         # 学生名单目录
+TEMPLATES_DATA_DIR = DATA_DIR / "templates"         # 全局模板工作副本目录
+
+# 4 种工程图识读模板文件名
+TEMPLATE_NAMES = [
+    "零件图识读模板.txt",
+    "装配图识读模板.txt",
+    "平面图识读模板.txt",
+    "组合体三视图识读模板.txt",
+]
 
 # 文件校验常量
 PDF_MAGIC = b"%PDF"  # PDF 文件头魔数
 
 
-def _init_data_dir() -> None:
-    """首次启动时初始化数据目录：复制 settings 模版、创建空的 questions.json"""
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    STUDENT_INFO_DIR.mkdir(parents=True, exist_ok=True)
+def _copy_template_csv(template_name: str, subdir: str, target_name: str) -> None:
+    """复制 config/ 下的 CSV 模板到数据目录对应子目录（如果目标不存在）"""
+    src = CONFIG_DIR / template_name
+    dest_dir = DATA_DIR / subdir
+    dest = dest_dir / target_name
+    if src.exists() and not dest.exists():
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        import shutil
+        shutil.copy(src, dest)
+        logger.info(f"已复制模板: {template_name} → {subdir}/{target_name}")
 
-    # 清理残留的临时文件（写入时崩溃可能导致）
+
+def _init_data_dir() -> None:
+    """首次启动时初始化数据目录：创建子目录、复制模板、初始化配置文件"""
+    import shutil
+
+    # ── 1. 创建所有必要的子目录 ──
+    for d in [
+        DATA_DIR,
+        STUDENT_INFO_DIR,
+        TEMPLATES_DATA_DIR,
+        DATA_DIR / "TeacherInfo",
+        DATA_DIR / "TeacherAuth",
+        DATA_DIR / "StudentAuth",
+        DATA_DIR / ".sessions",
+        DATA_DIR / "backup",
+    ]:
+        d.mkdir(parents=True, exist_ok=True)
+
+    # ── 2. 清理残留临时文件 ──
     tmp_file = SETTINGS_FILE.with_suffix(".tmp")
     if tmp_file.exists():
         tmp_file.unlink()
         logger.info("已清理残留的 settings.tmp")
 
+    # ── 3. settings.json ──
     if not SETTINGS_FILE.exists():
         example = CONFIG_DIR / "settings.example.json"
         if example.exists():
-            import shutil
             shutil.copy(example, SETTINGS_FILE)
-            logger.info(f"已从模板创建 settings.json")
+            logger.info("已从模板创建 settings.json")
         else:
             raise FileNotFoundError(
                 f"缺少 settings 模版文件: {example}\n"
                 f"且数据目录下 settings.json 也不存在，无法启动"
             )
     else:
-        # 已有 settings.json → 自动补齐模板中新增的区块
         _migrate_settings()
 
+    # ── 4. settings_debug.json ──
     if not SETTINGS_DEBUG_FILE.exists():
         example_debug = CONFIG_DIR / "settings_debug.example.json"
         if example_debug.exists():
-            import shutil
             shutil.copy(example_debug, SETTINGS_DEBUG_FILE)
-            logger.info(f"已从模板创建 settings_debug.json")
+            logger.info("已从模板创建 settings_debug.json")
         else:
-            logger.warning(f"缺少调试配置模版: {example_debug}，将使用内置默认值")
+            logger.warning("缺少调试配置模版，将使用内置默认值")
+
+    # ── 5. questions.json ──
+    if not QUESTIONS_FILE.exists():
+        write_questions_index([])
+        logger.info("已创建空的 questions.json")
+
+    # ── 6. CSV 模板 → 数据目录 ──
+    _copy_template_csv("教师名单模版.csv", "TeacherInfo", "教师名单.csv")
+    _copy_template_csv("学生名单模版.csv", "StudentInfo", "_模版.csv")
+
+    # ── 7. 识读模板 → data/templates/ ──
+    for name in TEMPLATE_NAMES:
+        dest = TEMPLATES_DATA_DIR / name
+        if not dest.exists():
+            src = CONFIG_DIR / name
+            if src.exists():
+                shutil.copy(src, dest)
+                logger.info(f"已复制模板: {name}")
+            else:
+                logger.warning(f"模板文件缺失: {name}（config/ 目录中不存在）")
 
 
 def _migrate_settings() -> None:
@@ -103,7 +155,6 @@ def _migrate_settings() -> None:
     except Exception:
         return
 
-    # 需要自动补齐的区块（跳过已有字段和以 _ 开头的注释字段）
     migrate_keys = ["llm_params", "image_params", "grade_thresholds",
                     "prompt_templates", "scoring_templates"]
 
@@ -117,10 +168,6 @@ def _migrate_settings() -> None:
 
     if changed:
         write_settings(current)
-
-    if not QUESTIONS_FILE.exists():
-        write_questions_index([])
-        logger.info("已创建空的 questions.json")
 
 
 # ── Settings 读写 ────────────────────────────────────────
@@ -211,17 +258,13 @@ def get_grade_thresholds() -> list[tuple[float, str]]:
 
 
 def get_prompt_templates() -> dict:
-    """读取所有 LLM 提示词模板"""
+    """读取所有 LLM 提示词模板（评分引导语部分，分析模板已改为文件管理）"""
     defaults = {
-        "structure_analysis": "",
-        "structure_analysis_student": "",
-        "quantitative_analysis": "",
-        "quantitative_analysis_student": "",
-        "phase2_correction_hint": "",
-        "phase1_guide": "你是一位工程图批阅老师。请对比学生图和参考图的结构特征，评估图形相似度和画图质量。",
-        "phase2_guide": "你是一位机械检测工程师。请逐项对比两份量化分析数据，评估学生标注的完整性和正确性。",
+        "grading_guide": "你是一位工程图批阅老师。请对比学生图和参考图，从结构完整性和标注准确性两方面综合评分。",
     }
-    return {**defaults, **read_settings().get("prompt_templates", {})}
+    stored = read_settings().get("prompt_templates", {}) or {}
+    relevant = {k: v for k, v in stored.items() if k in defaults}
+    return {**defaults, **relevant}
 
 
 def get_scoring_templates() -> dict:
@@ -238,6 +281,48 @@ def get_debug_param(section: str, key: str, default=None):
     """读取调试/运维参数中的单个值"""
     debug = read_settings_debug()
     return debug.get(section, {}).get(key, default)
+
+
+# ── 模板读取 ───────────────────────────────────────────
+
+def get_template(template_name: str) -> str:
+    """读取全局模板内容：data/templates/ → config/ 回退"""
+    path = TEMPLATES_DATA_DIR / template_name
+    if path.exists():
+        return path.read_text(encoding="utf-8")
+    fallback = CONFIG_DIR / template_name
+    if fallback.exists():
+        return fallback.read_text(encoding="utf-8")
+    raise FileNotFoundError(f"找不到模板文件: {template_name}")
+
+
+def get_question_template(qid: str) -> str:
+    """读取题目的识读模板：data/{qid}/识读模板.txt → 默认零件图模板"""
+    path = DATA_DIR / qid / "识读模板.txt"
+    if path.exists():
+        return path.read_text(encoding="utf-8")
+    # 不存在则回退到全局零件图模板
+    return get_template("零件图识读模板.txt")
+
+
+def list_templates() -> dict[str, str]:
+    """列出所有全局模板的名称和内容"""
+    return {name: get_template(name) for name in TEMPLATE_NAMES}
+
+
+def save_template(template_name: str, content: str) -> None:
+    """保存全局模板到 data/templates/"""
+    if template_name not in TEMPLATE_NAMES:
+        raise ValueError(f"未知的模板名称: {template_name}")
+    TEMPLATES_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    (TEMPLATES_DATA_DIR / template_name).write_text(content, encoding="utf-8")
+
+
+def save_question_template(qid: str, content: str) -> None:
+    """保存题目的识读模板到 data/{qid}/识读模板.txt"""
+    qdir = DATA_DIR / qid
+    qdir.mkdir(parents=True, exist_ok=True)
+    (qdir / "识读模板.txt").write_text(content, encoding="utf-8")
 
 
 # ── 题目索引读写 ────────────────────────────────────────

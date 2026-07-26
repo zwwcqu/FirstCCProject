@@ -79,7 +79,7 @@ export function getStudentAnalysisResult(qid: string, name: string, studentId: s
   return api(`/api/student/analysis/${qid}?name=${encodeURIComponent(name)}&student_id=${encodeURIComponent(studentId)}&_t=${Date.now()}`);
 }
 
-// 新版：分步 upload → analyze → grade
+// 学生提交流程：upload → analyze(optional preview) → grade(combined analyze+grade)
 
 export function uploadSubmission(qid: string, name: string, studentId: string, file: File, mode: "test" | "submit" = "submit") {
   const fd = new FormData();
@@ -305,4 +305,34 @@ export function getTeacherPreviewUrl(qid: string, filename: string, ts?: number)
 export function getStudentPreviewUrl(qid: string, filename: string, ts?: number): string {
   const t = ts ? `?t=${ts}` : "";
   return `${BASE}/api/student/preview/${qid}/${filename}${t}`;
+}
+
+// ------- Templates -------
+export function getTemplates() {
+  return api("/api/teacher/templates");
+}
+
+export function updateTemplate(name: string, content: string) {
+  return api(`/api/teacher/templates/${encodeURIComponent(name)}`, {
+    method: "PUT",
+    body: JSON.stringify({ content }),
+  });
+}
+
+export function getQuestionTemplate(qid: string) {
+  return api(`/api/teacher/questions/${qid}/template`);
+}
+
+export function updateQuestionTemplate(qid: string, content: string) {
+  return api(`/api/teacher/questions/${qid}/template`, {
+    method: "PUT",
+    body: JSON.stringify({ content }),
+  });
+}
+
+export function selectQuestionTemplate(qid: string, type: string) {
+  return api(`/api/teacher/questions/${qid}/template`, {
+    method: "POST",
+    body: JSON.stringify({ type }),
+  });
 }

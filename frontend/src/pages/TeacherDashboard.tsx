@@ -28,6 +28,9 @@ import {
   supplementSubmission,
   refreshGrades,
   lookupRoster,
+  getTemplates,
+  getQuestionTemplate,
+  updateQuestionTemplate,
 } from "../api";
 import FloatingImageViewer from "../components/FloatingImageViewer";
 import FileButton from "../components/FileButton";
@@ -110,6 +113,9 @@ export default function TeacherDashboard() {
   const [reviewSid, setReviewSid] = useState<string | null>(null);
   const [reviewComment, setReviewComment] = useState("");
   const [reviewGrade, setReviewGrade] = useState("");
+  const [templateModalQid, setTemplateModalQid] = useState<string | null>(null);
+  const [templateModalContent, setTemplateModalContent] = useState("");
+  const [templateModalSaving, setTemplateModalSaving] = useState(false);
   const [studentAnalysis, setStudentAnalysis] = useState<any>(null);
 
   // 浮动图面板
@@ -143,6 +149,9 @@ export default function TeacherDashboard() {
   const [deadline, setDeadline] = useState("");               // 提交截止时间
   const [existingImages, setExistingImages] = useState<string[]>([]);
   const [existingRefPdf, setExistingRefPdf] = useState<string | null>(null);
+  const [templateType, setTemplateType] = useState("零件图识读模板.txt");
+  const [templateContent, setTemplateContent] = useState("");
+  const [templateLoaded, setTemplateLoaded] = useState(false);
 
   const imagePreviewUrl = useMemo(() => (image ? URL.createObjectURL(image) : null), [image]);
   useEffect(() => () => { if (imagePreviewUrl) URL.revokeObjectURL(imagePreviewUrl); }, [imagePreviewUrl]);
@@ -203,6 +212,17 @@ export default function TeacherDashboard() {
     return () => clearInterval(timer);
   }, [analyzingQid]);
 
+  // 新建题目：模板类型变化时自动加载模板到 textarea
+  useEffect(() => {
+    if (editingId || !showForm) return;
+    getTemplates().then((data: any) => {
+      if (data.templates && data.templates[templateType]) {
+        setTemplateContent(data.templates[templateType]);
+        setTemplateLoaded(true);
+      }
+    }).catch(() => {});
+  }, [templateType, showForm, editingId]);
+
   const resetForm = () => {
     setQid("");
     setTitle("");
@@ -217,6 +237,9 @@ export default function TeacherDashboard() {
     setDeadline("");
     setExistingImages([]);
     setExistingRefPdf(null);
+    setTemplateType("零件图识读模板.txt");
+    setTemplateContent("");
+    setTemplateLoaded(false);
     setEditingId(null);
     setShowForm(false);
   };
@@ -232,6 +255,8 @@ export default function TeacherDashboard() {
     fd.append("submission_type", submissionType);
     fd.append("classes", qClasses.join(","));
     fd.append("deadline", deadline);
+    fd.append("template_type", templateType);
+    fd.append("template_content", templateContent);
     if (image) fd.append("image", image);
     if (refPdf) fd.append("reference_pdf", refPdf);
     try {
@@ -255,6 +280,8 @@ export default function TeacherDashboard() {
     fd.append("submission_type", submissionType);
     fd.append("classes", qClasses.join(","));
     fd.append("deadline", deadline);
+    fd.append("template_type", templateType);
+    fd.append("template_content", templateContent);
     if (image) fd.append("image", image);
     if (refPdf) fd.append("reference_pdf", refPdf);
     try {
@@ -264,6 +291,29 @@ export default function TeacherDashboard() {
       if (refPdf) setAnalyzingQid(editingId);  // 换参考图后重新分析
     } catch (e: any) {
       alert(e.message);
+    }
+  };
+
+  const handleEditTemplate = async (qid: string) => {
+    try {
+      const tpl = await getQuestionTemplate(qid);
+      setTemplateModalContent(tpl.content || "");
+    } catch (_) {
+      setTemplateModalContent("");
+    }
+    setTemplateModalQid(qid);
+  };
+
+  const handleSaveTemplate = async () => {
+    if (!templateModalQid) return;
+    setTemplateModalSaving(true);
+    try {
+      await updateQuestionTemplate(templateModalQid, templateModalContent);
+      setTemplateModalQid(null);
+    } catch (e: any) {
+      alert("保存失败: " + e.message);
+    } finally {
+      setTemplateModalSaving(false);
     }
   };
 
@@ -294,6 +344,14 @@ export default function TeacherDashboard() {
       setRefPdf(null);
       setExistingImages(detail.files?.images || []);
       setExistingRefPdf(detail.files?.reference_pdf || null);
+      // 加载题目的识读模板
+      try {
+        const tpl = await getQuestionTemplate(q.id);
+        if (tpl.content) {
+          setTemplateContent(tpl.content);
+          setTemplateLoaded(true);
+        }
+      } catch (_) { /* 题目可能没有模板，使用默认 */ }
       setShowForm(true);
     } catch (e: any) {
       alert(e.message);
@@ -736,6 +794,7 @@ export default function TeacherDashboard() {
                         <>
                           <button onClick={() => handleEdit(q)} className="text-blue-600 hover:underline">编辑</button>
                           <button onClick={() => handleDelete(q.id)} className="text-red-600 hover:underline">删除</button>
+                          <button onClick={() => handleEditTemplate(q.id)} className="text-purple-600 hover:underline">模板</button>
                         </>
                       ) : (
                         <span className="text-gray-300 text-xs">只读</span>
@@ -891,7 +950,12 @@ export default function TeacherDashboard() {
         {showForm && (
           <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
             <div className="bg-white rounded-lg shadow-xl p-6 w-full max-w-lg mx-4 max-h-[90vh] overflow-auto">
-              <h2 className="text-lg font-semibold mb-4">{editingId ? "编辑题目" : "新增题目"}</h2>
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="text-lg font-semibold">{editingId ? "编辑题目" : "新增题目"}</h2>
+                <button onClick={resetForm}
+                  className="text-gray-400 hover:text-gray-600 text-xl leading-none px-2 py-1 rounded hover:bg-gray-100"
+                  title="关闭不保存">✕</button>
+              </div>
               <div className="space-y-3">
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">题号</label>
@@ -948,6 +1012,44 @@ export default function TeacherDashboard() {
                     placeholder="例如：零件材料为HT200、表面粗糙度Ra6.3、未注倒角C1等"
                   />
                 </div>
+                {/* 识读模板 */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">识读模板</label>
+                  <div className="flex gap-2 mb-2">
+                    <select value={templateType}
+                      onChange={(e) => setTemplateType(e.target.value)}
+                      className="border rounded px-3 py-1.5 text-sm">
+                      <option value="零件图识读模板.txt">零件图</option>
+                      <option value="装配图识读模板.txt">装配图</option>
+                      <option value="平面图识读模板.txt">平面图</option>
+                      <option value="组合体三视图识读模板.txt">组合体三视图</option>
+                    </select>
+                    {!editingId && (
+                      <button type="button" onClick={async () => {
+                        try {
+                          const data = await getTemplates();
+                          if (data.templates && data.templates[templateType]) {
+                            setTemplateContent(data.templates[templateType]);
+                          }
+                        } catch (_) {}
+                      }}
+                        className="text-xs bg-gray-100 text-gray-600 px-2 py-1 rounded hover:bg-gray-200">
+                        重置为默认
+                      </button>
+                    )}
+                  </div>
+                  <textarea
+                    value={templateContent}
+                    onChange={(e) => { setTemplateContent(e.target.value); setTemplateLoaded(true); }}
+                    rows={10}
+                    className="w-full border rounded px-3 py-2 text-sm font-mono"
+                    placeholder="选择模板类型后自动加载..."
+                  />
+                  <p className="text-xs text-gray-400 mt-0.5">
+                    LLM 根据此模板从工程图中提取信息。创建后可随时修改。
+                  </p>
+                </div>
+
                 <div className="grid grid-cols-2 gap-3">
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-1">适用班别</label>
@@ -1605,6 +1707,30 @@ export default function TeacherDashboard() {
           </div>
         )}
       </main>
+
+      {/* 编辑模板弹窗 */}
+      {templateModalQid && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg shadow-xl p-6 w-full max-w-2xl mx-4 max-h-[90vh] overflow-auto">
+            <h2 className="text-lg font-semibold mb-2">编辑识读模板 — 题{templateModalQid}</h2>
+            <p className="text-xs text-gray-400 mb-4">修改仅影响此题目的分析和评分，不影响全局默认模板</p>
+            <textarea
+              value={templateModalContent}
+              onChange={(e) => setTemplateModalContent(e.target.value)}
+              rows={22}
+              className="w-full border rounded px-3 py-2 text-sm font-mono"
+            />
+            <div className="flex justify-end gap-3 mt-4">
+              <button onClick={() => setTemplateModalQid(null)}
+                className="px-4 py-2 border rounded hover:bg-gray-50">取消</button>
+              <button onClick={handleSaveTemplate} disabled={templateModalSaving}
+                className="bg-purple-600 text-white px-4 py-2 rounded hover:bg-purple-700 disabled:opacity-50">
+                {templateModalSaving ? "保存中…" : "保存模板"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
     </>
   );

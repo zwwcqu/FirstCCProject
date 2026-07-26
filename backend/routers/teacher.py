@@ -44,7 +44,7 @@ from services.question_service import (
     sync_submissions_from_disk,
     _sanitize_filename_part,
 )
-from services.grade_service import read_all_grades, get_grades_csv_path, FIELDNAMES, save_grade, get_student_grade, save_result_json, remove_grade
+from services.grade_service import read_all_grades, get_grades_csv_path, FIELDNAMES, save_grade, get_student_grade, remove_grade
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/teacher", tags=["teacher"])
@@ -87,6 +87,7 @@ def _run_reference_analysis(qid: str) -> None:
     """
     from services.llm_service import analyze_merged
     from services.task_queue import enqueue, PRIORITY_TEACHER
+    from config import get_question_template
 
     # 立即删除旧分析文件，防止查询接口返回旧数据（新分析完成前返回"未就绪"）
     qdir = get_question_dir(qid)
@@ -106,15 +107,14 @@ def _run_reference_analysis(qid: str) -> None:
             return
 
         kn = get_question_files(qid).get("knowledge", "")
-        struct_tpl = CONFIG_DIR / "结构分析模版.txt"
-        quant_tpl = CONFIG_DIR / "量化分析模版.txt"
+        template_text = get_question_template(qid)
 
-        logger.info(f"[{qid}] 开始参考图合并分析（结构+量化）…")
-        analysis = analyze_merged(ref_pdf, struct_tpl, quant_tpl, knowledge=kn)
-        structure = analysis["structure"]
-        # 校验：结构分析结果不能为空
-        if len(structure.get("views", [])) == 0 and len(structure.get("features", [])) == 0:
-            logger.error(f"[{qid}] 参考图结构分析结果为空（0视图、0特征），请检查模型是否支持图像识别")
+        logger.info(f"[{qid}] 开始参考图工程图识读…")
+        analysis = analyze_merged(ref_pdf, template_text, knowledge=kn)
+        # 校验：工程图概述不能为空
+        overview = analysis.get("工程图概述", "")
+        if not overview or len(str(overview)) < 10:
+            logger.error(f"[{qid}] 参考图识读结果为空（工程图概述过短），请检查模型是否支持图像识别")
             return
 
         save_reference_analysis(qid, analysis)
@@ -198,6 +198,8 @@ async def create_question_handler(
     submission_type: str = Form("pdf"),                  # 学生提交文件类型：pdf / image
     classes: str = Form(""),                             # 适用班别（逗号分隔）
     deadline: str = Form(""),                            # 提交截止时间 ISO 格式
+    template_type: str = Form("零件图识读模板.txt"),      # 识读模板类型
+    template_content: str = Form(""),                    # 自定义模板内容（非空则覆盖）
 ):
     """新增题目"""
     _require_auth(request)
@@ -205,7 +207,8 @@ async def create_question_handler(
     try:
         entry = create_question(qid, title, description, phase1_criteria, phase2_criteria,
                                 knowledge, submission_type, teacher=teacher, classes=classes,
-                                deadline=deadline)
+                                deadline=deadline, template_type=template_type,
+                                template_content=template_content)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     if image and image.filename:
@@ -232,6 +235,7 @@ async def update_question_handler(
     submission_type: str = Form("pdf"),                  # 学生提交文件类型：pdf / image
     classes: str = Form(""),                             # 适用班别（逗号分隔）
     deadline: str = Form(""),                            # 提交截止时间 ISO 格式
+    template_content: str = Form(""),                    # 自定义模板内容（非空则保存）
 ):
     """编辑已有题目"""
     _require_auth(request)
@@ -244,6 +248,10 @@ async def update_question_handler(
         raise HTTPException(status_code=403, detail=str(e))
     if entry is None:
         raise HTTPException(status_code=404, detail="题目不存在")
+    # 如果提交了模板内容，同步保存
+    if template_content.strip():
+        from config import save_question_template
+        save_question_template(qid, template_content)
     if image and image.filename:
         img_bytes = await image.read()
         save_question_image(qid, img_bytes, image.filename)
@@ -387,8 +395,9 @@ async def batch_grade(request: Request, qid: str):
     if not student_ids:
         raise HTTPException(status_code=400, detail="请选择至少一名学生")
 
-    from services.llm_service import run_two_phase_grading, analyze_merged
+    from services.llm_service import analyze_and_grade
     from services.task_queue import enqueue, PRIORITY_BATCH
+    from config import get_question_template
 
     # 先同步磁盘文件到 submissions.json（补充提交的学生可能不在记录中）
     from services.question_service import sync_submissions_from_disk
@@ -404,8 +413,7 @@ async def batch_grade(request: Request, qid: str):
     knowledge = files.get("knowledge", "")
     qdir = get_question_dir(qid)
     ref_pdf = qdir / "参考工程图.pdf"
-    struct_tpl = CONFIG_DIR / "结构分析_学生.txt"
-    quant_tpl = CONFIG_DIR / "量化分析_学生.txt"
+    template_text = get_question_template(qid)
 
     def _grade_one(sid: str):
         from services.question_service import find_student_class, update_submission_record, save_student_analysis, reject_if_fake
@@ -418,48 +426,26 @@ async def batch_grade(request: Request, qid: str):
         if student_path is None:
             return
 
-        # 如果还没有分析，先跑分析
-        stu_analysis = get_student_analysis(qid, sid, name)
-        if stu_analysis is None:
-            try:
-                # 虚假作业判别
-                if reject_if_fake(qid, sid, name, student_path, student_path.stem):
-                    return
+        # 虚假作业判别
+        if reject_if_fake(qid, sid, name, student_path, student_path.stem):
+            return
 
-                update_submission_record(qid, sid, name, student_path.stem, "analyzing")
-                analysis = analyze_merged(student_path, struct_tpl, quant_tpl, knowledge=knowledge)
-                stu_analysis = {"structure": analysis["structure"], "quantitative": analysis["quantitative"]}
-                # 保留元数据到 student analysis
-                if analysis.get("_model"):
-                    stu_analysis["_model"] = analysis["_model"]
-                if analysis.get("_usage"):
-                    stu_analysis["_usage"] = analysis["_usage"]
-                save_student_analysis(qid, sid, name, stu_analysis)
-                update_submission_record(qid, sid, name, student_path.stem, "analyzed")
-            except Exception as e:
-                logger.error(f"[{qid}] 自动分析失败 {name}({sid}): {e}")
-                update_submission_record(qid, sid, name, student_path.stem,
-                                         "analyze_failed", error=str(e))
-                return
-
-        # 标记评分中
-        update_submission_record(qid, sid, name, student_path.stem, "grading")
+        # 单次 LLM 调用：识读 + 评分
+        update_submission_record(qid, sid, name, student_path.stem, "analyzing")
         try:
-            result = run_two_phase_grading(
-                ref_struct=ref_analysis["structure"],
-                ref_quant=ref_analysis["quantitative"],
-                stu_struct=stu_analysis["structure"],
-                stu_quant=stu_analysis["quantitative"],
+            result = analyze_and_grade(
+                image_path=student_path,
+                template_text=template_text,
+                ref_analysis=ref_analysis,
                 phase1_criteria=phase1_criteria,
                 phase2_criteria=phase2_criteria,
                 ref_image_path=ref_pdf,
-                stu_image_path=student_path,
                 knowledge=knowledge,
             )
+            save_student_analysis(qid, sid, name, result)
             grade = result.get("grade", "N/A")
             class_name = find_student_class(name, sid)
             save_grade(qid, sid, name, grade, result, class_name)
-            save_result_json(qid, sid, name, result)
             update_submission_record(qid, sid, name, student_path.stem,
                                      "graded", grade=grade,
                                      total_score=str(result.get("total_score", "")))
@@ -1255,3 +1241,61 @@ async def lookup_student(request: Request, name: str = "", student_id: str = "")
         return {"found": False, "class": ""}
     class_name = find_student_class(name.strip(), student_id.strip())
     return {"found": True, "class": class_name}
+
+
+# ── 模板管理 API ─────────────────────────────────────────
+
+@router.get("/templates")
+async def get_templates(request: Request):
+    """列出所有全局模板的名称和内容"""
+    _require_auth(request)
+    from config import list_templates
+    return {"templates": list_templates()}
+
+
+@router.put("/templates/{template_name}")
+async def update_template(request: Request, template_name: str, body: dict):
+    """保存单个全局模板"""
+    _require_auth(request)
+    from config import save_template
+    content = body.get("content", "")
+    try:
+        save_template(template_name, content)
+        return {"ok": True}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/questions/{qid}/template")
+async def get_q_template(request: Request, qid: str):
+    """获取题目的识读模板内容"""
+    _require_auth(request)
+    from config import get_question_template
+    content = get_question_template(qid)
+    return {"content": content}
+
+
+@router.put("/questions/{qid}/template")
+async def update_q_template(request: Request, qid: str, body: dict):
+    """修改题目的识读模板"""
+    _require_auth(request)
+    from config import save_question_template
+    content = body.get("content", "")
+    if not content:
+        raise HTTPException(status_code=400, detail="模板内容不能为空")
+    save_question_template(qid, content)
+    return {"ok": True}
+
+
+@router.post("/questions/{qid}/template")
+async def select_q_template(request: Request, qid: str, body: dict):
+    """选择/更换题目的模板类型（从 data/templates/ 复制到题目目录）"""
+    _require_auth(request)
+    from config import get_template, save_question_template, TEMPLATE_NAMES
+    ttype = body.get("type", "")
+    if ttype not in TEMPLATE_NAMES:
+        raise HTTPException(status_code=400,
+                           detail=f"未知模板类型: {ttype}，可选: {TEMPLATE_NAMES}")
+    content = get_template(ttype)
+    save_question_template(qid, content)
+    return {"ok": True, "content": content}
