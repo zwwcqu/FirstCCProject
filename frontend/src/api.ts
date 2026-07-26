@@ -283,6 +283,10 @@ export function clearQueue() {
   return api("/api/teacher/settings/queue-clear", { method: "POST" });
 }
 
+export function rejectSubmission(qid: string, studentId: string) {
+  return api(`/api/teacher/grades/${qid}/reject/${studentId}`, { method: "POST" });
+}
+
 export function downloadRosterTemplate() {
   window.open(`${BASE}/api/teacher/roster/template`, "_blank");
 }

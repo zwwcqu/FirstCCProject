@@ -244,13 +244,18 @@ def get_image_params() -> dict:
     return {**defaults, **read_settings().get("image_params", {})}
 
 
+def _clean_settings(data: dict) -> dict:
+    """过滤 settings.json 中以 _ 开头的注释字段"""
+    return {k: v for k, v in data.items() if not k.startswith("_")}
+
+
 def get_grade_thresholds() -> list[tuple[float, str]]:
     """
     读取评分等级阈值，返回从高到低排序的 (分数, 等级) 列表。
     settings.json 中为 {"A+": 90, "A": 85, ...} 格式。
     """
     defaults = {"A+": 90, "A": 85, "B+": 80, "B": 75, "C+": 68.75, "C": 62.5, "D+": 56.25, "D": 50}
-    thresholds = read_settings().get("grade_thresholds", {}) or {}
+    thresholds = _clean_settings(read_settings().get("grade_thresholds", {}) or {})
     merged = {**defaults, **thresholds}
     # 按分数降序排列
     sorted_items = sorted(merged.items(), key=lambda x: float(x[1]), reverse=True)
@@ -262,7 +267,7 @@ def get_prompt_templates() -> dict:
     defaults = {
         "grading_guide": "你是一位工程图批阅老师。请对比学生图和参考图，从结构完整性和标注准确性两方面综合评分。",
     }
-    stored = read_settings().get("prompt_templates", {}) or {}
+    stored = _clean_settings(read_settings().get("prompt_templates", {}) or {})
     relevant = {k: v for k, v in stored.items() if k in defaults}
     return {**defaults, **relevant}
 
@@ -273,7 +278,7 @@ def get_scoring_templates() -> dict:
         "phase1": "较为宽松比较相似情况. 和参考图形整体比较, 很相似给100%, 一般相似给90%, 不怎么相似给80%, 有点点相似给60%, 绝不相似给0%.",
         "phase2": "1. 尺寸相似率占总分40%\n2. 尺寸公差相似率占总分20%\n3. 粗糙度相似率占总分20%\n4. 形位公差相似率占总分10%\n5. 技术要求相似度占总分10%",
     }
-    stored = read_settings().get("scoring_templates", {}) or {}
+    stored = _clean_settings(read_settings().get("scoring_templates", {}) or {})
     return {**defaults, **stored}
 
 

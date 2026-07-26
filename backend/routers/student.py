@@ -43,6 +43,7 @@ from services.llm_service import (
     analyze_merged,
     analyze_merged_bytes,
     analyze_and_grade,
+    grade_combined,
 )
 from services.grade_service import save_grade, get_student_grade, read_all_grades
 from services.submit_status import set_status, get_status, set_file_data, get_file_data
@@ -281,10 +282,13 @@ async def upload_submission(
     is_test = mode == "test"
 
     if not is_test:
-        from services.question_service import check_roster
+        from services.question_service import check_roster, get_submission_record as _get_rec
         ok, msg = check_roster(name, student_id)
         if not ok:
             raise HTTPException(status_code=403, detail=msg)
+        rec = _get_rec(qid, student_id)
+        if rec and rec.get("status") == "submitted":
+            raise HTTPException(status_code=400, detail="作业已提交，无法修改。请等待教师打回")
 
     file_bytes = await file.read()
     fname = file.filename or "submission.pdf"
@@ -307,12 +311,26 @@ async def upload_submission(
     if is_test:
         from services.llm_service import bytes_to_base64
         bytes_to_base64(file_bytes, fname)
+        # 清理旧的分析和评分文件
+        from services.question_service import get_student_dir, _sanitize_filename_part
+        student_dir = get_student_dir(qid)
+        safe_name = _sanitize_filename_part(name)
+        safe_id = _sanitize_filename_part(student_id)
+        stem = f"{safe_name}_{safe_id}"
+        if student_dir.exists():
+            for old in [f"{stem}_分析.json", f"{stem}_评分.json", f"{stem}.json"]:
+                (student_dir / old).unlink(missing_ok=True)
+
+        if not is_test:
+            from services.question_service import update_submission_record
+            update_submission_record(qid, student_id, name, Path(fname).stem, "uploaded")
         set_file_data(qid, name, student_id, file_bytes, fname)
         set_status(qid, name, student_id, "upload", "done", student_filename=fname)
         return {"ok": True, "student_filename": fname}
     else:
-        from services.question_service import submit_student_work
+        from services.question_service import submit_student_work, update_submission_record
         saved_name = submit_student_work(qid, student_id, name, file_bytes, fname)
+        update_submission_record(qid, student_id, name, Path(saved_name).stem, "uploaded")
         set_status(qid, name, student_id, "upload", "done", student_filename=saved_name)
         logger.info(f"[{qid}] 文件已保存: {name}({student_id}) → {saved_name}")
         return {"ok": True, "student_filename": saved_name}
@@ -327,7 +345,7 @@ def _run_analyze(
     template_text: str,
     knowledge: str = "",
 ):
-    """后台线程：结构分析 → 量化分析 → 保存"""
+    """后台线程：工程图识读 → 保存"""
     try:
         set_status(qid, name, student_id, "analyze", "analyzing")
         if is_test:
@@ -427,7 +445,7 @@ def _run_grade(
     is_test: bool,
     stu_data: bytes | None, stu_filename: str,
 ):
-    """后台线程：单次 LLM 调用完成识读 + 阶段一 + 阶段二评分"""
+    """后台线程：评分。已有分析则直接用，否则先做识读。"""
     set_status(qid, name, student_id, "grade", "processing")
     from services.question_service import update_submission_record
 
@@ -453,18 +471,45 @@ def _run_grade(
         from config import get_question_template
         template_text = get_question_template(qid)
 
+        # 检查是否已有分析结果（预览分析已做过）
+        stu_analysis = get_student_analysis(qid, student_id, name)
+
         if is_test:
             if not stu_data:
-                raise RuntimeError("测试模式文件数据丢失，请重新上传分析")
-            # 测试模式：先写入临时文件再用 analyze_and_grade
+                raise RuntimeError("测试模式文件数据丢失，请重新上传")
             import tempfile
             ext = Path(stu_filename).suffix or ".png"
             with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
                 tmp.write(stu_data)
                 tmp_path = Path(tmp.name)
-            try:
+            stu_path = tmp_path
+        else:
+            stu_path = get_student_submission_path(qid, student_id, name)
+            if stu_path is None:
+                raise RuntimeError("学生提交文件不存在，请重新上传")
+            # 虚假作业判别
+            if reject_if_fake(qid, student_id, name, stu_path,
+                              Path(stu_filename).stem if stu_filename else ""):
+                set_status(qid, name, student_id, "grade", "done")
+                return
+
+        try:
+            if stu_analysis is not None:
+                # 已有分析 → 只做评分
+                logger.info(f"[{qid}] 已有分析结果，直接评分")
+                result = grade_combined(
+                    stu_analysis=stu_analysis,
+                    ref_analysis=ref_analysis,
+                    phase1_criteria=phase1_criteria,
+                    phase2_criteria=phase2_criteria,
+                    ref_image_path=ref_pdf,
+                    stu_image_path=stu_path,
+                    knowledge=knowledge,
+                )
+            else:
+                # 无分析 → 识读+评分一起做
                 result = analyze_and_grade(
-                    image_path=tmp_path,
+                    image_path=stu_path,
                     template_text=template_text,
                     ref_analysis=ref_analysis,
                     phase1_criteria=phase1_criteria,
@@ -472,28 +517,12 @@ def _run_grade(
                     ref_image_path=ref_pdf,
                     knowledge=knowledge,
                 )
-            finally:
-                tmp_path.unlink(missing_ok=True)
-        else:
-            student_path = get_student_submission_path(qid, student_id, name)
-            if student_path is None:
-                raise RuntimeError("学生提交文件不存在，请重新上传")
-
-            # 虚假作业判别
-            if reject_if_fake(qid, student_id, name, student_path,
-                              Path(stu_filename).stem if stu_filename else ""):
-                set_status(qid, name, student_id, "grade", "done")
-                return
-
-            result = analyze_and_grade(
-                image_path=student_path,
-                template_text=template_text,
-                ref_analysis=ref_analysis,
-                phase1_criteria=phase1_criteria,
-                phase2_criteria=phase2_criteria,
-                ref_image_path=ref_pdf,
-                knowledge=knowledge,
-            )
+        finally:
+            if is_test:
+                try:
+                    stu_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
 
         # 校验
         overview = result.get("工程图概述", "")
@@ -502,21 +531,26 @@ def _run_grade(
 
         grade = result.get("grade", "N/A")
         if not is_test:
-            # 保存完整结果（分析+评分）到一份 JSON
-            save_student_analysis(qid, student_id, name, result)
-            # 保存到成绩 CSV（供教师表格查看）
+            from services.question_service import find_student_class, save_student_grade
+            # 识读数据存 _分析.json（新分析才有，grade_combined 路径无）
+            if "工程图概述" in result and not stu_analysis:
+                save_student_analysis(qid, student_id, name, result)
+            # 评分数据存 _评分.json
+            save_student_grade(qid, student_id, name, result)
+            # CSV
             class_name = find_student_class(name, student_id)
             save_grade(qid, student_id, name, grade, result, class_name)
+            # 标记为已提交，加锁
             update_submission_record(qid, student_id, name,
                                      Path(stu_filename).stem,
-                                     "graded", grade=grade,
+                                     "submitted", grade=grade,
                                      total_score=str(result.get("total_score", "")))
 
-        set_status(qid, name, student_id, "grade", "done",
-                   extra={"grade": grade, "total": str(result.get("total_score", ""))})
+        set_status(qid, name, student_id, "grade", "done")
         logger.info(f"[{qid}] 合并分析+评分完成: {name}({student_id}) → {grade}")
     except Exception as e:
-        logger.error(f"[{qid}] 合并分析+评分失败: {e}")
+        import traceback
+        logger.error(f"[{qid}] 合并分析+评分失败: {e}\n{traceback.format_exc()}")
         set_status(qid, name, student_id, "grade", "error", str(e))
         if not is_test:
             from services.question_service import update_submission_record
@@ -552,8 +586,10 @@ async def grade_submission_handler(
         rec = _get_record(qid, student_id)
         if not rec:
             raise HTTPException(status_code=400, detail="请先上传作业文件")
-        if rec.get("status") not in ("analyzed", "graded"):
-            raise HTTPException(status_code=400, detail="请先完成图面分析")
+        if rec.get("status") == "submitted":
+            raise HTTPException(status_code=400, detail="作业已提交，无法再次提交。请等待教师打回")
+        if rec.get("status") not in ("uploaded", "analyzed", "graded", "grade_failed"):
+            raise HTTPException(status_code=400, detail="请先上传作业文件")
         student_path = get_student_submission_path(qid, student_id, name)
         if student_path is None:
             raise HTTPException(status_code=400, detail="提交文件丢失，请重新上传")

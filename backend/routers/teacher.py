@@ -23,7 +23,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Request, Response, UploadFile, File, Form
 
 from auth import verify_password, create_session, validate_session, destroy_session, change_password, MIN_PASSWORD_LENGTH, TEACHER_COOKIE
-from config import CONFIG_DIR, PDF_MAGIC, get_question_dir, read_settings, write_settings
+from config import CONFIG_DIR, PDF_MAGIC, get_question_dir, read_settings, write_settings, read_questions_index
 from services.question_service import (
     list_questions,
     create_question,
@@ -395,7 +395,7 @@ async def batch_grade(request: Request, qid: str):
     if not student_ids:
         raise HTTPException(status_code=400, detail="请选择至少一名学生")
 
-    from services.llm_service import analyze_and_grade
+    from services.llm_service import analyze_and_grade, grade_combined
     from services.task_queue import enqueue, PRIORITY_BATCH
     from config import get_question_template
 
@@ -430,19 +430,37 @@ async def batch_grade(request: Request, qid: str):
         if reject_if_fake(qid, sid, name, student_path, student_path.stem):
             return
 
-        # 单次 LLM 调用：识读 + 评分
+        # 检查是否有已有分析
+        stu_analysis = get_student_analysis(qid, sid, name)
+
         update_submission_record(qid, sid, name, student_path.stem, "analyzing")
         try:
-            result = analyze_and_grade(
-                image_path=student_path,
-                template_text=template_text,
-                ref_analysis=ref_analysis,
-                phase1_criteria=phase1_criteria,
-                phase2_criteria=phase2_criteria,
-                ref_image_path=ref_pdf,
-                knowledge=knowledge,
-            )
-            save_student_analysis(qid, sid, name, result)
+            if stu_analysis is not None:
+                result = grade_combined(
+                    stu_analysis=stu_analysis,
+                    ref_analysis=ref_analysis,
+                    phase1_criteria=phase1_criteria,
+                    phase2_criteria=phase2_criteria,
+                    ref_image_path=ref_pdf,
+                    stu_image_path=student_path,
+                    knowledge=knowledge,
+                )
+            else:
+                result = analyze_and_grade(
+                    image_path=student_path,
+                    template_text=template_text,
+                    ref_analysis=ref_analysis,
+                    phase1_criteria=phase1_criteria,
+                    phase2_criteria=phase2_criteria,
+                    ref_image_path=ref_pdf,
+                    knowledge=knowledge,
+                )
+            # 识读数据（analyze_and_grade 路径才有新分析）
+            if "工程图概述" in result and not stu_analysis:
+                save_student_analysis(qid, sid, name, result)
+            # 评分数据
+            from services.question_service import save_student_grade
+            save_student_grade(qid, sid, name, result)
             grade = result.get("grade", "N/A")
             class_name = find_student_class(name, sid)
             save_grade(qid, sid, name, grade, result, class_name)
@@ -498,6 +516,21 @@ async def batch_clear_grades(request: Request, qid: str):
             cleared += 1
 
     return {"ok": True, "cleared": cleared}
+
+
+@router.post("/grades/{qid}/reject/{student_id}")
+async def reject_submission(request: Request, qid: str, student_id: str):
+    """打回学生提交，允许重新提交"""
+    _require_auth(request)
+    from services.question_service import get_submission_record, update_submission_record
+    rec = get_submission_record(qid, student_id)
+    if not rec:
+        raise HTTPException(status_code=404, detail="未找到提交记录")
+    name = rec.get("name", student_id)
+    stem = rec.get("filename", "")
+    update_submission_record(qid, student_id, name, stem, "rejected")
+    logger.info(f"[{qid}] 已打回: {name}({student_id})")
+    return {"ok": True}
 
 
 @router.post("/grades/{qid}/supplement-submission")

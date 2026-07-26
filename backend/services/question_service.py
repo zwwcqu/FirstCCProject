@@ -551,48 +551,42 @@ def clear_student_data(qid: str, student_id: str, name: str) -> str:
     return stem
 
 
-def save_student_result(qid: str, student_id: str, name: str, result: dict) -> None:
-    """
-    保存学生的完整批阅结果（分析+评分），写入 data/{qid}/student/{姓名}_{学号}.json。
-    同时清理旧的分离格式文件。
-    """
+def save_student_analysis(qid: str, student_id: str, name: str, analysis: dict) -> None:
+    """保存识读分析数据 → data/{qid}/student/{姓名}_{学号}_分析.json"""
     student_dir = get_student_dir(qid)
     student_dir.mkdir(parents=True, exist_ok=True)
     safe_name = _sanitize_filename_part(name)
     safe_id = _sanitize_filename_part(student_id)
-    path = student_dir / f"{safe_name}_{safe_id}.json"
-    # 清理旧格式文件
-    for old_suffix in ("_分析.json", "_结构分析.json", "_量化分析.json", "_结果.json"):
-        old_path = student_dir / f"{safe_name}_{safe_id}{old_suffix}"
-        try:
-            old_path.unlink(missing_ok=True)
-        except Exception:
-            pass
-    path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
-    logger.info(f"学生批阅结果已保存: [{qid}] {name}({student_id})")
+    stem = f"{safe_name}_{safe_id}"
+    (student_dir / f"{stem}_分析.json").write_text(
+        json.dumps(analysis, ensure_ascii=False, indent=2), encoding="utf-8")
+    # 清理旧格式
+    for old in (f"{stem}_结构分析.json", f"{stem}_量化分析.json"):
+        (student_dir / old).unlink(missing_ok=True)
+    logger.info(f"学生识读结果已保存: [{qid}] {name}({student_id})")
 
 
-def get_student_result(qid: str, student_id: str, name: str) -> dict | None:
-    """
-    读取学生的完整批阅结果（分析+评分），返回完整 dict 或 None。
-    向后兼容旧的 _分析.json 和分离格式。
-    """
+def save_student_grade(qid: str, student_id: str, name: str, grade_result: dict) -> None:
+    """保存评分结果 → data/{qid}/student/{姓名}_{学号}_评分.json"""
+    student_dir = get_student_dir(qid)
+    student_dir.mkdir(parents=True, exist_ok=True)
+    safe_name = _sanitize_filename_part(name)
+    safe_id = _sanitize_filename_part(student_id)
+    stem = f"{safe_name}_{safe_id}"
+    (student_dir / f"{stem}_评分.json").write_text(
+        json.dumps(grade_result, ensure_ascii=False, indent=2), encoding="utf-8")
+    logger.info(f"学生评分结果已保存: [{qid}] {name}({student_id})")
+
+
+def get_student_analysis(qid: str, student_id: str, name: str) -> dict | None:
+    """读取识读分析数据。兼容旧格式。"""
     student_dir = get_student_dir(qid)
     safe_name = _sanitize_filename_part(name)
     safe_id = _sanitize_filename_part(student_id)
     stem = f"{safe_name}_{safe_id}"
-
-    # 优先新格式：{name}_{id}.json
-    path = student_dir / f"{stem}.json"
-    if path.exists():
-        return json.loads(path.read_text(encoding="utf-8"))
-
-    # 向后兼容：{name}_{id}_分析.json
-    alt = student_dir / f"{stem}_分析.json"
-    if alt.exists():
-        return json.loads(alt.read_text(encoding="utf-8"))
-
-    # 向后兼容：旧分离格式
+    for path in [student_dir / f"{stem}_分析.json", student_dir / f"{stem}.json"]:
+        if path.exists():
+            return json.loads(path.read_text(encoding="utf-8"))
     old_struct = student_dir / f"{stem}_结构分析.json"
     old_quant = student_dir / f"{stem}_量化分析.json"
     if old_struct.exists() and old_quant.exists():
@@ -603,9 +597,16 @@ def get_student_result(qid: str, student_id: str, name: str) -> dict | None:
     return None
 
 
-# 别名，保持向后兼容
-save_student_analysis = save_student_result
-get_student_analysis = get_student_result
+def get_student_grade_json(qid: str, student_id: str, name: str) -> dict | None:
+    """读取评分结果 JSON"""
+    student_dir = get_student_dir(qid)
+    safe_name = _sanitize_filename_part(name)
+    safe_id = _sanitize_filename_part(student_id)
+    stem = f"{safe_name}_{safe_id}"
+    path = student_dir / f"{stem}_评分.json"
+    if path.exists():
+        return json.loads(path.read_text(encoding="utf-8"))
+    return None
 
 
 def _read_csv(path: Path) -> list[dict]:

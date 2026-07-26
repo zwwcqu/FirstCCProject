@@ -556,56 +556,54 @@ def grade_phase1(
 
 
 def _simplify_quantitative(data: dict) -> dict:
-    """精简量化分析 JSON，从新格式中提取评分所需字段，减少 token 消耗。"""
+    """精简量化分析 JSON，从新格式中提取评分所需字段，减少 token 消耗。容错 LLM 返回的非标准格式。"""
     simplified: dict = {}
 
-    # 尺寸标注：直接使用新格式的"尺寸"字段
-    dims = data.get("尺寸", [])
+    def _safe_items(arr, key_map: dict):
+        """安全提取数组项，容错字符串/非dict元素"""
+        result = []
+        for item in (arr or []):
+            if isinstance(item, str):
+                result.append({list(key_map.values())[0]: item} if key_map else {"value": item})
+            elif isinstance(item, dict):
+                result.append({vk: item.get(vk, "") for vk in key_map.values()})
+        return result
+
+    # 尺寸标注
+    dims = data.get("尺寸", []) or []
     if dims:
         simplified["尺寸数量"] = len(dims)
-        simplified["尺寸标注"] = [
-            {"类别": d.get("类别", ""), "数值": d.get("数值", "")}
-            for d in dims
-        ]
+        simplified["尺寸标注"] = _safe_items(dims, {"类别": "类别", "数值": "数值"})
 
     # 表面粗糙度
-    roughness = data.get("表面粗糙度", [])
+    roughness = data.get("表面粗糙度", []) or []
     if roughness:
         simplified["粗糙度数量"] = len(roughness)
-        simplified["表面粗糙度"] = [
-            {"类别": r.get("类别", ""), "数值": r.get("数值", "")}
-            for r in roughness
-        ]
+        simplified["表面粗糙度"] = _safe_items(roughness, {"类别": "类别", "数值": "数值"})
 
     # 几何公差
-    geos = data.get("几何公差", [])
+    geos = data.get("几何公差", []) or []
     if geos:
         simplified["几何公差项数"] = len(geos)
-        simplified["几何公差"] = [
-            {"类别": g.get("类别", ""), "数值": g.get("数值", ""), "基准": g.get("基准", "")}
-            for g in geos
-        ]
+        simplified["几何公差"] = _safe_items(geos, {"类别": "类别", "数值": "数值", "基准": "基准"})
 
     # 尺寸公差
-    dim_tols = data.get("尺寸公差", [])
+    dim_tols = data.get("尺寸公差", []) or []
     if dim_tols:
         simplified["尺寸公差项数"] = len(dim_tols)
-        simplified["尺寸公差"] = [
-            {"公称尺寸": d.get("公称尺寸", ""), "公差": d.get("公差", "")}
-            for d in dim_tols
-        ]
+        simplified["尺寸公差"] = _safe_items(dim_tols, {"公称尺寸": "公称尺寸", "公差": "公差"})
 
     # 技术要求
     if data.get("技术要求"):
-        simplified["技术要求"] = data["技术要求"]
+        simplified["技术要求"] = str(data["技术要求"])
 
     # 装配图特有字段
-    if "配合关系" in data and data["配合关系"]:
+    if data.get("配合关系"):
         simplified["配合关系数量"] = len(data["配合关系"])
         simplified["配合关系"] = data["配合关系"]
-    if "外形尺寸" in data and data["外形尺寸"]:
+    if data.get("外形尺寸"):
         simplified["外形尺寸"] = data["外形尺寸"]
-    if "零件清单" in data and data["零件清单"]:
+    if data.get("零件清单"):
         simplified["零件总数"] = len(data["零件清单"])
 
     return simplified
@@ -774,6 +772,114 @@ def analyze_and_grade(
     logger.info("合并分析+评分完成")
 
     # ── 计算总分 ──
+    p1 = float(result.get("phase1_similarity", 0))
+    p2 = float(result.get("phase2_criteria", 0))
+    total = round((p1 * p2) ** 0.5, 1)
+    grade = _compute_grade(total)
+
+    result["phase1_similarity"] = p1
+    result["phase2_criteria"] = p2
+    result["total_score"] = total
+    result["grade"] = grade
+    result["_model"] = result.get("_model", model)
+    return result
+
+
+def grade_combined(
+    stu_analysis: dict,
+    ref_analysis: dict,
+    phase1_criteria: str,
+    phase2_criteria: str,
+    ref_image_path: Path,
+    stu_image_path: Path,
+    *,
+    knowledge: str = "",
+) -> dict:
+    """
+    已有分析结果的前提下，单次 LLM 调用完成阶段一+阶段二评分（不做识读）。
+    返回 dict 含 phase1_similarity, phase2_criteria, total_score, grade 及各维评语。
+    """
+    client = _build_client()
+    model = _get_model()
+    templates = get_prompt_templates()
+    grading_guide = templates.get("grading_guide",
+        "你是一位工程图批阅老师。请对比学生图和参考图，从结构完整性和标注准确性两方面综合评分。")
+
+    def _p1_fields(a: dict) -> dict:
+        fields = {}
+        for key in ("工程图概述", "基本信息", "几何特征"):
+            if key in a:
+                fields[key] = a[key]
+        if "各视图信息" in a:
+            fields["各视图信息"] = a["各视图信息"]
+        if "零件清单" in a:
+            fields["零件清单"] = a["零件清单"]
+        return fields
+
+    ref_simple = _simplify_quantitative(ref_analysis)
+
+    kn_block = f"【补充知识】\n{knowledge}\n\n" if knowledge else ""
+
+    prompt_text = f"""{kn_block}{grading_guide}
+
+【参考工程图分析】
+{json.dumps(_strip_meta(_p1_fields(ref_analysis)), ensure_ascii=False, indent=2)}
+
+【学生工程图分析】
+{json.dumps(_strip_meta(_p1_fields(stu_analysis)), ensure_ascii=False, indent=2)}
+
+【参考图量化数据】
+{json.dumps(ref_simple, ensure_ascii=False, indent=2)}
+
+【学生图量化数据】
+{json.dumps(_simplify_quantitative(stu_analysis), ensure_ascii=False, indent=2)}
+
+【评分标准】
+阶段一（图形相似度）：
+{phase1_criteria}
+
+阶段二（量化标注）：
+{phase2_criteria}
+
+请严格按以下 JSON 格式输出，不要包含其他文字：
+{{
+  "phase1_similarity": 85,
+  "phase1_comment": "...",
+  "phase2_criteria": 80,
+  "图样表达": "...",
+  "尺寸标注": "...",
+  "尺寸公差": "...",
+  "表面质量": "...",
+  "形位公差": "...",
+  "技术要求": "...",
+  "phase2_comment": "...",
+  "总评": "..."
+}}"""
+
+    p1_size = _phase1_max_size()
+    p1_qual = _phase1_jpeg_quality()
+    stu_thumb = image_to_base64(stu_image_path, max_size=p1_size, quality=p1_qual)
+    ref_thumb = image_to_base64(ref_image_path, max_size=p1_size, quality=p1_qual)
+
+    content: list[dict] = [
+        {"type": "text", "text": prompt_text},
+        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{stu_thumb}"}},
+        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{ref_thumb}"}},
+    ]
+
+    logger.info(f"合并评分中（模型: {model}）…")
+    result = _call_and_parse(client, model,
+        [{"role": "user", "content": content}],
+        _parse_json_response)
+    logger.info("合并评分完成")
+
+    # 将分析数据合并进结果（保证 downstream 能看到完整数据）
+    for key in ("工程图概述", "基本信息", "几何特征", "尺寸", "几何公差",
+                "表面粗糙度", "尺寸公差", "技术要求",
+                "各视图信息", "零件清单", "配合关系", "外形尺寸", "装配技术要求"):
+        if key in stu_analysis and key not in result:
+            result[key] = stu_analysis[key]
+
     p1 = float(result.get("phase1_similarity", 0))
     p2 = float(result.get("phase2_criteria", 0))
     total = round((p1 * p2) ** 0.5, 1)

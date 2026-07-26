@@ -257,7 +257,6 @@ export default function StudentPage() {
       setQuestion(q);
       setQuestionTs(Date.now());
       if (identity && !identity.isTest) {
-        // 通过提交记录恢复全部状态
         try {
           const rec = await getSubmissionRecord(qid, identity.name, identity.id);
           setSubmitKey({ name: identity.name, id: identity.id });
@@ -266,30 +265,16 @@ export default function StudentPage() {
             setUploaded(true);
             setSubmitTs(Date.now());
           }
-          // 有分析结果则恢复
-          if (rec.status === "analyzed" || rec.status === "graded") {
-            try {
-              const a = await getStudentAnalysisResult(qid, identity.name, identity.id);
-              if (a.analysis) setAnalysisData(a.analysis);
-            } catch { /* 分析结果文件丢失 */ }
-          } else if (rec.status === "uploaded" && rec.student_filename) {
-            // 文件已上传但分析可能正在进行中，检查后台状态并恢复轮询
-            try {
-              const s = await getSubmitStatus(qid, identity.name, identity.id);
-              if (s.step === "analyze" && (s.status === "queued" || s.status === "analyzing")) {
-                setSubmitKey({ name: identity.name, id: identity.id });
-                // 恢复轮询，等待分析完成
-                resumeAnalysisPolling(qid, identity);
-              }
-            } catch { /* 状态查询失败，忽略 */ }
-          }
-          // 有成绩则恢复
-          if (rec.status === "graded") {
-            try {
-              const r = await getStudentResult(qid, identity.id);
-              setResult(r);
-            } catch { setResult(null); }
-          }
+          // 加载分析结果
+          try {
+            const a = await getStudentAnalysisResult(qid, identity.name, identity.id);
+            if (a.analysis) setAnalysisData(a.analysis);
+          } catch {}
+          // 加载评分结果
+          try {
+            const r = await getStudentResult(qid, identity.id);
+            if (r && r.成绩) setResult(r);
+          } catch {}
         } catch { /* 无提交记录 */ }
       }
     } catch { setError("加载题目失败"); }
@@ -806,7 +791,7 @@ export default function StudentPage() {
             )}
 
             {/* 学生图预览（提交后、分析前显示） */}
-            {studentFilename && submitTs > 0 && selectedQid && !analysisData && !result && (
+            {studentFilename && submitTs > 0 && selectedQid && (
               <div className="mb-4">
                 <p className="text-xs text-gray-500 mb-1">已上传的工程图（点击放大）</p>
                 <img src={getStudentPreviewUrl(selectedQid, studentFilename, submitTs)}
@@ -816,17 +801,20 @@ export default function StudentPage() {
             )}
 
             <div className="flex gap-2 flex-wrap">
-              <button onClick={handleStartAnalysis} disabled={!uploaded || !!submitStatus}
-                className="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700 disabled:opacity-50 text-sm">
-                {!uploaded ? "请先上传作业" : submitStatus ? "处理中…" : "预览分析"}
-              </button>
               {result ? (
-                <p className="text-green-600 font-medium text-sm self-center">评分已完成</p>
+                <p className="text-green-600 font-medium text-sm self-center">已提交 ✓ — 成绩：{result.成绩}（{result.总分}分）</p>
               ) : (
-                <button onClick={handleGrade} disabled={!uploaded || grading || !!submitStatus}
-                  className="bg-green-600 text-white px-6 py-2 rounded hover:bg-green-700 disabled:opacity-50">
-                  {!uploaded ? "请先上传作业" : grading || submitStatus ? "处理中…" : "提交评分"}
-                </button>
+                <>
+                  <button onClick={handleStartAnalysis}
+                    disabled={!uploaded || !!submitStatus || !!analysisData}
+                    className="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700 disabled:opacity-50 text-sm">
+                    {analysisData ? "已分析" : !uploaded ? "请先上传" : submitStatus ? "处理中…" : "预览分析"}
+                  </button>
+                  <button onClick={handleGrade} disabled={!uploaded || grading || !!submitStatus}
+                    className="bg-green-600 text-white px-6 py-2 rounded hover:bg-green-700 disabled:opacity-50">
+                    {!uploaded ? "请先上传作业" : grading || submitStatus ? "处理中…" : "提交"}
+                  </button>
+                </>
               )}
             </div>
             {/* 图面分析结果 */}
@@ -842,67 +830,91 @@ export default function StudentPage() {
                   </div>
                 )}
 
-                {analysisData.structure && (
-                  <details className="mb-2" open>
-                    <summary className="text-sm font-medium text-blue-700 cursor-pointer hover:underline mb-2">结构分析</summary>
-                    {analysisData.structure.title_block && (
-                      <table className="w-full border mb-2"><thead><tr className="bg-blue-50"><th colSpan={4} className="p-1 text-left text-blue-800">标题栏</th></tr></thead><tbody>
-                        <tr className="border"><td className="p-1 text-gray-500 w-16">零件名称</td><td className="p-1">{analysisData.structure.title_block.part_name || "-"}</td><td className="p-1 text-gray-500 w-16">图号</td><td className="p-1">{analysisData.structure.title_block.drawing_number || "-"}</td></tr>
-                        <tr className="border"><td className="p-1 text-gray-500">材料</td><td className="p-1">{analysisData.structure.title_block.material || "-"}</td><td className="p-1 text-gray-500">比例</td><td className="p-1">{analysisData.structure.title_block.scale || "-"}</td></tr>
-                      </tbody></table>
-                    )}
-                    {analysisData.structure.overall_shape && (
-                      <table className="w-full border mb-2"><thead><tr className="bg-blue-50"><th colSpan={4} className="p-1 text-left text-blue-800">整体形状</th></tr></thead><tbody>
-                        <tr className="border"><td className="p-1 text-gray-500 w-16">类型</td><td className="p-1">{analysisData.structure.overall_shape.type || "-"}</td><td className="p-1 text-gray-500 w-16">对称性</td><td className="p-1">{analysisData.structure.overall_shape.symmetry || "-"}</td></tr>
-                        <tr className="border"><td className="p-1 text-gray-500">外形尺寸</td><td className="p-1">{analysisData.structure.overall_shape.approx_dimensions || "-"}</td><td className="p-1 text-gray-500">材料标注</td><td className="p-1">{analysisData.structure.overall_shape.material_text || (analysisData.structure.overall_shape.has_material_label ? "有" : "无")}</td></tr>
-                      </tbody></table>
-                    )}
-                    {analysisData.structure.views?.length > 0 && (
-                      <table className="w-full border mb-2"><thead><tr className="bg-blue-50"><th colSpan={3} className="p-1 text-left text-blue-800">视图组成（{analysisData.structure.views.length} 个）</th></tr></thead><thead><tr className="bg-gray-50 border"><th className="p-1 text-left">名称</th><th className="p-1 text-left">类型</th><th className="p-1 text-left">说明</th></tr></thead><tbody>
-                        {analysisData.structure.views.map((v: any, i: number) => (<tr key={i} className="border"><td className="p-1">{v.name}</td><td className="p-1">{v.type}</td><td className="p-1 text-gray-600">{v.description || "-"}</td></tr>))}
-                      </tbody></table>
-                    )}
-                    {analysisData.structure.features?.length > 0 && (
-                      <table className="w-full border mb-2"><thead><tr className="bg-blue-50"><th colSpan={5} className="p-1 text-left text-blue-800">结构特征（{analysisData.structure.features.length} 个）</th></tr></thead><thead><tr className="bg-gray-50 border"><th className="p-1 text-left">ID</th><th className="p-1 text-left">类型</th><th className="p-1 text-center w-10">数量</th><th className="p-1 text-left">位置</th><th className="p-1 text-left">备注</th></tr></thead><tbody>
-                        {analysisData.structure.features.map((f: any, i: number) => (<tr key={i} className="border"><td className="p-1 font-mono">{f.id}</td><td className="p-1">{f.type}</td><td className="p-1 text-center">{f.count}</td><td className="p-1">{f.location || "-"}</td><td className="p-1 text-gray-600">{f.notes || "-"}</td></tr>))}
-                      </tbody></table>
-                    )}
-                    {analysisData.structure.technical_notes && <p className="mb-2"><span className="text-gray-500">技术要求：</span>{analysisData.structure.technical_notes}</p>}
-                  </details>
+                {/* 工程图概述 */}
+                {analysisData.工程图概述 && (
+                  <div className="mb-2 p-2 bg-blue-50 rounded border border-blue-100">
+                    <p className="text-xs text-blue-500 mb-1 font-medium">工程图概述</p>
+                    <p className="text-gray-700 whitespace-pre-wrap">{analysisData.工程图概述}</p>
+                  </div>
                 )}
 
-                {analysisData.quantitative && (
-                  <details className="mb-2" open>
-                    <summary className="text-sm font-medium text-blue-700 cursor-pointer hover:underline mb-2">量化分析</summary>
-                    {analysisData.quantitative.general_notes && (
-                      <table className="w-full border mb-2"><thead><tr className="bg-green-50"><th colSpan={6} className="p-1 text-left text-green-800">图纸通用信息</th></tr></thead><tbody>
-                        <tr className="border"><td className="p-1 text-gray-500">比例</td><td className="p-1">{analysisData.quantitative.general_notes.scale || "-"}</td><td className="p-1 text-gray-500">未注公差</td><td className="p-1">{analysisData.quantitative.general_notes.general_tolerance || "-"}</td><td className="p-1 text-gray-500">热处理</td><td className="p-1">{analysisData.quantitative.general_notes.heat_treatment || "-"}</td></tr>
-                        <tr className="border"><td className="p-1 text-gray-500">表面处理</td><td className="p-1">{analysisData.quantitative.general_notes.surface_treatment || "-"}</td><td className="p-1 text-gray-500">未注圆角</td><td className="p-1">{analysisData.quantitative.general_notes.unspecified_rounds || "-"}</td><td className="p-1 text-gray-500">未注倒角</td><td className="p-1">{analysisData.quantitative.general_notes.unspecified_chamfers || "-"}</td></tr>
-                      </tbody></table>
-                    )}
-                    {analysisData.quantitative.dimensions?.length > 0 && (
-                      <table className="w-full border mb-2"><thead><tr className="bg-green-50"><th colSpan={6} className="p-1 text-left text-green-800">尺寸标注（{analysisData.quantitative.dimensions.length} 个）</th></tr></thead><thead><tr className="bg-gray-50 border"><th className="p-1 text-left">ID</th><th className="p-1 text-left">类型</th><th className="p-1 text-right">数值</th><th className="p-1 text-left">公差</th><th className="p-1 text-left">关联特征</th><th className="p-1 text-left">说明</th></tr></thead><tbody>
-                        {analysisData.quantitative.dimensions.map((d: any, i: number) => (<tr key={i} className="border"><td className="p-1 font-mono">{d.id}</td><td className="p-1">{d.type}</td><td className="p-1 text-right font-mono">{d.value}{d.unit && d.unit !== "无" ? d.unit : ""}</td><td className="p-1 font-mono">{d.tolerance || "-"}</td><td className="p-1 font-mono">{d.feature_ref || "-"}</td><td className="p-1 text-gray-600 max-w-xs truncate">{d.description || "-"}</td></tr>))}
-                      </tbody></table>
-                    )}
-                    {analysisData.quantitative.surface_roughness?.length > 0 && (
-                      <table className="w-full border mb-2"><thead><tr className="bg-green-50"><th colSpan={3} className="p-1 text-left text-green-800">表面粗糙度（{analysisData.quantitative.surface_roughness.length} 处）</th></tr></thead><thead><tr className="bg-gray-50 border"><th className="p-1 text-left">数值</th><th className="p-1 text-left">关联特征</th><th className="p-1 text-left">位置</th></tr></thead><tbody>
-                        {analysisData.quantitative.surface_roughness.map((r: any, i: number) => (<tr key={i} className="border"><td className="p-1 font-mono">{r.value}</td><td className="p-1 font-mono">{r.feature_ref || "-"}</td><td className="p-1 text-gray-600">{r.location || "-"}</td></tr>))}
-                      </tbody></table>
-                    )}
-                    {analysisData.quantitative.geometric_tolerances?.length > 0 && (
-                      <table className="w-full border mb-2"><thead><tr className="bg-green-50"><th colSpan={6} className="p-1 text-left text-green-800">形位公差（{analysisData.quantitative.geometric_tolerances.length} 项）</th></tr></thead><thead><tr className="bg-gray-50 border"><th className="p-1 text-left">ID</th><th className="p-1 text-left">类型</th><th className="p-1 text-right">数值</th><th className="p-1 text-left">关联特征</th><th className="p-1 text-left">基准</th><th className="p-1 text-left">说明</th></tr></thead><tbody>
-                        {analysisData.quantitative.geometric_tolerances.map((g: any, i: number) => (<tr key={i} className="border"><td className="p-1 font-mono">{g.id}</td><td className="p-1">{g.type}</td><td className="p-1 text-right font-mono">{g.value}{g.unit || "mm"}</td><td className="p-1 font-mono">{g.ref_feature || "-"}</td><td className="p-1 font-mono">{g.datum || "-"}</td><td className="p-1 text-gray-600 max-w-xs truncate">{g.description || "-"}</td></tr>))}
-                      </tbody></table>
-                    )}
-                    {analysisData.quantitative.thread_specs?.length > 0 && (
-                      <table className="w-full border mb-2"><thead><tr className="bg-green-50"><th colSpan={5} className="p-1 text-left text-green-800">螺纹规格（{analysisData.quantitative.thread_specs.length} 处）</th></tr></thead><thead><tr className="bg-gray-50 border"><th className="p-1 text-left">ID</th><th className="p-1 text-left">类型</th><th className="p-1 text-left">规格</th><th className="p-1 text-left">关联特征</th><th className="p-1 text-left">备注</th></tr></thead><tbody>
-                        {analysisData.quantitative.thread_specs.map((t: any, i: number) => (<tr key={i} className="border"><td className="p-1 font-mono">{t.id}</td><td className="p-1">{t.type}</td><td className="p-1 font-mono">{t.spec}</td><td className="p-1 font-mono">{t.feature_ref || "-"}</td><td className="p-1 text-gray-600">{t.notes || "-"}</td></tr>))}
-                      </tbody></table>
-                    )}
-                    {analysisData.quantitative.completeness_notes && <p className="text-orange-600"><span className="font-medium">完整度提示：</span>{analysisData.quantitative.completeness_notes}</p>}
-                  </details>
+                {/* 基本信息 */}
+                {analysisData.基本信息 && (
+                  <table className="w-full border mb-2">
+                    <thead><tr className="bg-blue-50"><th colSpan={4} className="p-1 text-left text-blue-800">基本信息</th></tr></thead>
+                    <tbody>
+                      <tr className="border"><td className="p-1 text-gray-500 w-16">名称</td><td className="p-1">{analysisData.基本信息.零件名称 || analysisData.基本信息.装配体名称 || analysisData.基本信息.组合体类型 || "-"}</td><td className="p-1 text-gray-500 w-16">材料</td><td className="p-1">{analysisData.基本信息.材料 || "-"}</td></tr>
+                      <tr className="border"><td className="p-1 text-gray-500">比例</td><td className="p-1">{analysisData.基本信息.比例 || "-"}</td><td className="p-1 text-gray-500">类型</td><td className="p-1">{analysisData.基本信息.组合体类型 || "-"}</td></tr>
+                    </tbody>
+                  </table>
                 )}
+
+                {/* 几何特征 */}
+                {Array.isArray(analysisData.几何特征) && analysisData.几何特征.length > 0 && (
+                  <table className="w-full border mb-2">
+                    <thead><tr className="bg-blue-50"><th colSpan={3} className="p-1 text-left text-blue-800">几何特征（{analysisData.几何特征.length} 个）</th></tr></thead>
+                    <thead><tr className="bg-gray-50 border"><th className="p-1 text-left">名称</th><th className="p-1 text-left">尺寸</th><th className="p-1 text-left">视图</th></tr></thead>
+                    <tbody>{analysisData.几何特征.map((f: any, i: number) => (<tr key={i} className="border"><td className="p-1">{f.名称}</td><td className="p-1 font-mono">{f.尺寸 || "-"}</td><td className="p-1 text-gray-600">{Array.isArray(f.所在视图) ? f.所在视图.join("、") : f.所在视图 || "-"}</td></tr>))}</tbody>
+                  </table>
+                )}
+
+                {/* 尺寸 */}
+                {Array.isArray(analysisData.尺寸) && analysisData.尺寸.length > 0 && (
+                  <table className="w-full border mb-2">
+                    <thead><tr className="bg-green-50"><th colSpan={2} className="p-1 text-left text-green-800">尺寸（{analysisData.尺寸.length} 个）</th></tr></thead>
+                    <thead><tr className="bg-gray-50 border"><th className="p-1 text-left">类别</th><th className="p-1 text-left">数值</th></tr></thead>
+                    <tbody>{analysisData.尺寸.map((d: any, i: number) => (<tr key={i} className="border"><td className="p-1">{d.类别 || "-"}</td><td className="p-1 font-mono">{d.数值}</td></tr>))}</tbody>
+                  </table>
+                )}
+
+                {/* 尺寸公差 */}
+                {Array.isArray(analysisData.尺寸公差) && analysisData.尺寸公差.length > 0 && (
+                  <table className="w-full border mb-2">
+                    <thead><tr className="bg-green-50"><th colSpan={2} className="p-1 text-left text-green-800">尺寸公差（{analysisData.尺寸公差.length} 项）</th></tr></thead>
+                    <thead><tr className="bg-gray-50 border"><th className="p-1 text-left">公称尺寸</th><th className="p-1 text-left">公差</th></tr></thead>
+                    <tbody>{analysisData.尺寸公差.map((d: any, i: number) => (<tr key={i} className="border"><td className="p-1 font-mono">{d.公称尺寸}</td><td className="p-1 font-mono">{d.公差}</td></tr>))}</tbody>
+                  </table>
+                )}
+
+                {/* 几何公差 */}
+                {Array.isArray(analysisData.几何公差) && analysisData.几何公差.length > 0 && (
+                  <table className="w-full border mb-2">
+                    <thead><tr className="bg-green-50"><th colSpan={3} className="p-1 text-left text-green-800">几何公差（{analysisData.几何公差.length} 项）</th></tr></thead>
+                    <thead><tr className="bg-gray-50 border"><th className="p-1 text-left">类别</th><th className="p-1 text-left">数值</th><th className="p-1 text-left">基准</th></tr></thead>
+                    <tbody>{analysisData.几何公差.map((g: any, i: number) => (<tr key={i} className="border"><td className="p-1">{g.类别}</td><td className="p-1 font-mono">{g.数值}</td><td className="p-1 font-mono">{g.基准 || "-"}</td></tr>))}</tbody>
+                  </table>
+                )}
+
+                {/* 表面粗糙度 */}
+                {Array.isArray(analysisData.表面粗糙度) && analysisData.表面粗糙度.length > 0 && (
+                  <table className="w-full border mb-2">
+                    <thead><tr className="bg-green-50"><th colSpan={2} className="p-1 text-left text-green-800">表面粗糙度（{analysisData.表面粗糙度.length} 处）</th></tr></thead>
+                    <thead><tr className="bg-gray-50 border"><th className="p-1 text-left">类别</th><th className="p-1 text-left">数值</th></tr></thead>
+                    <tbody>{analysisData.表面粗糙度.map((r: any, i: number) => (<tr key={i} className="border"><td className="p-1">{r.类别 || "Ra"}</td><td className="p-1 font-mono">{r.数值}</td></tr>))}</tbody>
+                  </table>
+                )}
+
+                {/* 各视图信息 */}
+                {Array.isArray(analysisData.各视图信息) && analysisData.各视图信息.length > 0 && (
+                  <table className="w-full border mb-2">
+                    <thead><tr className="bg-blue-50"><th colSpan={4} className="p-1 text-left text-blue-800">各视图信息</th></tr></thead>
+                    <tbody>{analysisData.各视图信息.map((v: any, i: number) => (<tr key={i} className="border"><td className="p-1 font-medium">{v.视图名}</td><td className="p-1 text-gray-600">{Array.isArray(v.可见特征) ? v.可见特征.join("、") : "-"}</td><td className="p-1 text-gray-600">{Array.isArray(v.隐藏线) ? v.隐藏线.join("、") : "-"}</td><td className="p-1">{v.对称性 || "-"}</td></tr>))}</tbody>
+                  </table>
+                )}
+
+                {/* 技术要求 */}
+                {analysisData.技术要求 && (
+                  <div className="mb-2 p-2 bg-yellow-50 rounded border border-yellow-100">
+                    <p className="text-yellow-600 mb-1 font-medium">技术要求</p>
+                    <p className="text-gray-700 whitespace-pre-wrap">{analysisData.技术要求}</p>
+                  </div>
+                )}
+
+                {/* 原始 JSON（折叠） */}
+                <details>
+                  <summary className="text-xs text-gray-400 cursor-pointer hover:underline">原始 JSON（调试用）</summary>
+                  <pre className="text-xs bg-gray-100 p-2 rounded mt-1 overflow-auto max-h-48 whitespace-pre-wrap">{JSON.stringify(analysisData, null, 2)}</pre>
+                </details>
               </div>
             )}
           </div>
