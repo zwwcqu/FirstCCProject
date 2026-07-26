@@ -224,12 +224,22 @@ export default function TeacherDashboard() {
     }).catch(() => {});
   }, [templateType, showForm, editingId]);
 
-  // submission_type 切换时自动切换模板类型
+  // submission_type 切换时自动切换模板类型并加载内容
   useEffect(() => {
     if (submissionType === "dxf") {
       setTemplateType("DXF识读模板.txt");
+      getTemplates().then((data: any) => {
+        if (data.templates && data.templates["DXF识读模板.txt"]) {
+          setTemplateContent(data.templates["DXF识读模板.txt"]);
+        }
+      }).catch(() => {});
     } else if (templateType === "DXF识读模板.txt") {
       setTemplateType("零件图识读模板.txt");
+      getTemplates().then((data: any) => {
+        if (data.templates && data.templates["零件图识读模板.txt"]) {
+          setTemplateContent(data.templates["零件图识读模板.txt"]);
+        }
+      }).catch(() => {});
     }
   }, [submissionType]);
 
