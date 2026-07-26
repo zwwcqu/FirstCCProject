@@ -213,16 +213,34 @@ export default function TeacherDashboard() {
     return () => clearInterval(timer);
   }, [analyzingQid]);
 
-  // 新建题目：模板类型变化时自动加载模板到 textarea
-  useEffect(() => {
-    if (editingId || !showForm) return;
+  // 载入模板内容（新建时自动加载，编辑时由用户手动切换触发）
+  const loadTemplateContent = (tplType?: string) => {
+    const t = tplType || templateType;
     getTemplates().then((data: any) => {
-      if (data.templates && data.templates[templateType]) {
-        setTemplateContent(data.templates[templateType]);
+      if (data.templates && data.templates[t]) {
+        setTemplateContent(data.templates[t]);
         setTemplateLoaded(true);
       }
     }).catch(() => {});
-  }, [templateType, showForm, editingId]);
+  };
+
+  // 新建题目：表单打开时自动加载默认模板
+  useEffect(() => {
+    if (!showForm || editingId) return;
+    loadTemplateContent();
+  }, [showForm, editingId]);
+
+  // submission_type 切到 dxf 时自动切模板并加载内容
+  useEffect(() => {
+    if (!showForm) return;
+    if (submissionType === "dxf") {
+      setTemplateType("DXF识读模板.txt");
+      loadTemplateContent("DXF识读模板.txt");
+    } else if (templateType === "DXF识读模板.txt") {
+      setTemplateType("零件图识读模板.txt");
+      loadTemplateContent("零件图识读模板.txt");
+    }
+  }, [submissionType]);
 
   // submission_type 切换时自动切换模板类型并加载内容
   useEffect(() => {
@@ -1130,7 +1148,7 @@ export default function TeacherDashboard() {
                   <label className="block text-sm font-medium text-gray-700 mb-1">识读模板</label>
                   <div className="flex gap-2 mb-2">
                     <select value={templateType}
-                      onChange={(e) => setTemplateType(e.target.value)}
+                      onChange={(e) => { setTemplateType(e.target.value); loadTemplateContent(e.target.value); }}
                       className="border rounded px-3 py-1.5 text-sm">
                       <option value="零件图识读模板.txt">零件图</option>
                       <option value="装配图识读模板.txt">装配图</option>
