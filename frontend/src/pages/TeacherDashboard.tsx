@@ -230,34 +230,24 @@ export default function TeacherDashboard() {
     loadTemplateContent();
   }, [showForm, editingId]);
 
-  // submission_type 切到 dxf 时自动切模板并加载内容
+  // 模板类型变化时自动加载对应模板内容
+  const skipTemplateLoadRef = useRef(false);
+  useEffect(() => {
+    if (!showForm) return;
+    if (skipTemplateLoadRef.current) {
+      skipTemplateLoadRef.current = false;
+      return;
+    }
+    loadTemplateContent();
+  }, [templateType]);
+
+  // submission_type 切到 dxf 时自动切换模板下拉选项
   useEffect(() => {
     if (!showForm) return;
     if (submissionType === "dxf") {
       setTemplateType("DXF识读模板.txt");
-      loadTemplateContent("DXF识读模板.txt");
     } else if (templateType === "DXF识读模板.txt") {
       setTemplateType("零件图识读模板.txt");
-      loadTemplateContent("零件图识读模板.txt");
-    }
-  }, [submissionType]);
-
-  // submission_type 切换时自动切换模板类型并加载内容
-  useEffect(() => {
-    if (submissionType === "dxf") {
-      setTemplateType("DXF识读模板.txt");
-      getTemplates().then((data: any) => {
-        if (data.templates && data.templates["DXF识读模板.txt"]) {
-          setTemplateContent(data.templates["DXF识读模板.txt"]);
-        }
-      }).catch(() => {});
-    } else if (templateType === "DXF识读模板.txt") {
-      setTemplateType("零件图识读模板.txt");
-      getTemplates().then((data: any) => {
-        if (data.templates && data.templates["零件图识读模板.txt"]) {
-          setTemplateContent(data.templates["零件图识读模板.txt"]);
-        }
-      }).catch(() => {});
     }
   }, [submissionType]);
 
@@ -375,6 +365,7 @@ export default function TeacherDashboard() {
       setPhase1Criteria(detail.files?.phase1_criteria || "");
       setPhase2Criteria(detail.files?.phase2_criteria || "");
       setKnowledge(detail.files?.knowledge || "");
+      skipTemplateLoadRef.current = true;  // 编辑模式下首次打开不覆盖题目模板
       setSubmissionType(detail.submission_type || "pdf");
       setQClasses(((q as any).classes || "").split(",").filter(Boolean));
       setDeadline((q as any).deadline || "");
@@ -1116,6 +1107,26 @@ export default function TeacherDashboard() {
                   />
                 </div>
                 <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">学生提交文件类型</label>
+                  <div className="flex gap-4">
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input type="radio" name="submission_type" value="pdf"
+                        checked={submissionType === "pdf"} onChange={(e) => setSubmissionType(e.target.value)} />
+                      <span className="text-sm">PDF 文件</span>
+                    </label>
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input type="radio" name="submission_type" value="image"
+                        checked={submissionType === "image"} onChange={(e) => setSubmissionType(e.target.value)} />
+                      <span className="text-sm">图片文件</span>
+                    </label>
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input type="radio" name="submission_type" value="dxf"
+                        checked={submissionType === "dxf"} onChange={(e) => setSubmissionType(e.target.value)} />
+                      <span className="text-sm">DXF 文件</span>
+                    </label>
+                  </div>
+                </div>
+                <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">第一阶段评分标准（图形相似度）</label>
                   <textarea
                     value={phase1Criteria}
@@ -1170,27 +1181,16 @@ export default function TeacherDashboard() {
                       </button>
                     )}
                   </div>
-                  {submissionType === "dxf" ? (
-                    <div className="p-3 bg-gray-50 rounded border text-sm space-y-1">
-                      <p className="font-medium text-gray-700">DXF 文件无需大模型识读</p>
-                      <p className="text-xs text-gray-500">
-                        DXF 使用 ezdxf 直接提取结构化数据，此模板不参与评分。评分标准请在下方阶段评分标准中设置。
-                      </p>
-                    </div>
-                  ) : (
-                    <>
-                      <textarea
-                        value={templateContent}
-                        onChange={(e) => { setTemplateContent(e.target.value); setTemplateLoaded(true); }}
-                        rows={10}
-                        className="w-full border rounded px-3 py-2 text-sm font-mono"
-                        placeholder="选择模板类型后自动加载..."
-                      />
-                      <p className="text-xs text-gray-400 mt-0.5">
-                        LLM 根据此模板从工程图中提取信息。创建后可随时修改。
-                      </p>
-                    </>
-                  )}
+                  <textarea
+                    value={templateContent}
+                    onChange={(e) => { setTemplateContent(e.target.value); setTemplateLoaded(true); }}
+                    rows={10}
+                    className="w-full border rounded px-3 py-2 text-sm font-mono"
+                    placeholder="选择模板类型后自动加载..."
+                  />
+                  <p className="text-xs text-gray-400 mt-0.5">
+                    LLM 根据此模板从工程图中提取信息。创建后可随时修改。
+                  </p>
                 </div>
 
                 <div className="grid grid-cols-2 gap-3">
@@ -1226,26 +1226,6 @@ export default function TeacherDashboard() {
                   <input type="datetime-local" value={deadline} onChange={(e) => setDeadline(e.target.value)}
                     className="w-full border rounded px-3 py-1.5 text-sm" />
                   <p className="text-xs text-gray-400 mt-0.5">留空则不限制提交时间</p>
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">学生提交文件类型</label>
-                  <div className="flex gap-4">
-                    <label className="flex items-center gap-2 cursor-pointer">
-                      <input type="radio" name="submission_type" value="pdf"
-                        checked={submissionType === "pdf"} onChange={(e) => setSubmissionType(e.target.value)} />
-                      <span className="text-sm">PDF 文件</span>
-                    </label>
-                    <label className="flex items-center gap-2 cursor-pointer">
-                      <input type="radio" name="submission_type" value="image"
-                        checked={submissionType === "image"} onChange={(e) => setSubmissionType(e.target.value)} />
-                      <span className="text-sm">图片文件</span>
-                    </label>
-                    <label className="flex items-center gap-2 cursor-pointer">
-                      <input type="radio" name="submission_type" value="dxf"
-                        checked={submissionType === "dxf"} onChange={(e) => setSubmissionType(e.target.value)} />
-                      <span className="text-sm">DXF 文件</span>
-                    </label>
-                  </div>
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">题目附图</label>

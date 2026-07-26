@@ -221,37 +221,21 @@ function AnalysisTemplatesTab({ saving, setMsg }: { saving: boolean; setMsg: (m:
         ))}
       </div>
 
-      {/* DXF 模板：只读说明 */}
-      {activeTpl === "DXF识读模板.txt" ? (
-        <div className="p-4 bg-gray-50 rounded border space-y-2">
-          <p className="text-sm font-medium text-gray-700">DXF 文件无需大模型识读</p>
-          <p className="text-xs text-gray-500">
-            DXF 题目使用 ezdxf 直接从 CAD 文件提取结构化数据（实体、尺寸、图层等），
-            不需要通过大模型视觉识读。此模板仅为占位，不会参与评分流程。
-          </p>
-          <p className="text-xs text-gray-400">
-            如需自定义 DXF 评分行为，请在题目编辑中修改「阶段1评分标准」和「阶段2评分标准」。
-          </p>
-        </div>
-      ) : (
-        <>
-          {/* 当前选中模板的编辑区 */}
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              {TEMPLATE_LABELS[activeTpl] || activeTpl}
-              <span className="text-gray-400 font-normal ml-2 text-xs">— 全局默认模板</span>
-            </label>
-            <textarea rows={18} value={templates[activeTpl] || ""}
-              onChange={e => setTemplates({ ...templates, [activeTpl]: e.target.value })}
-              className={inputClass} />
-          </div>
+      {/* 当前选中模板的编辑区 */}
+      <div>
+        <label className="block text-sm font-medium text-gray-700 mb-1">
+          {TEMPLATE_LABELS[activeTpl] || activeTpl}
+          <span className="text-gray-400 font-normal ml-2 text-xs">— 全局默认模板</span>
+        </label>
+        <textarea rows={18} value={templates[activeTpl] || ""}
+          onChange={e => setTemplates({ ...templates, [activeTpl]: e.target.value })}
+          className={inputClass} />
+      </div>
 
-          <button onClick={saveCurrent} disabled={saving || !loaded}
-            className="bg-blue-600 text-white px-4 py-1.5 rounded hover:bg-blue-700 disabled:opacity-50 text-sm">
-            {saving ? "保存中…" : "保存模板"}
-          </button>
-        </>
-      )}
+      <button onClick={saveCurrent} disabled={saving || !loaded}
+        className="bg-blue-600 text-white px-4 py-1.5 rounded hover:bg-blue-700 disabled:opacity-50 text-sm">
+        {saving ? "保存中…" : "保存模板"}
+      </button>
     </div>
   );
 }
