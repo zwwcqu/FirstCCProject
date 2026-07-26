@@ -50,7 +50,7 @@ export default function TeacherDashboard() {
     总分: "总分", 相似度评价: "相似度评价", 阶段2评语: "阶段2评语",
     总评: "总评", 图样表达: "图样表达", 尺寸标注: "尺寸标注",
     尺寸公差: "尺寸公差", 表面质量: "表面质量", 形位公差: "形位公差",
-    技术要求: "技术要求", 教师评语: "教师评语",
+    技术要求: "技术要求", 教师评语: "教师评语", 文件SHA256: "文件SHA256", 作弊: "作弊",
   } as const;
 
   const navigate = useNavigate();
@@ -281,7 +281,6 @@ export default function TeacherDashboard() {
     fd.append("submission_type", submissionType);
     fd.append("classes", qClasses.join(","));
     fd.append("deadline", deadline);
-    fd.append("max_analysis_count", String(maxAnalysisCount));
     fd.append("template_type", templateType);
     fd.append("template_content", templateContent);
     if (image) fd.append("image", image);
@@ -427,7 +426,7 @@ export default function TeacherDashboard() {
       setGradeData((prev) =>
         prev.map((r: any) =>
           ids.includes(r[COL.学号])
-            ? { ...r, [COL.成绩]: "", [COL.阶段1相似度]: "", [COL.阶段2评分]: "", [COL.总分]: "", [COL.相似度评价]: "", [COL.阶段2评语]: "", [COL.总评]: "", [COL.图样表达]: "", [COL.尺寸标注]: "", [COL.尺寸公差]: "", [COL.表面质量]: "", [COL.形位公差]: "", [COL.技术要求]: "", [COL.教师评语]: "", _status: "uploaded" }
+            ? { ...r, [COL.成绩]: "", [COL.阶段1相似度]: "", [COL.阶段2评分]: "", [COL.总分]: "", [COL.相似度评价]: "", [COL.阶段2评语]: "", [COL.总评]: "", [COL.图样表达]: "", [COL.尺寸标注]: "", [COL.尺寸公差]: "", [COL.表面质量]: "", [COL.形位公差]: "", [COL.技术要求]: "", [COL.教师评语]: "", [COL.作弊]: "", _status: "uploaded" }
             : r
         )
       );
@@ -1277,8 +1276,8 @@ export default function TeacherDashboard() {
                               <span className="text-red-400 text-xs font-medium" title={row["_error"] || ""}>分析失败</span>
                             ) : status === "analyzed" ? (
                               <span className="text-orange-500 text-xs font-medium">待评分</span>
-                            ) : status === "submitted" || status === "graded" ? (
-                              <span className="text-green-600 text-xs font-medium">已提交</span>
+                            ) : status === "graded" ? (
+                              <span className="text-green-600 text-xs font-medium">已评分</span>
                             ) : (
                               <span className="text-blue-500 text-xs font-medium">提交未评</span>
                             )}

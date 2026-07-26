@@ -33,7 +33,7 @@ FIELDNAMES = [
     "阶段1相似度", "阶段2评分", "总分",
     "相似度评价", "阶段2评语", "总评",
     "图样表达", "尺寸标注", "尺寸公差", "表面质量", "形位公差", "技术要求",
-    "教师评语",
+    "教师评语", "文件SHA256", "作弊",
 ]
 
 
@@ -56,7 +56,7 @@ def read_all_grades(qid: str) -> list[dict]:
             fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
 
-def save_grade(qid: str, student_id: str, name: str, grade: str, comments: dict, class_name: str = "") -> None:
+def save_grade(qid: str, student_id: str, name: str, grade: str, comments: dict, class_name: str = "", file_sha256: str = "") -> None:
     """保存/覆盖一条成绩记录。使用排他锁保护读-改-写全过程"""
     csv_path = get_grades_csv_path(qid)
     csv_path.parent.mkdir(parents=True, exist_ok=True)
@@ -84,6 +84,7 @@ def save_grade(qid: str, student_id: str, name: str, grade: str, comments: dict,
         "形位公差": comments.get("形位公差", ""),
         "技术要求": comments.get("技术要求", ""),
         "教师评语": comments.get("教师评语", ""),
+        "文件SHA256": file_sha256,
     }
 
     # 确保文件存在

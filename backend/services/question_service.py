@@ -326,15 +326,20 @@ def submit_student_work(qid: str, student_id: str, name: str,
 
 
 def get_student_submission_path(qid: str, student_id: str, name: str) -> Path | None:
-    """查找学生已提交的文件路径（支持 PDF/PNG），未找到返回 None"""
+    """查找学生已提交的文件路径，优先返回原始 PDF，其次 PNG"""
     student_dir = get_student_dir(qid)
     if not student_dir.exists():
         return None
     safe_name = _sanitize_filename_part(name)
     safe_id = _sanitize_filename_part(student_id)
-    for f in student_dir.iterdir():
-        if f.stem == f"{safe_name}_{safe_id}" and f.suffix.lower() in (".pdf", ".png"):
-            return f
+    stem = f"{safe_name}_{safe_id}"
+    # 优先 PDF（原始提交文件）
+    pdf = student_dir / f"{stem}.pdf"
+    if pdf.exists():
+        return pdf
+    png = student_dir / f"{stem}.png"
+    if png.exists():
+        return png
     return None
 
 

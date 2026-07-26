@@ -42,6 +42,7 @@ from services.question_service import (
     get_student_dir,
     update_submission_record,
     sync_submissions_from_disk,
+    clear_student_data,
     _sanitize_filename_part,
 )
 from services.grade_service import read_all_grades, get_grades_csv_path, FIELDNAMES, save_grade, get_student_grade, remove_grade
@@ -315,6 +316,22 @@ async def get_analysis_result(request: Request, qid: str):
 
 # ── 成绩查询 ─────────────────────────────────────────────
 
+def _get_derived_status(qid: str, sid: str, name: str, rec: dict | None) -> str:
+    """根据文件存在状态推导学生提交状态。文件存在优先于 submissions.json"""
+    student_dir = get_student_dir(qid)
+    safe_name = _sanitize_filename_part(name or (rec.get("name", "") if rec else sid))
+    safe_id = _sanitize_filename_part(sid)
+    if (student_dir / f"{safe_name}_{safe_id}_评分.json").exists():
+        return "graded"
+    if (student_dir / f"{safe_name}_{safe_id}_分析.json").exists():
+        return "analyzed"
+    if rec and rec.get("status") == "rejected":
+        return "rejected"
+    if rec and rec.get("filename"):
+        return "uploaded"
+    return ""
+
+
 @router.get("/grades/{qid}")
 async def get_grades(request: Request, qid: str):
     """查看某题所有学生成绩，含未评分但已提交的学生"""
@@ -347,7 +364,7 @@ async def get_grades(request: Request, qid: str):
                 "表面质量": "",
                 "形位公差": "",
                 "技术要求": "",
-                "_status": rec.get("status", "uploaded"),
+                "_status": _get_derived_status(qid, sid, rec.get("name", "") if rec else "", rec),
                 "_filename": student_path.name if student_path else "",
                 "_error": rec.get("error", ""),
             })
@@ -357,7 +374,7 @@ async def get_grades(request: Request, qid: str):
         sid = row.get("学号", "")
         name = row.get("姓名", "")
         rec = get_submission_record(qid, sid)
-        row["_status"] = rec.get("status", "graded") if rec else "graded"
+        row["_status"] = _get_derived_status(qid, sid, name, rec)
         row["_error"] = rec.get("error", "") if rec else ""
         if not row.get("班级", "") and rec:
             row["班级"] = rec.get("class_name", "")
@@ -463,7 +480,9 @@ async def batch_grade(request: Request, qid: str):
             save_student_grade(qid, sid, name, result)
             grade = result.get("grade", "N/A")
             class_name = find_student_class(name, sid)
-            save_grade(qid, sid, name, grade, result, class_name)
+            import hashlib
+            file_sha256 = hashlib.sha256(student_path.read_bytes()).hexdigest()
+            save_grade(qid, sid, name, grade, result, class_name, file_sha256=file_sha256)
             update_submission_record(qid, sid, name, student_path.stem,
                                      "graded", grade=grade,
                                      total_score=str(result.get("total_score", "")))
@@ -522,14 +541,15 @@ async def batch_clear_grades(request: Request, qid: str):
 async def reject_submission(request: Request, qid: str, student_id: str):
     """打回学生提交，允许重新提交"""
     _require_auth(request)
-    from services.question_service import get_submission_record, update_submission_record
     rec = get_submission_record(qid, student_id)
     if not rec:
         raise HTTPException(status_code=404, detail="未找到提交记录")
     name = rec.get("name", student_id)
     stem = rec.get("filename", "")
+    # 删除学生所有提交文件和分析数据
+    clear_student_data(qid, student_id, name)
     update_submission_record(qid, student_id, name, stem, "rejected")
-    logger.info(f"[{qid}] 已打回: {name}({student_id})")
+    logger.info(f"[{qid}] 已打回并清空数据: {name}({student_id})")
     return {"ok": True}
 
 
@@ -562,12 +582,44 @@ async def supplement_submission(
     return {"ok": True, "student_filename": saved_name}
 
 
+def _check_plagiarism(qid: str) -> None:
+    """扫描成绩 CSV，SHA-256 相同者：最早提交为原创，其余标记作弊"""
+    graded = read_all_grades(qid)
+    if not graded:
+        return
+    sha_map: dict[str, list[dict]] = {}
+    for row in graded:
+        sha = (row.get("文件SHA256") or "").strip()
+        if sha:
+            sha_map.setdefault(sha, []).append(row)
+    for sha, rows in sha_map.items():
+        if len(rows) <= 1:
+            continue
+        rows.sort(key=lambda r: r.get("提交时间", ""))
+        for i, row in enumerate(rows):
+            if i == 0:
+                continue
+            if row.get("作弊") == "是":
+                continue  # 已标记，跳过
+            row["作弊"] = "是"
+            row["总分"] = "0"
+            row["成绩"] = "F"
+            row["教师评语"] = "作弊，怀疑复制他人文件。"
+            from services.grade_service import save_grade as _sg
+            _sg(qid, row.get("学号", ""), row.get("姓名", ""),
+                "F", {"总评": "", "教师评语": "作弊，怀疑复制他人文件。"},
+                row.get("班级", ""), file_sha256=sha)
+
+
 @router.post("/grades/{qid}/refresh")
 async def refresh_grades(request: Request, qid: str):
     """扫描磁盘文件，自动发现名单中学生的提交，同步返回最新成绩列表"""
     _require_auth(request)
 
     added = sync_submissions_from_disk(qid)
+
+    # 刷新前先做 SHA-256 作弊检测
+    _check_plagiarism(qid)
 
     # 复用成绩查询逻辑
     graded_rows = read_all_grades(qid)
@@ -596,7 +648,7 @@ async def refresh_grades(request: Request, qid: str):
                 "表面质量": "",
                 "形位公差": "",
                 "技术要求": "",
-                "_status": rec.get("status", "uploaded"),
+                "_status": _get_derived_status(qid, sid, rec.get("name", "") if rec else "", rec),
                 "_filename": student_path.name if student_path else "",
                 "_error": rec.get("error", ""),
             })
@@ -605,7 +657,7 @@ async def refresh_grades(request: Request, qid: str):
         sid = row.get("学号", "")
         name = row.get("姓名", "")
         rec = get_submission_record(qid, sid)
-        row["_status"] = rec.get("status", "graded") if rec else "graded"
+        row["_status"] = _get_derived_status(qid, sid, name, rec)
         row["_error"] = rec.get("error", "") if rec else ""
         if not row.get("班级", "") and rec:
             row["班级"] = rec.get("class_name", "")

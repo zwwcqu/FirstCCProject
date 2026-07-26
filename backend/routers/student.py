@@ -287,7 +287,7 @@ async def upload_submission(
         if not ok:
             raise HTTPException(status_code=403, detail=msg)
         rec = _get_rec(qid, student_id)
-        if rec and rec.get("status") == "submitted":
+        if rec and rec.get("status") == "graded":
             raise HTTPException(status_code=400, detail="作业已提交，无法修改。请等待教师打回")
 
     file_bytes = await file.read()
@@ -532,6 +532,9 @@ def _run_grade(
         grade = result.get("grade", "N/A")
         if not is_test:
             from services.question_service import find_student_class, save_student_grade
+            # 计算提交文件的 SHA-256
+            import hashlib
+            file_sha256 = hashlib.sha256(stu_path.read_bytes()).hexdigest() if not is_test else ""
             # 识读数据存 _分析.json（新分析才有，grade_combined 路径无）
             if "工程图概述" in result and not stu_analysis:
                 save_student_analysis(qid, student_id, name, result)
@@ -539,11 +542,11 @@ def _run_grade(
             save_student_grade(qid, student_id, name, result)
             # CSV
             class_name = find_student_class(name, student_id)
-            save_grade(qid, student_id, name, grade, result, class_name)
+            save_grade(qid, student_id, name, grade, result, class_name, file_sha256=file_sha256)
             # 标记为已提交，加锁
             update_submission_record(qid, student_id, name,
                                      Path(stu_filename).stem,
-                                     "submitted", grade=grade,
+                                     "graded", grade=grade,
                                      total_score=str(result.get("total_score", "")))
 
         set_status(qid, name, student_id, "grade", "done")
@@ -586,7 +589,7 @@ async def grade_submission_handler(
         rec = _get_record(qid, student_id)
         if not rec:
             raise HTTPException(status_code=400, detail="请先上传作业文件")
-        if rec.get("status") == "submitted":
+        if rec.get("status") == "graded":
             raise HTTPException(status_code=400, detail="作业已提交，无法再次提交。请等待教师打回")
         if rec.get("status") not in ("uploaded", "analyzed", "graded", "grade_failed"):
             raise HTTPException(status_code=400, detail="请先上传作业文件")
