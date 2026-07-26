@@ -53,6 +53,15 @@ def _sanitize_filename_part(s: str) -> str:
     return re.sub(r'[\\/:*?"<>|\x00-\x1f]', '_', s)
 
 
+def _get_pdf_validation_dpi() -> int:
+    """PDF 有效性校验用 DPI，从 settings_debug.json 读取"""
+    try:
+        from config import read_settings_debug
+        return read_settings_debug().get("pdf_validation_dpi", 72)
+    except Exception:
+        return 72
+
+
 # ── 题目 CRUD ───────────────────────────────────────────
 
 def list_questions() -> list[dict]:
@@ -255,7 +264,7 @@ def save_student_submission(qid: str, student_id: str, name: str, file_bytes: by
         # 校验 PDF 有效（至少能渲染首页）
         try:
             from pdf2image import convert_from_bytes
-            images = convert_from_bytes(file_bytes, first_page=1, last_page=1, dpi=72)
+            images = convert_from_bytes(file_bytes, first_page=1, last_page=1, dpi=_get_pdf_validation_dpi())
             if not images:
                 raise ValueError("PDF 无法渲染，可能已损坏")
         except Exception as e:
@@ -643,7 +652,7 @@ def _validate_pdf_file(path: Path) -> bool:
         return False
     try:
         from pdf2image import convert_from_path
-        images = convert_from_path(str(path), first_page=1, last_page=1, dpi=72)
+        images = convert_from_path(str(path), first_page=1, last_page=1, dpi=_get_pdf_validation_dpi())
         return len(images) > 0
     except Exception:
         return False

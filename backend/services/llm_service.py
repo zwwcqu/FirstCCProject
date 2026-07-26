@@ -82,24 +82,29 @@ def _get_model() -> str:
 
 # ── 图像处理 ─────────────────────────────────────────────
 
+def _image_param(key: str) -> int:
+    """读取图像参数（默认值由 config.get_image_params() 提供）"""
+    return get_image_params()[key]
+
+
 def _analysis_max_size() -> int:
-    return get_image_params().get("analysis_max_size", 3508)
+    return _image_param("analysis_max_size")
 
 
 def _phase1_max_size() -> int:
-    return get_image_params().get("phase1_max_size", 768)
+    return _image_param("phase1_max_size")
 
 
 def _phase1_jpeg_quality() -> int:
-    return get_image_params().get("phase1_jpeg_quality", 55)
+    return _image_param("phase1_jpeg_quality")
 
 
 def _analysis_jpeg_quality() -> int:
-    return get_image_params().get("analysis_jpeg_quality", 85)
+    return _image_param("analysis_jpeg_quality")
 
 
 def _analysis_dpi() -> int:
-    return get_image_params().get("analysis_dpi", 150)
+    return _image_param("analysis_dpi")
 
 
 def _resize_image(img: Image.Image, max_size: int | None = None) -> Image.Image:
@@ -204,18 +209,45 @@ def bytes_to_base64(data: bytes, filename: str, max_size: int | None = None,
 
 # ── 拍照图判别（本地图像特征，不调大模型）────────────────
 
+def _get_photo_detection_config() -> dict:
+    """读取拍照检测参数，优先 settings_debug.json，缺失时使用内置默认值"""
+    from config import read_settings_debug
+    defaults = {
+        "enabled": False, "render_dpi": 120, "sample_size": 200,
+        "color_threshold": 18, "white_threshold": 250,
+        "color_rate_max": 0.05, "white_rate_min": 0.75,
+        "aspect_ratio_min": 1.39, "aspect_ratio_max": 1.43,
+    }
+    cfg = read_settings_debug().get("photo_detection", {})
+    return {**defaults, **cfg}
+
+
 def check_if_photo(image_path: Path) -> tuple[bool, str]:
     """
     检测图片是否为手机/相机拍摄的实物照片（非正版工程图）。
     基于 EXIF 信息、四角采样、宽高比、色彩分布等特征综合判断。
     支持 PDF（取首页渲染）和图片格式。
+    参数从 settings_debug.json → photo_detection 读取。
     返回 (is_photo: bool, reason: str)
     """
-    # PDF 先转图片（用较高 DPI 保留线条细节）
+    pd_cfg = _get_photo_detection_config()
+    if not pd_cfg.get("enabled", False):
+        return False, ""
+
+    render_dpi = pd_cfg.get("render_dpi", 120)
+    sample_size = pd_cfg.get("sample_size", 200)
+    color_threshold = pd_cfg.get("color_threshold", 18)
+    white_threshold = pd_cfg.get("white_threshold", 250)
+    color_rate_max = pd_cfg.get("color_rate_max", 0.05)
+    white_rate_min = pd_cfg.get("white_rate_min", 0.75)
+    aspect_min = pd_cfg.get("aspect_ratio_min", 1.39)
+    aspect_max = pd_cfg.get("aspect_ratio_max", 1.43)
+
+    # PDF 先转图片
     if image_path.suffix.lower() == ".pdf":
         try:
             from pdf2image import convert_from_path
-            images = convert_from_path(str(image_path), first_page=1, last_page=1, dpi=120)
+            images = convert_from_path(str(image_path), first_page=1, last_page=1, dpi=render_dpi)
             if not images:
                 return False, ""
             img = images[0]
@@ -240,31 +272,31 @@ def check_if_photo(image_path: Path) -> tuple[bool, str]:
 
     # 2. 宽高比检测：工程图应符合标准纸张比例
     ratio = w / h if w > h else h / w
-    if not (1.39 < ratio < 1.43):
-        return True, f"宽高比异常（{ratio:.3f}），标准工程图应为A4/A3纸张比例（1.39~1.43）"
+    if not (aspect_min < ratio < aspect_max):
+        return True, f"宽高比异常（{ratio:.3f}），标准工程图应为A4/A3纸张比例（{aspect_min}~{aspect_max}）"
 
     # 3. 色彩分布检测：缩略图采样统计
-    small = img.convert("RGB").resize((200, 200))
+    small = img.convert("RGB").resize((sample_size, sample_size))
     colored = 0
     pure_white = 0
-    total_small = 200 * 200
+    total_pixels = sample_size * sample_size
 
     for px in small.getdata():
         r, g, b = px[0], px[1], px[2]
         gray = (r + g + b) / 3
         max_diff = max(abs(r - g), abs(g - b), abs(r - b))
 
-        if max_diff > 18:
+        if max_diff > color_threshold:
             colored += 1
-        if gray > 250:
+        if gray > white_threshold:
             pure_white += 1
 
-    color_rate = colored / total_small
+    color_rate = colored / total_pixels
 
-    if color_rate > 0.05:
+    if color_rate > color_rate_max:
         return True, f"检测到彩色噪点（{color_rate:.1%}），疑似拍照或截图。"
-    if pure_white / total_small < 0.75:
-        return True, f"白色背景比例偏低（纯白仅 {pure_white/total_small:.1%}），疑似截图或扫描件。标准工程图纯白背景应在75%以上。"
+    if pure_white / total_pixels < white_rate_min:
+        return True, f"白色背景比例偏低（纯白仅 {pure_white/total_pixels:.1%}），疑似截图或扫描件。标准工程图纯白背景应在{white_rate_min:.0%}以上。"
 
     return False, ""
 

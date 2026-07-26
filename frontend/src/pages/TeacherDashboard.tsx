@@ -39,6 +39,16 @@ interface Question {
 }
 
 export default function TeacherDashboard() {
+  // 成绩表列名常量（与后端 CSV FIELDNAMES 保持一致）
+  const COL = {
+    班级: "班级", 姓名: "姓名", 学号: "学号",
+    成绩: "成绩", 阶段1相似度: "阶段1相似度", 阶段2评分: "阶段2评分",
+    总分: "总分", 相似度评价: "相似度评价", 阶段2评语: "阶段2评语",
+    总评: "总评", 图样表达: "图样表达", 尺寸标注: "尺寸标注",
+    尺寸公差: "尺寸公差", 表面质量: "表面质量", 形位公差: "形位公差",
+    技术要求: "技术要求", 教师评语: "教师评语",
+  } as const;
+
   const navigate = useNavigate();
   const [questions, setQuestions] = useState<Question[]>([]);
   const [showForm, setShowForm] = useState(false);
@@ -319,7 +329,7 @@ export default function TeacherDashboard() {
   };
 
   const toggleSelectAll = () => {
-    const allIds = gradeData.map((r: any) => r["学号"]).filter(Boolean);
+    const allIds = gradeData.map((r: any) => r[COL.学号]).filter(Boolean);
     if (selectedStudents.size === allIds.length) {
       setSelectedStudents(new Set());
     } else {
@@ -336,7 +346,7 @@ export default function TeacherDashboard() {
       // 立即更新本地状态为"评分中"，不等刷新
       setGradeData((prev) =>
         prev.map((r: any) =>
-          ids.includes(r["学号"]) ? { ...r, _status: "grading" } : r
+          ids.includes(r[COL.学号]) ? { ...r, _status: "grading" } : r
         )
       );
       setSelectedStudents(new Set());
@@ -356,8 +366,8 @@ export default function TeacherDashboard() {
       await batchClearGrades(gradesView, ids);
       setGradeData((prev) =>
         prev.map((r: any) =>
-          ids.includes(r["学号"])
-            ? { ...r, 成绩: "", 阶段1相似度: "", 阶段2评分: "", 总分: "", 相似度评价: "", 阶段2评语: "", 总评: "", 图样表达: "", 尺寸标注: "", 尺寸公差: "", 表面质量: "", 形位公差: "", 技术要求: "", 教师评语: "", _status: "uploaded" }
+          ids.includes(r[COL.学号])
+            ? { ...r, [COL.成绩]: "", [COL.阶段1相似度]: "", [COL.阶段2评分]: "", [COL.总分]: "", [COL.相似度评价]: "", [COL.阶段2评语]: "", [COL.总评]: "", [COL.图样表达]: "", [COL.尺寸标注]: "", [COL.尺寸公差]: "", [COL.表面质量]: "", [COL.形位公差]: "", [COL.技术要求]: "", [COL.教师评语]: "", _status: "uploaded" }
             : r
         )
       );
@@ -424,11 +434,8 @@ export default function TeacherDashboard() {
     setEditValue(value);
   };
 
-  // 从后端配置加载等级阈值（不再硬编码）
-  const [gradeThresholds, setGradeThresholds] = useState<[number, string][]>([
-    [90, "A+"], [85, "A"], [80, "B+"], [75, "B"],
-    [68.75, "C+"], [62.5, "C"], [56.25, "D+"], [50, "D"],
-  ]);
+  // 等级阈值从后端 API 加载（/api/teacher/settings → grade_thresholds）
+  const [gradeThresholds, setGradeThresholds] = useState<[number, string][]>([]);
 
   const computeTotal = (p1: number, p2: number) => Math.round(Math.sqrt(p1 * p2) * 10) / 10;
 
@@ -443,26 +450,26 @@ export default function TeacherDashboard() {
     if (!editingCell || !gradesView) return;
     try {
       const col = editingCell.col;
-      const isPhaseScore = col === "阶段1相似度" || col === "阶段2评分";
+      const isPhaseScore = col === COL.阶段1相似度 || col === COL.阶段2评分;
       let fields: Record<string, string> = { [col]: editValue };
 
       if (isPhaseScore) {
         // 重新计算总分和评级
-        const row = gradeData.find((r: any) => r["学号"] === editingCell.sid);
-        const p1 = parseFloat(col === "阶段1相似度" ? editValue : (row?.["阶段1相似度"] || "0"));
-        const p2 = parseFloat(col === "阶段2评分" ? editValue : (row?.["阶段2评分"] || "0"));
+        const row = gradeData.find((r: any) => r[COL.学号] === editingCell.sid);
+        const p1 = parseFloat(col === COL.阶段1相似度 ? editValue : (row?.[COL.阶段1相似度] || "0"));
+        const p2 = parseFloat(col === COL.阶段2评分 ? editValue : (row?.[COL.阶段2评分] || "0"));
         if (!isNaN(p1) && !isNaN(p2)) {
           const total = computeTotal(p1, p2);
           const grade = computeGrade(total);
-          fields["总分"] = String(total);
-          fields["成绩"] = grade;
+          fields[COL.总分] = String(total);
+          fields[COL.成绩] = grade;
         }
       }
 
       await editGrade(gradesView, editingCell.sid, fields);
       setGradeData((prev) =>
         prev.map((r: any) =>
-          r["学号"] === editingCell.sid ? { ...r, ...Object.fromEntries(Object.entries(fields).map(([k, v]) => [k, v])) } : r
+          r[COL.学号] === editingCell.sid ? { ...r, ...Object.fromEntries(Object.entries(fields).map(([k, v]) => [k, v])) } : r
         )
       );
     } catch (e: any) {
@@ -475,11 +482,11 @@ export default function TeacherDashboard() {
 
   const handleOpenReview = async (sid: string) => {
     if (!gradesView) return;
-    const row = gradeData.find((r: any) => r["学号"] === sid);
-    const name = row?.["姓名"] || "";
+    const row = gradeData.find((r: any) => r[COL.学号] === sid);
+    const name = row?.[COL.姓名] || "";
     setReviewSid(sid);
-    setReviewGrade(row?.["成绩"] || "");
-    setReviewComment(row?.["教师评语"] || "");
+    setReviewGrade(row?.[COL.成绩] || "");
+    setReviewComment(row?.[COL.教师评语] || "");
     setSavedText("");
     setStudentAnalysis(null);
     if (name) {
@@ -519,15 +526,15 @@ export default function TeacherDashboard() {
     setSaving(true);
     try {
       const fields: Record<string, string> = {};
-      if (reviewGrade) fields["成绩"] = reviewGrade;
-      fields["教师评语"] = reviewComment;
+      if (reviewGrade) fields[COL.成绩] = reviewGrade;
+      fields[COL.教师评语] = reviewComment;
       await editGrade(gradesView, reviewSid, fields);
       setGradeData((prev) =>
         prev.map((r: any) => {
-          if (r["学号"] !== reviewSid) return r;
+          if (r[COL.学号] !== reviewSid) return r;
           const u = { ...r };
-          if (reviewGrade) u["成绩"] = reviewGrade;
-          u["教师评语"] = reviewComment;
+          if (reviewGrade) u[COL.成绩] = reviewGrade;
+          u[COL.教师评语] = reviewComment;
           return u;
         })
       );
@@ -1096,7 +1103,7 @@ export default function TeacherDashboard() {
                     <tr className="bg-gray-50 border-b">
                       <th className="text-left p-2 w-8">
                         <input type="checkbox"
-                          checked={gradeData.filter((r: any) => r["学号"]).length > 0 && selectedStudents.size === gradeData.filter((r: any) => r["学号"]).length}
+                          checked={gradeData.filter((r: any) => r[COL.学号]).length > 0 && selectedStudents.size === gradeData.filter((r: any) => r[COL.学号]).length}
                           onChange={toggleSelectAll} />
                       </th>
                       <th className="text-left p-2 w-10">#</th>
@@ -1109,7 +1116,7 @@ export default function TeacherDashboard() {
                   </thead>
                   <tbody>
                     {gradeData.map((row: any, i: number) => {
-                      const sid = row["学号"] || "";
+                      const sid = row[COL.学号] || "";
                       const status = row["_status"] || "";
                       const filename = row["_filename"] || "";
                       const isGraded = status === "graded";
@@ -1148,7 +1155,7 @@ export default function TeacherDashboard() {
                           </td>
                           {gradeColumns.map((col: string, j: number) => {
                             const isEditing = editingCell?.sid === sid && editingCell?.col === col;
-                            const editable = isGraded && isGradeOwner && ["阶段1相似度", "阶段2评分"].includes(col);
+                            const editable = isGraded && isGradeOwner && [COL.阶段1相似度, COL.阶段2评分].includes(col);
                             return (
                               <td key={j} className="p-2 max-w-[120px] truncate"
                                 onDoubleClick={() => editable && startEdit(sid, col, row[col] || "")}>
@@ -1279,7 +1286,7 @@ export default function TeacherDashboard() {
 
         {/* 查看作业弹窗 */}
         {reviewSid && gradesView && (() => {
-          const row = gradeData.find((r: any) => r["学号"] === reviewSid);
+          const row = gradeData.find((r: any) => r[COL.学号] === reviewSid);
           if (!row) return null;
           const isGraded = row["_status"] === "graded";
           const DIMS = ["图样表达", "尺寸标注", "尺寸公差", "表面质量", "形位公差", "技术要求"];
@@ -1309,7 +1316,7 @@ export default function TeacherDashboard() {
                     modalMoveRef.current = { mx: e.clientX, my: e.clientY, ox: rect.left, oy: rect.top };
                   }}>
                   <h3 className="text-lg font-semibold">
-                    {row["姓名"]} ({row["学号"]}) 的作业
+                    {row[COL.姓名]} ({row[COL.学号]}) 的作业
                   </h3>
                   <div className="flex gap-2">
                     <button onClick={() => handlePrint("print-review-hw")}
@@ -1431,20 +1438,20 @@ export default function TeacherDashboard() {
                         ))}
                       </select>
                       <span className="text-gray-400 text-xs ml-2">
-                        阶段1: {row["阶段1相似度"] || "-"}% × 阶段2: {row["阶段2评分"] || "-"}% → √(P1×P2) = 总分: {row["总分"] || "-"}%
+                        阶段1: {row[COL.阶段1相似度] || "-"}% × 阶段2: {row[COL.阶段2评分] || "-"}% → √(P1×P2) = 总分: {row[COL.总分] || "-"}%
                       </span>
                     </div>
 
                     {/* 阶段一评价 */}
                     <div>
                       <p className="font-medium text-gray-700">阶段一 · 相似度评价</p>
-                      <p className="text-gray-600 mt-1">{row["相似度评价"] || "-"}</p>
+                      <p className="text-gray-600 mt-1">{row[COL.相似度评价] || "-"}</p>
                     </div>
 
                     {/* 阶段二评价 */}
                     <div>
                       <p className="font-medium text-gray-700">阶段二 · 量化评分</p>
-                      <p className="text-gray-600 mt-1">{row["阶段2评语"] || "-"}</p>
+                      <p className="text-gray-600 mt-1">{row[COL.阶段2评语] || "-"}</p>
                       <div className="grid grid-cols-2 gap-2 mt-1">
                         {DIMS.map((dim) => (
                           <div key={dim} className="bg-gray-50 rounded p-2">
@@ -1454,7 +1461,7 @@ export default function TeacherDashboard() {
                         ))}
                       </div>
                       <p className="text-gray-600 mt-2">
-                        <span className="font-medium text-gray-700">阶段二总评：</span>{row["总评"] || "-"}
+                        <span className="font-medium text-gray-700">阶段二总评：</span>{row[COL.总评] || "-"}
                       </p>
                     </div>
 

@@ -22,8 +22,8 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request, Response, UploadFile, File, Form
 
-from auth import verify_password, create_session, validate_session, destroy_session, change_password
-from config import CONFIG_DIR, get_question_dir, read_settings, write_settings
+from auth import verify_password, create_session, validate_session, destroy_session, change_password, MIN_PASSWORD_LENGTH, TEACHER_COOKIE
+from config import CONFIG_DIR, PDF_MAGIC, get_question_dir, read_settings, write_settings
 from services.question_service import (
     list_questions,
     create_question,
@@ -52,14 +52,14 @@ router = APIRouter(prefix="/api/teacher", tags=["teacher"])
 
 def _require_auth(request: Request) -> None:
     """从 Cookie 中取 session token，校验登录状态"""
-    token = request.cookies.get("session")
+    token = request.cookies.get(TEACHER_COOKIE)
     if not token or not validate_session(token):
         raise HTTPException(status_code=401, detail="请先登录")
 
 
 def _get_teacher_username(request: Request) -> str:
     """从 session 中提取当前教师的用户名"""
-    token = request.cookies.get("session") or ""
+    token = request.cookies.get(TEACHER_COOKIE) or ""
     if token:
         sf = __import__("config").DATA_DIR / ".sessions" / f"{token}.json"
         if sf.exists():
@@ -86,7 +86,7 @@ def _run_reference_analysis(qid: str) -> None:
     教师参考图分析，通过任务队列以最高优先级执行。
     """
     from services.llm_service import analyze_merged
-    from services.task_queue import enqueue
+    from services.task_queue import enqueue, PRIORITY_TEACHER
 
     # 立即删除旧分析文件，防止查询接口返回旧数据（新分析完成前返回"未就绪"）
     qdir = get_question_dir(qid)
@@ -120,7 +120,7 @@ def _run_reference_analysis(qid: str) -> None:
         save_reference_analysis(qid, analysis)
         logger.info(f"[{qid}] 参考图分析完成并已保存")
 
-    enqueue(0, _task,
+    enqueue(PRIORITY_TEACHER, _task,
             task_key=f"ref_analyze:{qid}",
             task_info={"type": "ref_analyze", "qid": qid})
 
@@ -144,7 +144,7 @@ async def login(response: Response, username: str = Form(...), password: str = F
     data["teacher_name"] = info["姓名"]
     data["teacher_username"] = username.strip()
     sf.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-    response.set_cookie(key="session", value=token, max_age=14400, httponly=True, samesite="lax", path="/")
+    response.set_cookie(key=TEACHER_COOKIE, value=token, max_age=14400, httponly=True, samesite="lax", path="/")
     logger.info(f"教师登录: {info['姓名']} ({username.strip()})")
     return {"ok": True, "name": info["姓名"], "username": username.strip(), "password_changed": info.get("password_changed", False)}
 
@@ -152,10 +152,10 @@ async def login(response: Response, username: str = Form(...), password: str = F
 @router.post("/logout")
 async def logout(request: Request, response: Response):
     """教师登出，销毁 session + 清除 Cookie"""
-    token = request.cookies.get("session")
+    token = request.cookies.get(TEACHER_COOKIE)
     if token:
         destroy_session(token)
-    response.delete_cookie(key="session", path="/")
+    response.delete_cookie(key=TEACHER_COOKIE, path="/")
     logger.info("教师已登出")
     return {"ok": True}
 
@@ -163,7 +163,7 @@ async def logout(request: Request, response: Response):
 @router.get("/check")
 async def check_login(request: Request):
     """检查登录状态，用于前端页面刷新时验证"""
-    token = request.cookies.get("session")
+    token = request.cookies.get(TEACHER_COOKIE)
     if token and validate_session(token):
         return {"ok": True}
     raise HTTPException(status_code=401)
@@ -388,7 +388,7 @@ async def batch_grade(request: Request, qid: str):
         raise HTTPException(status_code=400, detail="请选择至少一名学生")
 
     from services.llm_service import run_two_phase_grading, analyze_merged
-    from services.task_queue import enqueue
+    from services.task_queue import enqueue, PRIORITY_BATCH
 
     # 先同步磁盘文件到 submissions.json（补充提交的学生可能不在记录中）
     from services.question_service import sync_submissions_from_disk
@@ -474,7 +474,7 @@ async def batch_grade(request: Request, qid: str):
         rec = get_submission_record(qid, sid)
         name = rec.get("name", "") if rec else ""
         # 注意：lambda s=sid 捕获当前值，避免 Python 闭包延迟绑定陷阱
-        enqueue(5, (lambda s: lambda: _grade_one(s))(sid),
+        enqueue(PRIORITY_BATCH, (lambda s: lambda: _grade_one(s))(sid),
                 task_key=f"grade:{qid}:{sid}",
                 task_info={"type": "grade", "qid": qid, "sid": sid, "name": name})
 
@@ -534,7 +534,7 @@ async def supplement_submission(
     fname = file.filename or "submission.pdf"
 
     # 校验是否为真实 PDF
-    if not file_bytes.startswith(b"%PDF"):
+    if not file_bytes.startswith(PDF_MAGIC):
         raise HTTPException(status_code=400, detail="仅支持 PDF 格式文件，请上传真实的 PDF 文件")
 
     from services.question_service import submit_student_work
@@ -737,7 +737,7 @@ async def teacher_student_preview(request: Request, qid: str, student_id: str):
 async def get_profile(request: Request):
     """获取当前登录教师的信息"""
     _require_auth(request)
-    token = request.cookies.get("session") or ""
+    token = request.cookies.get(TEACHER_COOKIE) or ""
     if token:
         sf = __import__("config").DATA_DIR / ".sessions" / f"{token}.json"
         if sf.exists():
@@ -766,7 +766,7 @@ async def update_profile(request: Request):
     new_username = (body.get("username") or "").strip()
     if not new_name or not new_username:
         raise HTTPException(status_code=400, detail="姓名和用户名不能为空")
-    token = request.cookies.get("session") or ""
+    token = request.cookies.get(TEACHER_COOKIE) or ""
     if token:
         sf = __import__("config").DATA_DIR / ".sessions" / f"{token}.json"
         if sf.exists():
@@ -794,11 +794,11 @@ async def teacher_change_password(request: Request):
     new_password = (body.get("new_password") or "").strip()
     if not old_password or not new_password:
         raise HTTPException(status_code=400, detail="请填写旧密码和新密码")
-    if len(new_password) < 6:
-        raise HTTPException(status_code=400, detail="密码至少6位")
+    if len(new_password) < MIN_PASSWORD_LENGTH:
+        raise HTTPException(status_code=400, detail=f"密码至少{MIN_PASSWORD_LENGTH}位")
     if old_password == new_password:
         raise HTTPException(status_code=400, detail="新密码不能与旧密码相同")
-    token = request.cookies.get("session") or ""
+    token = request.cookies.get(TEACHER_COOKIE) or ""
     if token:
         sf = __import__("config").DATA_DIR / ".sessions" / f"{token}.json"
         if sf.exists():

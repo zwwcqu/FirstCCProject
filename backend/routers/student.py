@@ -26,8 +26,8 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Request, UploadFile, File, Form
 from fastapi.responses import FileResponse
 
-from auth import create_student_session, validate_student_session, get_student_session
-from config import CONFIG_DIR, get_question_dir as _get_question_dir
+from auth import create_student_session, validate_student_session, get_student_session, MIN_PASSWORD_LENGTH, STUDENT_COOKIE
+from config import CONFIG_DIR, PDF_MAGIC, get_question_dir as _get_question_dir
 from services.question_service import (
     list_questions,
     get_question,
@@ -46,7 +46,7 @@ from services.llm_service import (
 )
 from services.grade_service import save_grade, save_result_json, get_student_grade, read_all_grades
 from services.submit_status import set_status, get_status, set_file_data, get_file_data
-from services.task_queue import enqueue
+from services.task_queue import enqueue, PRIORITY_STUDENT
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/student", tags=["student"])
@@ -159,8 +159,8 @@ async def student_change_password(request: Request):
     new_password = (body.get("new_password") or "").strip()
     if not all([name, student_id, class_name, old_password, new_password]):
         raise HTTPException(status_code=400, detail="参数不完整")
-    if len(new_password) < 6:
-        raise HTTPException(status_code=400, detail="密码至少6位")
+    if len(new_password) < MIN_PASSWORD_LENGTH:
+        raise HTTPException(status_code=400, detail=f"密码至少{MIN_PASSWORD_LENGTH}位")
     if old_password == new_password:
         raise HTTPException(status_code=400, detail="新密码不能与旧密码相同")
     from services.question_service import check_roster
@@ -176,7 +176,7 @@ async def student_change_password(request: Request):
 
 def _require_student_login(request: Request, expected_name: str = "", expected_sid: str = "") -> dict:
     """校验学生 session token，从 Cookie 或 Authorization header 中提取"""
-    token = request.cookies.get("student_token") or ""
+    token = request.cookies.get(STUDENT_COOKIE) or ""
     if not token:
         auth = request.headers.get("Authorization", "")
         if auth.startswith("Bearer "):
@@ -292,14 +292,14 @@ async def upload_submission(
     # 根据题目设置的提交类型校验文件格式
     sub_type = q.get("submission_type", "pdf")  # 缺省 pdf
     if sub_type == "pdf":
-        if not file_bytes.startswith(b"%PDF"):
+        if not file_bytes.startswith(PDF_MAGIC):
             raise HTTPException(status_code=400, detail="本题要求提交 PDF 文件，请上传真实的 PDF 文件")
     elif sub_type == "image":
-        if file_bytes.startswith(b"%PDF"):
+        if file_bytes.startswith(PDF_MAGIC):
             raise HTTPException(status_code=400, detail="本题要求提交图片文件，不支持 PDF 格式")
     else:
         # 未知类型，保持 PDF 校验
-        if not file_bytes.startswith(b"%PDF"):
+        if not file_bytes.startswith(PDF_MAGIC):
             raise HTTPException(status_code=400, detail="仅支持 PDF 格式文件，请上传真实的 PDF 文件")
 
     set_status(qid, name, student_id, "upload", "converting")
@@ -413,7 +413,7 @@ async def start_analysis(
 
     # 在任务入队前立即更新状态，避免前端轮询读到上一步的旧状态
     set_status(qid, name, student_id, "analyze", "queued")
-    enqueue(10, _task,
+    enqueue(PRIORITY_STUDENT, _task,
             task_key=f"analyze:{qid}:{student_id}",
             task_info={"type": "analyze", "qid": qid, "name": name, "student_id": student_id})
     return {"ok": True, "status": "processing"}
@@ -551,7 +551,7 @@ async def grade_submission_handler(
 
     # 在任务入队前立即更新状态，避免前端轮询读到上一步的旧状态
     set_status(qid, name, student_id, "grade", "queued")
-    enqueue(10, _task,
+    enqueue(PRIORITY_STUDENT, _task,
             task_key=f"grade:{qid}:{student_id}",
             task_info={"type": "grade", "qid": qid, "name": name, "student_id": student_id})
 

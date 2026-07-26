@@ -14,6 +14,11 @@ _queue: PriorityQueue = PriorityQueue()
 _seq = 0
 _seq_lock = threading.Lock()
 
+# 任务优先级
+PRIORITY_TEACHER = 0    # 教师操作（最高）
+PRIORITY_BATCH = 5      # 教师批量评分
+PRIORITY_STUDENT = 10   # 学生提交（最低）
+
 _workers: list[threading.Thread] = []
 _running = False
 _lock = threading.Lock()

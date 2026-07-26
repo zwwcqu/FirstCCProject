@@ -111,6 +111,10 @@ def change_password(new_password: str) -> None:
 _STUDENT_DEFAULT_PASSWORD = "cad123"  # 学生初始默认密码
 _STUDENT_AUTH_DIR = DATA_DIR / "StudentAuth"  # 学生密码文件目录
 
+MIN_PASSWORD_LENGTH = 6                         # 密码最小长度
+TEACHER_COOKIE = "session"                      # 教师 session cookie 名
+STUDENT_COOKIE = "student_token"                # 学生 session cookie 名
+
 
 def _get_student_auth_path(class_name: str) -> Path:
     """返回某班级的学生密码文件路径"""

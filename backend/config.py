@@ -53,6 +53,9 @@ SETTINGS_DEBUG_FILE = DATA_DIR / "settings_debug.json"  # 调试/运维参数
 QUESTIONS_FILE = DATA_DIR / "questions.json"        # 题目索引列表
 STUDENT_INFO_DIR = DATA_DIR / "StudentInfo"         # 学生名单目录
 
+# 文件校验常量
+PDF_MAGIC = b"%PDF"  # PDF 文件头魔数
+
 
 def _init_data_dir() -> None:
     """首次启动时初始化数据目录：复制 settings 模版、创建空的 questions.json"""
