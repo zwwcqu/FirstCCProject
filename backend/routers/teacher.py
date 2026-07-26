@@ -513,29 +513,17 @@ async def batch_grade(request: Request, qid: str):
         update_submission_record(qid, sid, name, student_path.stem, "analyzing" if not is_dxf else "grading")
         try:
             if is_dxf:
-                # DXF 流程：先提取学生 DXF 数据，再评分
-                from services.dxf_service import extract_dxf
-                student_dir = get_student_dir(qid)
-                stu_dxf_data = extract_dxf(student_path)
-                # 保存学生 DXF 分析
-                save_student_analysis(qid, sid, name, stu_dxf_data)
-
-                # 确保学生预览图存在
-                stu_png = student_path.with_suffix(".png")
-                if not stu_png.exists():
-                    from services.dxf_service import render_dxf_preview
-                    render_dxf_preview(student_path, stu_png)
-
-                ref_preview = ref_png if ref_png.exists() else ref_dxf
-                result = grade_dxf(
+                # DXF 流程：统一入口
+                from services.dxf_service import run_dxf_grade
+                stu_dxf_data, result = run_dxf_grade(
+                    student_dxf_path=student_path,
                     ref_data=ref_analysis,
-                    stu_data=stu_dxf_data,
-                    ref_preview_path=ref_preview,
-                    stu_preview_path=stu_png,
+                    ref_dir=qdir,
                     phase1_criteria=phase1_criteria,
                     phase2_criteria=phase2_criteria,
                     knowledge=knowledge,
                 )
+                save_student_analysis(qid, sid, name, stu_dxf_data)
             else:
                 # PDF/图片流程（现有逻辑）
                 stu_analysis = get_student_analysis(qid, sid, name)

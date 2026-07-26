@@ -964,3 +964,63 @@ def render_dxf_preview(filepath: Path, output_path: Path) -> Path:
 
     logger.info(f"DXF 预览已生成: {output_path}")
     return output_path
+
+
+# ── 统一 DXF 评分入口（教师批量 + 学生提交共用）─────────────
+
+def run_dxf_grade(
+    student_dxf_path: Path,
+    ref_data: dict,
+    ref_dir: Path,
+    phase1_criteria: str,
+    phase2_criteria: str,
+    *,
+    stu_dxf_data: dict | None = None,
+    knowledge: str = "",
+) -> tuple[dict, dict]:
+    """
+    统一 DXF 评分入口——教师批量评分和学生提交评分都走这里。
+
+    Args:
+        student_dxf_path: 学生 DXF 文件路径
+        ref_data: 参考图提取数据（extract_dxf 的输出）
+        ref_dir: 参考图所在目录（用于查找 参考工程图.png / .dxf）
+        phase1_criteria: 阶段一评分标准
+        phase2_criteria: 阶段二评分标准
+        stu_dxf_data: 学生 DXF 提取数据（如已提前提取则传入，否则自动提取）
+        knowledge: 补充知识
+
+    Returns:
+        (stu_dxf_data, grade_result) — 学生 DXF 数据和 LLM 评分结果
+    """
+    from services.llm_service import grade_dxf
+
+    # 1. 提取学生 DXF 数据（如尚未提取）
+    if stu_dxf_data is None:
+        stu_dxf_data = extract_dxf(student_dxf_path)
+
+    # 2. 确保学生预览图存在
+    stu_png = student_dxf_path.with_suffix(".png")
+    if not stu_png.exists():
+        render_dxf_preview(student_dxf_path, stu_png)
+
+    # 3. 参考预览图（PNG 优先，DXF 兜底）
+    ref_png = ref_dir / "参考工程图.png"
+    ref_dxf = ref_dir / "参考工程图.dxf"
+    ref_preview = ref_png if ref_png.exists() else ref_dxf
+    if not ref_preview.exists():
+        raise RuntimeError("参考 DXF 预览图不存在，请联系老师")
+
+    # 4. LLM 评分
+    grade_result = grade_dxf(
+        ref_data=ref_data,
+        stu_data=stu_dxf_data,
+        ref_preview_path=ref_preview,
+        stu_preview_path=stu_png,
+        phase1_criteria=phase1_criteria,
+        phase2_criteria=phase2_criteria,
+        knowledge=knowledge,
+    )
+
+    return stu_dxf_data, grade_result
+    return output_path

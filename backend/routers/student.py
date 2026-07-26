@@ -496,7 +496,7 @@ def _run_grade(
         is_dxf = q.get("submission_type") == "dxf" if q else False
 
         if is_dxf:
-            # DXF 流程：ezdxf 数据已提取，直接用 grade_dxf
+            # DXF 流程：统一入口
             if is_test:
                 raise RuntimeError("DXF 文件暂不支持测试模式")
             stu_path = get_student_submission_path(qid, student_id, name)
@@ -507,32 +507,14 @@ def _run_grade(
             if stu_analysis is None:
                 raise RuntimeError("DXF 数据尚未提取，请先完成分析步骤")
 
-            # 参考预览图
-            ref_png = qdir / "参考工程图.png"
-            ref_dxf = qdir / "参考工程图.dxf"
-            ref_preview = ref_png if ref_png.exists() else ref_dxf
-            if not ref_preview.exists():
-                raise RuntimeError("参考 DXF 预览图不存在，请联系老师")
-
-            # 学生预览图
-            from services.question_service import get_student_dir
-            sdir = get_student_dir(qid)
-            safe_name = _sanitize_filename_part(name)
-            safe_id = _sanitize_filename_part(student_id)
-            stu_png = sdir / f"{safe_name}_{safe_id}.png"
-
-            from services.dxf_service import render_dxf_preview
-            if not stu_png.exists():
-                render_dxf_preview(stu_path, stu_png)
-
-            from services.llm_service import grade_dxf
-            result = grade_dxf(
+            from services.dxf_service import run_dxf_grade
+            _, result = run_dxf_grade(
+                student_dxf_path=stu_path,
                 ref_data=ref_analysis,
-                stu_data=stu_analysis,
-                ref_preview_path=ref_preview,
-                stu_preview_path=stu_png,
+                ref_dir=qdir,
                 phase1_criteria=phase1_criteria,
                 phase2_criteria=phase2_criteria,
+                stu_dxf_data=stu_analysis,
                 knowledge=knowledge,
             )
 
