@@ -1152,16 +1152,27 @@ export default function TeacherDashboard() {
                       </button>
                     )}
                   </div>
-                  <textarea
-                    value={templateContent}
-                    onChange={(e) => { setTemplateContent(e.target.value); setTemplateLoaded(true); }}
-                    rows={10}
-                    className="w-full border rounded px-3 py-2 text-sm font-mono"
-                    placeholder="选择模板类型后自动加载..."
-                  />
-                  <p className="text-xs text-gray-400 mt-0.5">
-                    LLM 根据此模板从工程图中提取信息。创建后可随时修改。
-                  </p>
+                  {submissionType === "dxf" ? (
+                    <div className="p-3 bg-gray-50 rounded border text-sm space-y-1">
+                      <p className="font-medium text-gray-700">DXF 文件无需大模型识读</p>
+                      <p className="text-xs text-gray-500">
+                        DXF 使用 ezdxf 直接提取结构化数据，此模板不参与评分。评分标准请在下方阶段评分标准中设置。
+                      </p>
+                    </div>
+                  ) : (
+                    <>
+                      <textarea
+                        value={templateContent}
+                        onChange={(e) => { setTemplateContent(e.target.value); setTemplateLoaded(true); }}
+                        rows={10}
+                        className="w-full border rounded px-3 py-2 text-sm font-mono"
+                        placeholder="选择模板类型后自动加载..."
+                      />
+                      <p className="text-xs text-gray-400 mt-0.5">
+                        LLM 根据此模板从工程图中提取信息。创建后可随时修改。
+                      </p>
+                    </>
+                  )}
                 </div>
 
                 <div className="grid grid-cols-2 gap-3">
