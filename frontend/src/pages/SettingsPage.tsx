@@ -161,12 +161,13 @@ const TABS = [
 ];
 
 // ------ 识读模板管理标签页 ------
-const TEMPLATE_NAMES = ["零件图识读模板.txt", "装配图识读模板.txt", "平面图识读模板.txt", "组合体三视图识读模板.txt"];
+const TEMPLATE_NAMES = ["零件图识读模板.txt", "装配图识读模板.txt", "平面图识读模板.txt", "组合体三视图识读模板.txt", "DXF识读模板.txt"];
 const TEMPLATE_LABELS: Record<string, string> = {
   "零件图识读模板.txt": "零件图",
   "装配图识读模板.txt": "装配图",
   "平面图识读模板.txt": "平面图",
   "组合体三视图识读模板.txt": "组合体三视图",
+  "DXF识读模板.txt": "DXF",
 };
 
 function AnalysisTemplatesTab({ saving, setMsg }: { saving: boolean; setMsg: (m: string) => void }) {

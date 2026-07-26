@@ -224,6 +224,15 @@ export default function TeacherDashboard() {
     }).catch(() => {});
   }, [templateType, showForm, editingId]);
 
+  // submission_type 切换时自动切换模板类型
+  useEffect(() => {
+    if (submissionType === "dxf") {
+      setTemplateType("DXF识读模板.txt");
+    } else if (templateType === "DXF识读模板.txt") {
+      setTemplateType("零件图识读模板.txt");
+    }
+  }, [submissionType]);
+
   const resetForm = () => {
     setQid("");
     setTitle("");
@@ -1117,6 +1126,7 @@ export default function TeacherDashboard() {
                       <option value="装配图识读模板.txt">装配图</option>
                       <option value="平面图识读模板.txt">平面图</option>
                       <option value="组合体三视图识读模板.txt">组合体三视图</option>
+                      <option value="DXF识读模板.txt">DXF</option>
                     </select>
                     {!editingId && (
                       <button type="button" onClick={async () => {
