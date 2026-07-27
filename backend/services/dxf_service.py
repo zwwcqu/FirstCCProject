@@ -1662,6 +1662,416 @@ def preprocess_dxf(input_path: Path, output_path: Path) -> None:
                  f"{', '.join(f'{t[1]}' for t in to_replace)})")
 
 
+# ── 重叠线清理 ─────────────────────────────────────────
+
+_TOL = 1e-8
+
+_SOLID_LTYPES = {"", "bylayer", "continuous", "solid"}
+_DASHED_LTYPE_KWS = ["dash", "dotted", "hidden", "dashdot",
+                     "acad_iso02", "acad_iso04", "acad_iso06",
+                     "acad_iso07", "acad_iso09", "acad_iso11"]
+_CENTER_LTYPE_KWS = ["center", "center2", "centerx2",
+                     "acad_iso08", "acad_iso10", "acad_iso12"]
+
+
+def _resolve_entity_linetype(entity: dict, layers: dict) -> str:
+    """解析实体实际线型：BYLAYER 时查图层"""
+    lt = (entity.get("linetype") or "").strip()
+    if lt.upper() == "BYLAYER" or not lt:
+        layer_name = entity.get("layer", "0")
+        layer_info = layers.get(layer_name, {})
+        lt = str(layer_info.get("linetype", "Continuous"))
+    return lt
+
+
+def _linetype_category(linetype: str) -> str:
+    """返回线型分类: 'solid', 'dashed', 'centerline', 'other'"""
+    lower = linetype.lower().strip()
+    if not lower or lower in _SOLID_LTYPES:
+        return "solid"
+    if any(kw in lower for kw in _DASHED_LTYPE_KWS):
+        return "dashed"
+    if any(kw in lower for kw in _CENTER_LTYPE_KWS):
+        return "centerline"
+    return "other"
+
+
+def _normalize_arc(arc: dict) -> dict:
+    """统一圆弧为逆时针、start < end；跨越 0° 时 end += 360"""
+    a = dict(arc)
+    s, e = a["start_angle"], a["end_angle"]
+    if s > e:
+        e += 360
+    a["start_angle"] = s
+    a["end_angle"] = e
+    return a
+
+
+def _parallel(p1, p2, q1, q2) -> bool:
+    """向量 (p1→p2) 与 (q1→q2) 是否平行（相对容差）"""
+    dx1, dy1 = p2[0] - p1[0], p2[1] - p1[1]
+    dx2, dy2 = q2[0] - q1[0], q2[1] - q1[1]
+    cross = abs(dx1 * dy2 - dy1 * dx2)
+    len1 = math.hypot(dx1, dy1)
+    len2 = math.hypot(dx2, dy2)
+    # 容差取两向量长度的 1e-4 倍，最低 1e-6
+    tol = max(1e-6, 1e-4 * max(len1, len2))
+    return cross < tol
+
+
+def _collinear(l1: dict, l2: dict) -> bool:
+    """两条 LINE 是否共线"""
+    a, b = l1["start"], l1["end"]
+    c, d = l2["start"], l2["end"]
+    if not _parallel(a, b, c, d):
+        return False
+    # a→c 也与方向平行
+    return _parallel(a, b, a, c)
+
+
+def _project_t(pt, ref_start, ref_end) -> float:
+    """返回 pt 在参考线上的投影参数 t"""
+    dx = ref_end[0] - ref_start[0]
+    dy = ref_end[1] - ref_start[1]
+    if abs(dx) < _TOL and abs(dy) < _TOL:
+        return 0.0
+    return ((pt[0] - ref_start[0]) * dx + (pt[1] - ref_start[1]) * dy) / (dx * dx + dy * dy)
+
+
+def _merge_lines_batch(batch: list[dict]) -> list[dict]:
+    """合并一批共线线段。取最远两点作为新线段。"""
+    if not batch:
+        return []
+    ref = batch[0]
+    rs, re = ref["start"], ref["end"]
+    ts = [_project_t(l["start"], rs, re) for l in batch]
+    te = [_project_t(l["end"], rs, re) for l in batch]
+    all_t = ts + te
+    i_min = all_t.index(min(all_t))
+    i_max = all_t.index(max(all_t))
+    pts = [l["start"] for l in batch] + [l["end"] for l in batch]
+    merged = dict(batch[0])
+    merged["start"] = pts[i_min]
+    merged["end"] = pts[i_max]
+    return [merged]
+
+
+def _overlap_interval(t1: float, t2: float, u1: float, u2: float) -> tuple[float, float] | None:
+    """返回两个投影区间的重叠段，无重叠返回 None"""
+    lo = max(min(t1, t2), min(u1, u2))
+    hi = min(max(t1, t2), max(u1, u2))
+    if hi - lo >= -_TOL:
+        return lo, hi
+    return None
+
+
+def _clean_lines_by_category(lines: list[dict]) -> list[dict]:
+    """合并某类线型中所有共线重叠/相接线段"""
+    if not lines:
+        return []
+    remaining = list(lines)
+    changed = True
+    while changed:
+        changed = False
+        i = 0
+        while i < len(remaining):
+            j = i + 1
+            merged_any = False
+            while j < len(remaining):
+                if _collinear(remaining[i], remaining[j]):
+                    ri, rj = remaining[i], remaining[j]
+                    rs, re = ri["start"], ri["end"]
+                    ti = [_project_t(ri["start"], rs, re), _project_t(ri["end"], rs, re)]
+                    tj = [_project_t(rj["start"], rs, re), _project_t(rj["end"], rs, re)]
+                    if _overlap_interval(ti[0], ti[1], tj[0], tj[1]) is not None:
+                        merged = _merge_lines_batch([remaining.pop(j), remaining.pop(i)])[0]
+                        remaining.append(merged)
+                        changed = True
+                        merged_any = True
+                        break
+                j += 1
+            if not merged_any:
+                i += 1
+    return remaining
+
+
+def _dedup_circles(circles: list[dict]) -> list[dict]:
+    """同圆心同半径的圆只保留一个"""
+    seen = set()
+    result = []
+    for c in circles:
+        key = (round(c["center"][0], 4), round(c["center"][1], 4), round(c["radius"], 4))
+        if key not in seen:
+            seen.add(key)
+            result.append(c)
+    return result
+
+
+def _arcs_same_base(a1: dict, a2: dict) -> bool:
+    """两个圆弧是否同圆心同半径"""
+    return (abs(a1["center"][0] - a2["center"][0]) < _TOL and
+            abs(a1["center"][1] - a2["center"][1]) < _TOL and
+            abs(a1["radius"] - a2["radius"]) < _TOL)
+
+
+def _merge_arcs_batch(batch: list[dict]) -> list[dict]:
+    """合并同圆心同半径且有角度重叠的圆弧"""
+    if not batch:
+        return []
+    norm = [_normalize_arc(a) for a in batch]
+    starts = [a["start_angle"] for a in norm]
+    ends = [a["end_angle"] for a in norm]
+    # 合并角度范围
+    s_min, e_max = min(starts), max(ends)
+    merged = dict(batch[0])
+    merged["start_angle"] = s_min
+    merged["end_angle"] = e_max
+    # 如果范围超过 360，归一化
+    if e_max - s_min > 360:
+        merged["end_angle"] = s_min + 360
+    return [merged]
+
+
+def _clean_arcs_by_category(arcs: list[dict]) -> list[dict]:
+    """合并同圆心同半径且有角度重叠的圆弧，迭代到稳定"""
+    if not arcs:
+        return []
+    remaining = list(arcs)
+    changed = True
+    while changed:
+        changed = False
+        i = 0
+        while i < len(remaining):
+            j = i + 1
+            merged_any = False
+            while j < len(remaining):
+                if _arcs_same_base(remaining[i], remaining[j]):
+                    ni = _normalize_arc(remaining[i])
+                    nj = _normalize_arc(remaining[j])
+                    if _overlap_interval(ni["start_angle"], ni["end_angle"],
+                                         nj["start_angle"], nj["end_angle"]) is not None:
+                        merged = _merge_arcs_batch([remaining.pop(j), remaining.pop(i)])[0]
+                        remaining.append(merged)
+                        changed = True
+                        merged_any = True
+                        break
+                j += 1
+            if not merged_any:
+                i += 1
+    return remaining
+
+
+def _arc_covered_by_circle(arc: dict, circle: dict) -> bool:
+    """圆弧是否被同圆心同半径的圆完全覆盖"""
+    return _arcs_same_base(arc, circle)
+
+
+def _cut_lines_overlap(dashed: dict, solid: dict) -> list[dict] | None:
+    """
+    实线覆盖虚线的重叠部分，虚线被切除。
+    返回切除后剩余的虚线线段列表。
+    - 虚线被完全覆盖 → []（删除）
+    - 虚线部分覆盖 → 1-2 条新虚线
+    - 无重叠 → [dashed]（不变）
+    如果两条线不共线或无重叠，返回 None。
+    """
+    if not _collinear(dashed, solid):
+        return None
+
+    rs, re = dashed["start"], dashed["end"]
+    ti1, ti2 = _project_t(dashed["start"], rs, re), _project_t(dashed["end"], rs, re)
+    tj1, tj2 = _project_t(solid["start"], rs, re), _project_t(solid["end"], rs, re)
+    d_min, d_max = min(ti1, ti2), max(ti1, ti2)
+    s_min, s_max = min(tj1, tj2), max(tj1, tj2)
+
+    ov = _overlap_interval(d_min, d_max, s_min, s_max)
+    if ov is None:
+        return None  # 无重叠
+
+    ol, oh = ov
+    # 切除 [ol, oh]，剩余 [d_min, ol] 和 [oh, d_max]
+    result = []
+    if ol - d_min > _TOL:  # 左侧剩余
+        result.append(_make_line_from_projection(dashed, d_min, ol, rs, re))
+    if d_max - oh > _TOL:  # 右侧剩余
+        result.append(_make_line_from_projection(dashed, oh, d_max, rs, re))
+    return result
+
+
+def _make_line_from_projection(
+    template: dict, t1: float, t2: float, ref_start, ref_end
+) -> dict:
+    """根据投影参数创建新线段。自动处理 t1/t2 顺序，确保长度的正方向。"""
+    dx = ref_end[0] - ref_start[0]
+    dy = ref_end[1] - ref_start[1]
+    length = dx * dx + dy * dy
+    if length < _TOL:
+        return dict(template)
+    p1 = [ref_start[0] + t1 * dx, ref_start[1] + t1 * dy]
+    p2 = [ref_start[0] + t2 * dx, ref_start[1] + t2 * dy]
+    new_line = dict(template)
+    # 保持线段方向与模板一致（模板 start→end 方向不变）
+    new_line["start"] = [round(p1[0], 4), round(p1[1], 4)]
+    new_line["end"] = [round(p2[0], 4), round(p2[1], 4)]
+    return new_line
+
+
+def clean_overlapping_entities(
+    lines: list[dict],
+    circles: list[dict],
+    arcs: list[dict],
+    layers: dict,
+) -> tuple[list[dict], list[dict], list[dict]]:
+    """
+    清理重叠实体。
+
+    流程：
+      1. 按线型分类（实线/虚线/中心线）
+      2. 各类内部分别合并重叠线段、圆、圆弧
+      3. 虚线与实线重叠：切除虚线的重叠部分
+      4. 迭代直到无变化
+
+    Args:
+        lines: 线段列表
+        circles: 圆列表
+        arcs: 圆弧列表
+        layers: 图层信息 {name: {linetype, ...}}
+
+    Returns:
+        (cleaned_lines, cleaned_circles, cleaned_arcs)
+    """
+    # ── 1. 按线型分类 ──
+    by_cat: dict[str, dict[str, list]] = {
+        "solid": {"lines": [], "circles": [], "arcs": []},
+        "dashed": {"lines": [], "circles": [], "arcs": []},
+        "centerline": {"lines": [], "circles": [], "arcs": []},
+    }
+
+    def _categorize_entity(entity, entity_type, store):
+        lt = _resolve_entity_linetype(entity, layers)
+        cat = _linetype_category(lt)
+        if cat in by_cat:
+            store[cat][entity_type].append(entity)
+        else:
+            # 'other' → 归入 solid 作为兜底
+            store["solid"][entity_type].append(entity)
+
+    for ln in lines:
+        _categorize_entity(ln, "lines", by_cat)
+    for c in circles:
+        _categorize_entity(c, "circles", by_cat)
+    for a in arcs:
+        _categorize_entity(a, "arcs", by_cat)
+
+    # ── 迭代处理 ──
+    changed = True
+    max_iter = 20
+    iteration = 0
+    while changed and iteration < max_iter:
+        iteration += 1
+        changed = False
+
+        # 2. 各类内部处理
+        for cat in ("solid", "dashed", "centerline"):
+            g = by_cat[cat]
+            before_l = len(g["lines"])
+            g["lines"] = _clean_lines_by_category(g["lines"])
+            if len(g["lines"]) != before_l:
+                changed = True
+
+            before_c = len(g["circles"])
+            g["circles"] = _dedup_circles(g["circles"])
+            if len(g["circles"]) != before_c:
+                changed = True
+
+            before_a = len(g["arcs"])
+            g["arcs"] = _clean_arcs_by_category(g["arcs"])
+            if len(g["arcs"]) != before_a:
+                changed = True
+
+            # 圆弧被同圆心同半径的圆覆盖 → 删除圆弧
+            new_arcs = []
+            for a in g["arcs"]:
+                covered = any(_arc_covered_by_circle(a, circ) for circ in g["circles"])
+                if not covered:
+                    new_arcs.append(a)
+                else:
+                    changed = True
+            g["arcs"] = new_arcs
+
+        # 3. 虚线与实线重叠处理（逐条累进切割）
+        dashed_lines = by_cat["dashed"]["lines"]
+        solid_lines = by_cat["solid"]["lines"]
+        new_dashed = []
+        for dl in dashed_lines:
+            remaining_segs = [dl]
+            for sl in solid_lines:
+                next_segs = []
+                for seg in remaining_segs:
+                    result = _cut_lines_overlap(seg, sl)
+                    if result is None:
+                        next_segs.append(seg)
+                    else:
+                        next_segs.extend(result)
+                remaining_segs = next_segs
+            if len(remaining_segs) != 1 or (
+                remaining_segs[0]['start'] != dl['start'] or
+                remaining_segs[0]['end'] != dl['end']
+            ):
+                new_dashed.extend(remaining_segs)
+                changed = True
+            else:
+                new_dashed.append(dl)
+        by_cat["dashed"]["lines"] = new_dashed
+
+        # 4. 虚线圆被实线圆覆盖 → 删除虚线圆
+        solid_circle_keys = {
+            (round(c['center'][0], 4), round(c['center'][1], 4), round(c['radius'], 4))
+            for c in by_cat['solid']['circles']
+        }
+        new_dashed_circles = []
+        for dc in by_cat['dashed']['circles']:
+            key = (round(dc['center'][0], 4), round(dc['center'][1], 4), round(dc['radius'], 4))
+            if key in solid_circle_keys:
+                changed = True  # 虚线圆被实线圆覆盖，丢弃
+            else:
+                new_dashed_circles.append(dc)
+        by_cat['dashed']['circles'] = new_dashed_circles
+
+        # 5. 虚线圆弧被实线圆弧/实线圆覆盖
+        dashed_arcs = by_cat["dashed"]["arcs"]
+        solid_arcs = by_cat["solid"]["arcs"]
+        solid_circles = by_cat["solid"]["circles"]
+        new_dashed_arcs = []
+        for da in dashed_arcs:
+            covered = False
+            for sa in solid_arcs:
+                if _arcs_same_base(da, sa):
+                    nda = _normalize_arc(da)
+                    nsa = _normalize_arc(sa)
+                    if _overlap_interval(nda["start_angle"], nda["end_angle"],
+                                         nsa["start_angle"], nsa["end_angle"]) is not None:
+                        covered = True
+                        break
+            if not covered:
+                for sc in solid_circles:
+                    if _arc_covered_by_circle(da, sc):
+                        covered = True
+                        break
+            if not covered:
+                new_dashed_arcs.append(da)
+            else:
+                changed = True
+        by_cat["dashed"]["arcs"] = new_dashed_arcs
+
+    # ── 合并结果 ──
+    out_lines = by_cat["solid"]["lines"] + by_cat["dashed"]["lines"] + by_cat["centerline"]["lines"]
+    out_circles = by_cat["solid"]["circles"] + by_cat["dashed"]["circles"] + by_cat["centerline"]["circles"]
+    out_arcs = by_cat["solid"]["arcs"] + by_cat["dashed"]["arcs"] + by_cat["centerline"]["arcs"]
+
+    return out_lines, out_circles, out_arcs
+
+
 # ── 统一 DXF 分析（教师参考图 + 学生作业共用）───────────────
 
 def process_dxf(filepath: Path, output_dir: Path | None = None) -> dict:
