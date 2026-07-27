@@ -177,7 +177,7 @@ def _explode_polyline_2d(entity) -> list[dict]:
 
             bulge_val = bulge  # b2 is the next point's bulge, not used
 
-            if abs(bulge_val) < 1e-10:
+            if abs(bulge_val) < 1e-6:
                 # 直段
                 segments.append({
                     "start": [round(p1[0], 4), round(p1[1], 4)],
@@ -195,7 +195,7 @@ def _explode_polyline_2d(entity) -> list[dict]:
                     continue
                 # 计算弧参数
                 sagitta = chord_len * abs(bulge_val) / 2
-                radius = (chord_len / 2) * (1 + bulge_val ** 2) / (2 * abs(bulge_val)) if abs(bulge_val) > 1e-10 else chord_len * 1000
+                radius = (chord_len / 2) * (1 + bulge_val ** 2) / (2 * abs(bulge_val)) if abs(bulge_val) > 1e-6 else chord_len * 1000
                 mid_chord = ((p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2)
                 # 圆心方向垂直于弦
                 perp = (-chord_vec[1], chord_vec[0])
@@ -1331,7 +1331,7 @@ def _explode_ellipse_to_lines(entity) -> list[dict]:
     end_param = entity.dxf.end_param if entity.dxf.hasattr("end_param") else 2 * _math.pi
 
     major_len = _math.hypot(major_vec[0], major_vec[1])
-    if major_len < 1e-10:
+    if major_len < 1e-6:
         return []
     angle = _math.atan2(major_vec[1], major_vec[0])
     minor_len = major_len * ratio
