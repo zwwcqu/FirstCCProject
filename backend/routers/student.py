@@ -428,8 +428,11 @@ async def start_analysis(
     file_bytes: bytes | None = None
     student_fn = ""
 
+    # 判断是否为 DXF 题目
+    q = get_question(qid)
+    is_dxf = q.get("submission_type") == "dxf" if q else False
+
     if is_test:
-        # 测试模式：依赖内存状态
         st = get_status(qid, name, student_id)
         if st["step"] != "upload" or st["status"] != "done":
             raise HTTPException(status_code=400, detail="请先上传作业文件")
@@ -438,11 +441,21 @@ async def start_analysis(
             raise HTTPException(status_code=400, detail="测试模式文件数据丢失，请重新上传")
         student_fn = st.get("student_filename", "")
     else:
-        # 正式模式：直接检查磁盘文件是否存在
         student_path = get_student_submission_path(qid, student_id, name)
         if student_path is None:
             raise HTTPException(status_code=400, detail="没有找到作业文件，请先上传")
         student_fn = student_path.name
+
+    if is_dxf and not is_test:
+        # DXF 分析走独立串行队列（无需 LLM）
+        from services.dxf_task_queue import enqueue as dxf_enqueue
+
+        def _dxf_task():
+            _run_analyze(qid, name, student_id, None, student_fn, False, "", knowledge="")
+
+        set_status(qid, name, student_id, "analyze", "queued")
+        dxf_enqueue(_dxf_task, task_key=f"dxf_analyze:{qid}:{student_id}")
+        return {"ok": True, "status": "processing"}
 
     def _task():
         kn = get_question_files(qid).get("knowledge", "")

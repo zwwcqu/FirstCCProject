@@ -114,6 +114,7 @@ export default function TeacherDashboard() {
 
   // 查看作业弹窗
   const [reviewSid, setReviewSid] = useState<string | null>(null);
+  const [floatStudentFile, setFloatStudentFile] = useState<string | null>(null);
   const [reviewComment, setReviewComment] = useState("");
   const [reviewGrade, setReviewGrade] = useState("");
   const [templateModalQid, setTemplateModalQid] = useState<string | null>(null);
@@ -617,6 +618,7 @@ export default function TeacherDashboard() {
     const row = gradeData.find((r: any) => r[COL.学号] === sid);
     const name = row?.[COL.姓名] || "";
     setReviewSid(sid);
+    setFloatStudentFile(sid);  // 同时显示浮动图
     setReviewGrade(row?.[COL.成绩] || "");
     setReviewComment(row?.[COL.教师评语] || "");
     setSavedText("");
@@ -1616,13 +1618,13 @@ export default function TeacherDashboard() {
           );
         })()}
 
-        {/* 查看作业浮动图 */}
-        {reviewSid && gradesView && (
+        {/* 查看作业浮动图（独立于弹窗，关闭不影响弹窗） */}
+        {floatStudentFile && gradesView && (
           <FloatingImageViewer
-            src={getTeacherStudentPreviewUrl(gradesView, reviewSid)}
+            src={getTeacherStudentPreviewUrl(gradesView, floatStudentFile)}
             title="学生工程图"
             visible={true}
-            onClose={() => setReviewSid(null)}
+            onClose={() => setFloatStudentFile(null)}
             initialWidth={340}
             initialHeight={380}
             zIndex={70}
@@ -1638,7 +1640,7 @@ export default function TeacherDashboard() {
           return (
             <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[65]"
               onClick={(e) => {
-                if (e.target === e.currentTarget) setReviewSid(null);
+                if (e.target === e.currentTarget) { setReviewSid(null); setFloatStudentFile(null); }
               }}
               onMouseMove={(e) => {
                 if (!modalMoveRef.current) return;
@@ -1676,7 +1678,7 @@ export default function TeacherDashboard() {
                     )}
                     {!isGradeOwner && <span className="text-xs text-gray-400">只读</span>}
                     {savedText && <span className="text-xs text-green-600">{savedText}</span>}
-                    <button onClick={() => setReviewSid(null)}
+                    <button onClick={() => { setReviewSid(null); setFloatStudentFile(null); }}
                       onMouseDown={(e) => e.stopPropagation()}
                       className="px-3 py-1 border rounded hover:bg-gray-50 text-sm">关闭</button>
                   </div>

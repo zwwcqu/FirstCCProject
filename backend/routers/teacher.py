@@ -182,8 +182,9 @@ def _run_reference_analysis(qid: str) -> None:
 
 
 def _run_reference_dxf_analysis(qid: str) -> None:
-    """DXF 参考图分析：使用统一 process_dxf 提取数据 + 渲染预览"""
+    """DXF 参考图分析：通过 DXF 串行队列异步执行，不阻塞请求线程"""
     from services.dxf_service import process_dxf
+    from services.dxf_task_queue import enqueue as dxf_enqueue
 
     qdir = get_question_dir(qid)
     ref_dxf = qdir / "参考工程图.dxf"
@@ -201,14 +202,17 @@ def _run_reference_dxf_analysis(qid: str) -> None:
         except Exception:
             pass
 
-    try:
-        logger.info(f"[{qid}] 开始 DXF 数据提取…")
-        dxf_data = process_dxf(ref_dxf, qdir)
-        save_reference_analysis(qid, dxf_data)
-        logger.info(f"[{qid}] DXF 参考图分析完成（含尺寸 + 无尺寸预览）")
-    except Exception as e:
-        logger.error(f"[{qid}] DXF 参考图分析失败: {e}")
-        _save_ref_analysis_error(qid, f"DXF 分析失败: {str(e)}")
+    def _task():
+        try:
+            logger.info(f"[{qid}] 开始 DXF 数据提取…")
+            dxf_data = process_dxf(ref_dxf, qdir)
+            save_reference_analysis(qid, dxf_data)
+            logger.info(f"[{qid}] DXF 参考图分析完成（含尺寸 + 无尺寸预览）")
+        except Exception as e:
+            logger.error(f"[{qid}] DXF 参考图分析失败: {e}")
+            _save_ref_analysis_error(qid, f"DXF 分析失败: {str(e)}")
+
+    dxf_enqueue(_task, task_key=f"ref_dxf:{qid}")
 
 
 # ── 登录 / 登出 ──────────────────────────────────────────

@@ -36,10 +36,14 @@ async def lifespan(app: FastAPI):
     _init_data_dir()
     from services.task_queue import start as start_queue
     start_queue()
+    from services.dxf_task_queue import start as start_dxf_queue
+    start_dxf_queue()
     logger.info("应用启动完成")
     yield
     from services.task_queue import stop as stop_queue
     stop_queue()
+    from services.dxf_task_queue import stop as stop_dxf_queue
+    stop_dxf_queue()
     logger.info("应用关闭")
 
 
