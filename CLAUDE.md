@@ -18,10 +18,19 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ### DXF 流程（ezdxf 提取 + LLM 评分）
 
-1. **参考图提取** (teacher, once per question) — ezdxf 解析 DXF，无需 LLM
-2. **学生图提取** (per student) — ezdxf 提取实体/尺寸/图层等结构化数据
-3. **DXF 评分** — 单次 LLM 调用，发送预览图 + 结构化数据，完成 Phase 1 + Phase 2
-4. **评分** — 与 PDF/图片相同的公式和等级体系
+1. **参考图提取** (teacher, once per question) — `process_dxf()` 统一入口：ezdxf 提取 + 渲染两张预览图（含尺寸 + 无尺寸），走 **DXF 串行队列** `dxf_task_queue`（concurrency=1，避免渲染抢 CPU）
+2. **学生图提取** (per student) — 同上 `process_dxf()`，走 DXF 串行队列
+3. **DXF 评分** — 单次 LLM 调用，发送**无尺寸预览图**（纯几何，Phase 1 视觉对比）+ 结构化数据（Phase 2 量化对比）。走 LLM 任务队列 `task_queue`
+4. **评分** — Total = √(Phase1 × Phase2), mapped to 9-level grades (A+≥90 → F<50)
+
+### 服务池架构
+
+| 队列 | 文件 | 并发 | 用途 |
+|------|------|:--:|------|
+| LLM 队列 | `task_queue.py` | 3（可配） | PDF/图片 LLM 分析 + 所有评分 |
+| DXF 队列 | `dxf_task_queue.py` | 1（串行） | 教师/学生 DXF 提取+渲染 |
+
+LLM 调用在线程中同步阻塞等待——不阻塞 FastAPI 事件循环。调大 models[].concurrency 即可增加 LLM 并发数（上限由 settings_debug.json → task_queue.max_concurrency 控制）。
 
 ## Commands
 
@@ -54,7 +63,13 @@ Browser (React SPA)
 - **`routers/teacher.py`** — All under `/api/teacher`, requires `_require_auth` (session cookie). Question CRUD with ownership enforcement (only creator can edit/delete), grades CSV viewer/editor, batch grading, roster class management, reference analysis, file/preview serving, supplement submission, **student password reset**, **teacher profile editing**.
 - **`routers/student.py`** — Public `/api/student` endpoints. List questions (filtered by class), get detail, student login (name+ID+password), submit homework (`mode=test|submit`), three-step non-blocking flow (upload → analyze → grade) with status polling, result/analysis queries, file/preview serving. Rate limiting (50 req/min per IP). **Deadline enforcement on upload.**
 - **`services/llm_service.py`** — OpenAI-compatible client with dual-model support (local LM Studio + cloud). Key functions: `analyze_merged()` (reference analysis, 1 call), `analyze_and_grade()` (student analysis + grading, 1 combined call), `grade_dxf()` (DXF scoring with images + structured data), `grade_combined()` (scoring only, no analysis). PDF→PNG conversion, image resize.
-- **`services/dxf_service.py`** — DXF file processing via ezdxf. `extract_dxf()` parses entities (LINE/CIRCLE/ARC/LWPOLYLINE/MLINE/SPLINE/ELLIPSE/INSERT→exploded), dimensions, texts, layers (linetype/color/lineweight), hatches, centerlines (identified by layer name or linetype). `render_dxf_preview()` uses matplotlib backend to render DXF to PNG. MLINE and POLYLINE are exploded into LINE segments during extraction.
+- **`services/dxf_service.py`** — DXF file processing via ezdxf. Key functions:
+  - `extract_dxf()` — parses entities (LINE/CIRCLE/ARC/LWPOLYLINE/MLINE/SPLINE/ELLIPSE/INSERT→exploded), dimensions (linear/angular/diameter/radius/ordinate via `dimtype & 0x0F` + `get_measurement()`), texts, layers, hatches, centerlines.
+  - `render_dxf_preview()` — matplotlib backend, mm 坐标，长边 768px。修复了 DXF 颜色 7→黑（白底可见）、BYBLOCK→BYLAYER（标注可见）、`adjust_figure=False`（画布不变形）。
+  - `process_dxf()` — 统一入口：提取数据 + 渲染含尺寸/无尺寸两张预览图。
+  - `run_dxf_grade()` — 统一评分入口：无尺寸图做 Phase 1 视觉对比，结构化数据做 Phase 2 量化对比。
+- **`services/dxf_task_queue.py`** — DXF 处理串行队列，concurrency=1，独立于 LLM 队列。
+- **`services/task_queue.py`** — LLM 任务队列。Priority: teacher(0) > batch(5) > student(10)。Worker 数 = min(model.concurrency, max_concurrency)。去重（同 key 不重复入队）。
 - **`services/question_service.py`** — Question CRUD with deadline, knowledge, teacher ownership, and class filtering.
 - **`services/grade_service.py`** — CSV grade persistence with fcntl file locking. 18-column format.
 - **`services/task_queue.py`** — Priority-based task queue with configurable concurrency.
@@ -102,11 +117,20 @@ Browser (React SPA)
 
 ## Question ownership & class filtering
 
-- Questions have `teacher` (creator username) and `classes` (comma-separated) fields in `questions.json`
+- Questions have `teacher` (creator username), `classes` (comma-separated), and `visible_to_others` (0=仅限本人, 1=其他教师可见) fields in `questions.json`
+- Question IDs auto-generated as `YYMMDD-NNN` (e.g. `260727-001`), no manual input needed
 - Students only see questions matching their class
-- Teachers see all questions but can only edit/delete their own
-- Grade editing (both inline and review modal) restricted to question owner
+- Teachers: non-owned questions hidden if `visible_to_others=0`; visible but read-only if `=1`
+- Grade editing restricted to question owner
 - Frontend: non-owned questions shown greyed out with "只读" label
+
+## DXF rendering quirks
+
+- **Color 7 (white/black)**: ezdxf maps to `#FFFFFF`; fixed by setting `layer.rgb = (0,0,0)` before rendering (white bg → black lines)
+- **BYBLOCK (color=0)**: ezdxf doesn't push state for DIMENSION, so BYBLOCK entities resolve to `#FFFFFF` (invisible). Fixed by changing block entity color `0 → 256` (BYLAYER)
+- **Dimension layer (文本层, color=212)**: dark purple `#a500a5` blends with black lines; set to bright blue `(0,102,204)` for visibility
+- **MatplotlibBackend**: `adjust_figure=False` to keep canvas size; `fig.add_axes([0,0,1,1])` for no margins
+- Coordinates are ISO/GB mm. Long side scaled to 768px.
 
 ## Data layout
 
@@ -171,13 +195,17 @@ config/                        — Config templates (checked into repo)
 - LLM: dual-model support — local LM Studio or cloud DashScope qwen model
 - PDF handling requires `pdf2image` + poppler installed on the host
 - DXF handling requires `ezdxf` + `matplotlib` (`render_dxf_preview`)
+- **API Key 安全**: 后端脱敏返回 `sk-c****dwyy`（首尾各 4 字符）。测试接口后端查真实 Key。前端无显示/隐藏按钮
 - No database — all storage is file-system based (JSON, CSV, Markdown, images/PDFs/DXFs)
 - fcntl file locking for concurrent grade CSV writes
 - **PDF/image grading**: single `analyze_and_grade()` call combines analysis + phase1 + phase2
-- **DXF grading**: `extract_dxf()` (no LLM) → `grade_dxf()` (LLM: preview images + structured data)
+- **DXF grading**: `process_dxf()` (ezdxf, no LLM) → `grade_dxf()` (LLM: 无尺寸预览图 + structured data)
+- **DXF Phase 1**: uses 无尺寸 preview (pure geometry) for visual comparison, not 有尺寸 version
 - Student image sent twice: large (3508px) for analysis, thumbnail (768px) for comparison
 - Reference image cached as `参考图_分析.json`, reused across all students
-- DXF `参考图_分析.json` format differs from PDF/image: `{entities, dimensions, texts, layers, entity_counts, bounds}` instead of LLM `{工程图概述, 基本信息, 尺寸, ...}`
-- Frontend auto-detects DXF data by presence of `entities` + `entity_counts` fields and renders accordingly
-- Task queue: teacher priority (0) > batch (5) > student (10)
+- DXF `参考图_分析.json` format: `{entities, dimensions, texts, layers, entity_counts, bounds}`
+- Frontend auto-detects DXF data by presence of `entities` + `entity_counts` fields
+- Two task queues: LLM queue (concurrency configurable) + DXF queue (serial, concurrency=1)
+- Task queue priority: teacher (0) > batch (5) > student (10)
 - Rate limiting on student submit endpoints: 50 req/min per IP
+- Student analysis/grading status: now checks **actual disk files** instead of `submissions.json` status field
