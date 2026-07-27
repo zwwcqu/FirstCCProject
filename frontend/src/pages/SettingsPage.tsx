@@ -38,13 +38,15 @@ function ModelCard({ cfg, active, onActivate, onChange, onSave, onDelete, saving
   const [visionTesting, setVisionTesting] = useState(false);
   const [visionResult, setVisionResult] = useState("");
   const [visionReply, setVisionReply] = useState("");
-  const [showKey, setShowKey] = useState(false);
+  const [newKey, setNewKey] = useState("");
 
   const set = (k: keyof ModelConfig, v: string | number) => onChange({ ...cfg, [k]: v });
 
-  const maskKey = (key: string): string => {
-    if (key.length <= 5) return key;
-    return "•".repeat(key.length - 5) + key.slice(-5);
+  const handleSetKey = () => {
+    const key = newKey.trim();
+    if (!key) return;
+    set("api_key", key);
+    setNewKey("");
   };
 
   return (
@@ -73,22 +75,30 @@ function ModelCard({ cfg, active, onActivate, onChange, onSave, onDelete, saving
             className="w-full border rounded px-3 py-1.5 text-sm" />
         </div>
         <div>
-          <label className="block text-xs text-gray-500 mb-1">
-            API Key
-            <button type="button" onClick={() => setShowKey(!showKey)}
-              className="ml-2 text-blue-500 hover:text-blue-700 font-normal">
-              {showKey ? "隐藏" : "显示"}
+          <label className="block text-xs text-gray-500 mb-1">API Key</label>
+          {cfg.api_key ? (
+            <div className="flex items-center gap-2">
+              <span className="flex-1 border rounded px-3 py-1.5 text-sm font-mono bg-gray-50 text-gray-400 select-none"
+                title="API Key 不可查看，仅可替换">
+                {cfg.api_key}
+              </span>
+            </div>
+          ) : null}
+          <div className="flex items-center gap-2 mt-1">
+            <input
+              type="password"
+              value={newKey}
+              onChange={e => setNewKey(e.target.value)}
+              onKeyDown={e => { if (e.key === "Enter") handleSetKey(); }}
+              placeholder={cfg.api_key ? "输入新 Key 替换" : "输入 API Key"}
+              className="flex-1 border rounded px-3 py-1.5 text-sm font-mono"
+              autoComplete="off"
+            />
+            <button type="button" onClick={handleSetKey}
+              className="text-xs bg-gray-100 px-3 py-1.5 rounded hover:bg-gray-200 whitespace-nowrap">
+              {cfg.api_key ? "替换" : "设置"}
             </button>
-          </label>
-          <input
-            type="text"
-            value={showKey ? cfg.api_key : maskKey(cfg.api_key)}
-            onFocus={() => setShowKey(true)}
-            onBlur={() => setShowKey(false)}
-            onChange={e => { if (showKey) set("api_key", e.target.value); }}
-            className="w-full border rounded px-3 py-1.5 text-sm font-mono"
-            autoComplete="off"
-          />
+          </div>
         </div>
         <div className="grid grid-cols-2 gap-3">
           <div>
@@ -690,34 +700,19 @@ export default function SettingsPage() {
         {/* ========== 个人信息 ========== */}
         {tab === "profile" && (
           <div className={sectionClass}>
-            <h2 className="text-lg font-semibold">个人信息</h2>
-            <div className="grid grid-cols-2 gap-4 max-w-sm">
+            <h2 className="text-lg font-semibold mb-4">个人信息</h2>
+            <div className="grid grid-cols-2 gap-4 max-w-sm mb-4">
               <div>
                 <label className={labelClass}>姓名</label>
-                <input type="text" value={profileName} onChange={e => setProfileName(e.target.value)}
-                  className={inputClass} />
+                <input type="text" value={profileName} disabled
+                  className={inputClass + " bg-gray-100 text-gray-500 cursor-not-allowed"} />
               </div>
               <div>
                 <label className={labelClass}>用户名</label>
-                <input type="text" value={profileUsername} onChange={e => setProfileUsername(e.target.value)}
-                  className={inputClass} />
+                <input type="text" value={profileUsername} disabled
+                  className={inputClass + " bg-gray-100 text-gray-500 cursor-not-allowed"} />
               </div>
             </div>
-            <button onClick={async () => {
-              setSaving(true); setMsg("");
-              try {
-                await updateTeacherProfile(profileName, profileUsername);
-                sessionStorage.setItem("teacher_name", profileName);
-                sessionStorage.setItem("teacher_username", profileUsername);
-                setMsg("个人信息已保存");
-              } catch (e: any) { setMsg("保存失败: " + e.message); }
-              finally { setSaving(false); }
-            }} disabled={saving}
-              className="bg-blue-600 text-white px-4 py-1.5 rounded hover:bg-blue-700 disabled:opacity-50 text-sm">
-              {saving ? "保存中…" : "保存个人信息"}
-            </button>
-
-            <hr className="my-4" />
 
             <h3 className="text-lg font-semibold">修改密码</h3>
             <div className="space-y-3 max-w-sm">

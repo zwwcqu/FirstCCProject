@@ -37,6 +37,7 @@ from services.question_service import (
     get_reference_analysis,
     save_student_analysis,
     get_student_analysis,
+    get_student_grade_json,
     reject_if_fake,
     get_student_dir,
     _sanitize_filename_part,
@@ -360,15 +361,14 @@ def _run_analyze(
         is_dxf = q.get("submission_type") == "dxf" if q else False
 
         if is_dxf:
-            # DXF 流程：ezdxf 提取数据（无需 LLM）
+            # DXF 流程：使用统一 process_dxf 提取数据 + 渲染预览
             if is_test:
                 raise RuntimeError("DXF 文件暂不支持测试模式，请使用正式提交")
             student_path = get_student_submission_path(qid, student_id, name)
             if student_path is None:
                 raise RuntimeError("学生提交文件不存在，请重新上传")
-            from services.dxf_service import extract_dxf
-            analysis = extract_dxf(student_path)
-            # DXF 分析无需校验概述字段（数据格式不同）
+            from services.dxf_service import process_dxf
+            analysis = process_dxf(student_path)
             if not analysis.get("entity_counts"):
                 raise RuntimeError("DXF 数据提取结果为空，文件可能不包含有效实体")
         else:
@@ -438,14 +438,10 @@ async def start_analysis(
             raise HTTPException(status_code=400, detail="测试模式文件数据丢失，请重新上传")
         student_fn = st.get("student_filename", "")
     else:
-        # 正式模式：查 submissions.json + 磁盘文件
-        from services.question_service import get_submission_record as _get_record
-        rec = _get_record(qid, student_id)
-        if not rec or rec.get("status") not in ("uploaded", "analyzed"):
-            raise HTTPException(status_code=400, detail="请先上传作业文件")
+        # 正式模式：直接检查磁盘文件是否存在
         student_path = get_student_submission_path(qid, student_id, name)
         if student_path is None:
-            raise HTTPException(status_code=400, detail="提交文件丢失，请重新上传")
+            raise HTTPException(status_code=400, detail="没有找到作业文件，请先上传")
         student_fn = student_path.name
 
     def _task():
@@ -640,17 +636,18 @@ async def grade_submission_handler(
     if is_test:
         stu_data, stu_filename = get_file_data(qid, name, student_id)
     else:
-        from services.question_service import get_submission_record as _get_record
-        rec = _get_record(qid, student_id)
-        if not rec:
-            raise HTTPException(status_code=400, detail="请先上传作业文件")
-        if rec.get("status") == "graded":
-            raise HTTPException(status_code=400, detail="作业已提交，无法再次提交。请等待教师打回")
-        if rec.get("status") not in ("uploaded", "analyzed", "graded", "grade_failed"):
-            raise HTTPException(status_code=400, detail="请先上传作业文件")
+        # 检查作业文件是否存在
         student_path = get_student_submission_path(qid, student_id, name)
         if student_path is None:
-            raise HTTPException(status_code=400, detail="提交文件丢失，请重新上传")
+            raise HTTPException(status_code=400, detail="没有找到作业文件，请先上传")
+        # 检查是否已完成分析（需要分析 JSON 文件）
+        analysis = get_student_analysis(qid, student_id, name)
+        if analysis is None:
+            raise HTTPException(status_code=400, detail="请先完成预览分析")
+        # 检查是否已提交过
+        existing_grade = get_student_grade_json(qid, student_id, name)
+        if existing_grade is not None:
+            raise HTTPException(status_code=400, detail="作业已提交，请等待教师批阅")
         stu_filename = student_path.name
 
     def _task():

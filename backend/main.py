@@ -31,7 +31,7 @@ logger = logging.getLogger("main")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """应用生命周期：初始化数据目录 + 启动 LLM 任务队列"""
+    """应用生命周期：初始化数据目录 + 启动 LLM 任务队列 + SFTP 服务"""
     logger.info("正在初始化数据目录…")
     _init_data_dir()
     from services.task_queue import start as start_queue

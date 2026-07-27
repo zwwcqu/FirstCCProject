@@ -70,7 +70,9 @@ export default function TeacherDashboard() {
   // 参考图分析状态
   const [analyzingQid, setAnalyzingQid] = useState<string | null>(null);
   const [analysisResults, setAnalysisResults] = useState<Record<string, any>>({});
+  const [analysisErrors, setAnalysisErrors] = useState<Record<string, string>>({});
   const [analysisModalQid, setAnalysisModalQid] = useState<string | null>(null);
+  const pollStartTime = useRef<number>(0);  // 轮询开始时间，用于超时检测
 
   // 成绩管理
   const [selectedStudents, setSelectedStudents] = useState<Set<string>>(new Set());
@@ -122,6 +124,9 @@ export default function TeacherDashboard() {
   // 浮动图面板
   const [floatQid, setFloatQid] = useState<string | null>(null);
 
+  // 帮助
+  const [showHelp, setShowHelp] = useState(false);
+
   // 窗口拖动（仅查看作业弹窗需要，浮动图已收归 FloatingImageViewer）
   const reviewModalRef = useRef<HTMLDivElement>(null);
   const [modalPos, setModalPos] = useState<{ x: number; y: number } | null>(null);
@@ -153,6 +158,7 @@ export default function TeacherDashboard() {
   const [templateType, setTemplateType] = useState("零件图识读模板.txt");
   const [templateContent, setTemplateContent] = useState("");
   const [templateLoaded, setTemplateLoaded] = useState(false);
+  const [visibleToOthers, setVisibleToOthers] = useState(0);   // 0=仅限本人, 1=其他教师可见
 
   const imagePreviewUrl = useMemo(() => (image ? URL.createObjectURL(image) : null), [image]);
   useEffect(() => () => { if (imagePreviewUrl) URL.revokeObjectURL(imagePreviewUrl); }, [imagePreviewUrl]);
@@ -163,16 +169,22 @@ export default function TeacherDashboard() {
       setQuestions(data);
       // 加载已有分析结果，检测进行中的分析
       for (const q of data) {
-        if (q.files?.reference_pdf) {
+        const hasRef = q.files?.reference_pdf || q.files?.reference_dxf;
+        if (hasRef) {
           try {
             const res = await getAnalysisResult(q.id);
             if (res.ready && res.analysis) {
               setAnalysisResults((prev) => ({ ...prev, [q.id]: res.analysis }));
-            } else if (res.ready === false) {
-              // 分析进行中（旧文件已删除，新文件尚未生成），恢复轮询
+            } else if (res.status === "analyzing") {
+              // 任务确实在队列中，恢复轮询
               setAnalyzingQid(q.id);
+              pollStartTime.current = Date.now();
+            } else if (res.status === "error") {
+              // 上次分析失败，记录错误信息
+              setAnalysisErrors((prev) => ({ ...prev, [q.id]: res.error || "分析失败" }));
             }
-          } catch (_) { /* 该题尚未分析 */ }
+            // status === "not_started" → 显示"分析"按钮，不做任何自动操作
+          } catch (_) { /* 该题网络错误，忽略 */ }
         }
       }
     } catch (e: any) {
@@ -197,17 +209,37 @@ export default function TeacherDashboard() {
     }).catch(() => {});
   }, [navigate, loadQuestions]);
 
-  // 轮询参考图分析结果
+  // 轮询参考图分析结果（最多 5 分钟，之后自动停止并提示）
   useEffect(() => {
     if (!analyzingQid) return;
+    const POLL_TIMEOUT_MS = 5 * 60 * 1000;  // 5 分钟超时
+    if (pollStartTime.current === 0) pollStartTime.current = Date.now();
+
     const timer = setInterval(async () => {
+      // 超时检查
+      if (Date.now() - pollStartTime.current > POLL_TIMEOUT_MS) {
+        setAnalysisErrors((prev) => ({ ...prev, [analyzingQid]: "分析超时（超过 5 分钟），请检查模型服务后重试" }));
+        setAnalyzingQid(null);
+        pollStartTime.current = 0;
+        clearInterval(timer);
+        return;
+      }
       try {
         const res = await getAnalysisResult(analyzingQid);
         if (res.ready && res.analysis) {
           setAnalysisResults((prev) => ({ ...prev, [analyzingQid]: res.analysis }));
+          setAnalysisErrors((prev) => { const n = { ...prev }; delete n[analyzingQid]; return n; });
           setAnalyzingQid(null);
+          pollStartTime.current = 0;
+          clearInterval(timer);
+        } else if (res.status === "error") {
+          // 后端报告分析失败
+          setAnalysisErrors((prev) => ({ ...prev, [analyzingQid]: res.error || "分析失败" }));
+          setAnalyzingQid(null);
+          pollStartTime.current = 0;
           clearInterval(timer);
         }
+        // status === "analyzing" → 继续轮询
       } catch (_) { /* 继续轮询 */ }
     }, 3000);  // 每 3 秒查询一次
     return () => clearInterval(timer);
@@ -268,6 +300,7 @@ export default function TeacherDashboard() {
     setTemplateType("零件图识读模板.txt");
     setTemplateContent("");
     setTemplateLoaded(false);
+    setVisibleToOthers(0);
     setEditingId(null);
     setShowForm(false);
   };
@@ -285,13 +318,14 @@ export default function TeacherDashboard() {
     fd.append("deadline", deadline);
     fd.append("template_type", templateType);
     fd.append("template_content", templateContent);
+    fd.append("visible_to_others", String(visibleToOthers));
     if (image) fd.append("image", image);
     if (refPdf) fd.append("reference_pdf", refPdf);
     try {
       await createQuestion(fd);
       resetForm();
       loadQuestions();
-      if (refPdf) setAnalyzingQid(qid);
+      if (refPdf) { setAnalyzingQid(qid); pollStartTime.current = Date.now(); }
     } catch (e: any) {
       alert(e.message);
     }
@@ -310,13 +344,14 @@ export default function TeacherDashboard() {
     fd.append("deadline", deadline);
     fd.append("template_type", templateType);
     fd.append("template_content", templateContent);
+    fd.append("visible_to_others", String(visibleToOthers));
     if (image) fd.append("image", image);
     if (refPdf) fd.append("reference_pdf", refPdf);
     try {
       await updateQuestion(editingId, fd);
       resetForm();
       loadQuestions();
-      if (refPdf) setAnalyzingQid(editingId);  // 换参考图后重新分析
+      if (refPdf) { setAnalyzingQid(editingId); pollStartTime.current = Date.now(); }  // 换参考图后重新分析
     } catch (e: any) {
       alert(e.message);
     }
@@ -369,10 +404,11 @@ export default function TeacherDashboard() {
       setSubmissionType(detail.submission_type || "pdf");
       setQClasses(((q as any).classes || "").split(",").filter(Boolean));
       setDeadline((q as any).deadline || "");
+      setVisibleToOthers((q as any).visible_to_others ?? 0);
       setImage(null);
       setRefPdf(null);
       setExistingImages(detail.files?.images || []);
-      setExistingRefPdf(detail.files?.reference_pdf || detail.files?.reference_dxf || null);
+      setExistingRefPdf(detail.files?.reference_preview || detail.files?.reference_pdf || detail.files?.reference_dxf || null);
       // 加载题目的识读模板
       try {
         const tpl = await getQuestionTemplate(q.id);
@@ -733,6 +769,12 @@ export default function TeacherDashboard() {
             学生信息
           </button>
           <button
+            onClick={() => setShowHelp(true)}
+            className="bg-white/20 px-3 py-1 rounded hover:bg-white/30"
+          >
+            帮助
+          </button>
+          <button
             onClick={() => navigate("/teacher/settings")}
             className="bg-white/20 px-3 py-1 rounded hover:bg-white/30"
           >
@@ -777,6 +819,7 @@ export default function TeacherDashboard() {
                   <th className="text-left p-2">标题</th>
                   <th className="text-left p-2">教师</th>
                   <th className="text-left p-2">班别</th>
+                  <th className="text-left p-2">截止时间</th>
                   <th className="text-center p-2">参考图分析</th>
                   <th className="text-right p-2">操作</th>
                 </tr>
@@ -791,9 +834,49 @@ export default function TeacherDashboard() {
                     <td className="p-2">{q.title}</td>
                     <td className="p-2 text-sm text-gray-600">{ (q as any).teacher || "-" }</td>
                     <td className="p-2 text-sm text-gray-600">{ (q as any).classes || "-" }</td>
+                    <td className="p-2 text-sm text-gray-600">
+                      {isOwner ? (
+                        <span className="cursor-pointer hover:text-blue-600"
+                          onClick={() => {
+                            if (!isOwner) return;
+                            const input = prompt("修改截止时间（ISO格式，如 2026-07-28T18:00）", (q as any).deadline || "");
+                            if (input !== null) {
+                              const fd = new FormData();
+                              fd.append("title", q.title);
+                              fd.append("description", q.files?.description || "");
+                              fd.append("phase1_criteria", q.files?.phase1_criteria || "");
+                              fd.append("phase2_criteria", q.files?.phase2_criteria || "");
+                              fd.append("submission_type", (q as any).submission_type || "pdf");
+                              fd.append("deadline", input);
+                              updateQuestion(q.id, fd).then(() => loadQuestions()).catch(e => alert(e.message));
+                            }
+                          }}
+                          title="点击修改截止时间">
+                          {(q as any).deadline ? new Date((q as any).deadline).toLocaleString("zh-CN", {month:"short", day:"numeric", hour:"2-digit", minute:"2-digit"}) : "-"}
+                        </span>
+                      ) : (
+                        <span>{(q as any).deadline ? new Date((q as any).deadline).toLocaleString("zh-CN", {month:"short", day:"numeric", hour:"2-digit", minute:"2-digit"}) : "-"}</span>
+                      )}
+                    </td>
                     <td className="p-2 text-center">
                       {analyzingQid === q.id ? (
                         <span className="text-yellow-600 text-xs animate-pulse">分析中…</span>
+                      ) : analysisErrors[q.id] ? (
+                        <div className="flex items-center justify-center gap-1">
+                          <span className="text-red-500 text-xs" title={analysisErrors[q.id]}>失败</span>
+                          <button
+                            onClick={async () => {
+                              setAnalysisErrors((prev) => { const n = { ...prev }; delete n[q.id]; return n; });
+                              setAnalyzingQid(q.id);
+                              pollStartTime.current = Date.now();
+                              try { await triggerAnalysis(q.id); } catch (_) {}
+                            }}
+                            className="text-orange-500 hover:underline text-xs"
+                            title={analysisErrors[q.id]}
+                          >
+                            重试
+                          </button>
+                        </div>
                       ) : analysisResults[q.id] ? (
                         <div className="flex items-center justify-center gap-1">
                           <button
@@ -805,6 +888,7 @@ export default function TeacherDashboard() {
                           <button
                             onClick={async () => {
                               setAnalyzingQid(q.id);
+                              pollStartTime.current = Date.now();
                               try { await triggerAnalysis(q.id); } catch (_) {}
                             }}
                             className="text-orange-500 hover:underline text-xs"
@@ -813,10 +897,12 @@ export default function TeacherDashboard() {
                             重分析
                           </button>
                         </div>
-                      ) : q.files?.reference_pdf ? (
+                      ) : (q.files?.reference_pdf || q.files?.reference_dxf) ? (
                         <button
                           onClick={async () => {
+                            setAnalysisErrors((prev) => { const n = { ...prev }; delete n[q.id]; return n; });
                             setAnalyzingQid(q.id);
+                            pollStartTime.current = Date.now();
                             try { await triggerAnalysis(q.id); } catch (_) {}
                           }}
                           className="text-gray-500 hover:text-blue-600 text-xs"
@@ -879,11 +965,12 @@ export default function TeacherDashboard() {
                   </div>
                 )}
 
-                {/* 参考工程图预览 */}
+                {/* 参考工程图预览（DXF 优先显示含尺寸的 PNG 渲染图） */}
                 {(q?.files?.reference_pdf || q?.files?.reference_dxf) && (
                   <div className="mb-3">
                     <p className="text-xs text-gray-500 mb-1">参考工程图</p>
-                    <img src={getTeacherPreviewUrl(qid, q.files.reference_pdf || q.files.reference_dxf, Date.now())}
+                    <img src={getTeacherPreviewUrl(qid,
+                      q.files.reference_preview || q.files.reference_pdf || q.files.reference_dxf, Date.now())}
                       alt="参考工程图" className="w-full rounded border" />
                   </div>
                 )}
@@ -1079,16 +1166,9 @@ export default function TeacherDashboard() {
                   title="关闭不保存">✕</button>
               </div>
               <div className="space-y-3">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">题号</label>
-                  <input
-                    value={qid}
-                    onChange={(e) => setQid(e.target.value)}
-                    disabled={!!editingId}
-                    className="w-full border rounded px-3 py-2 disabled:bg-gray-100"
-                    placeholder="如：题1"
-                  />
-                </div>
+                {!editingId && (
+                  <p className="text-xs text-gray-400">题号自动生成（如 260727-001），无需手动输入</p>
+                )}
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">标题</label>
                   <input
@@ -1123,6 +1203,21 @@ export default function TeacherDashboard() {
                       <input type="radio" name="submission_type" value="dxf"
                         checked={submissionType === "dxf"} onChange={(e) => setSubmissionType(e.target.value)} />
                       <span className="text-sm">DXF 文件</span>
+                    </label>
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">权限管理</label>
+                  <div className="flex gap-4">
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input type="radio" name="visible_to_others" value={0}
+                        checked={visibleToOthers === 0} onChange={() => setVisibleToOthers(0)} />
+                      <span className="text-sm">仅限本人</span>
+                    </label>
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input type="radio" name="visible_to_others" value={1}
+                        checked={visibleToOthers === 1} onChange={() => setVisibleToOthers(1)} />
+                      <span className="text-sm">其他教师可见</span>
                     </label>
                   </div>
                 </div>
@@ -1506,10 +1601,11 @@ export default function TeacherDashboard() {
         {/* 参考图浮动面板 */}
         {floatQid && (() => {
           const q = questions.find((x) => x.id === floatQid);
-          if (!q?.files?.reference_pdf) return null;
+          const refFile = q?.files?.reference_preview || q?.files?.reference_pdf || q?.files?.reference_dxf;
+          if (!refFile) return null;
           return (
             <FloatingImageViewer
-              src={getTeacherPreviewUrl(floatQid, q.files.reference_pdf, Date.now())}
+              src={getTeacherPreviewUrl(floatQid, refFile, Date.now())}
               title={`题${floatQid} 参考图`}
               visible={true}
               onClose={() => setFloatQid(null)}
@@ -1903,6 +1999,149 @@ export default function TeacherDashboard() {
           </div>
         </div>
       )}
+
+      {/* ========== 使用帮助弹窗 ========== */}
+      {showHelp && (
+        <div className="fixed inset-0 z-50 flex items-start justify-center pt-8 bg-black/40" onClick={() => setShowHelp(false)}>
+          <div className="bg-white rounded-lg shadow-xl w-full max-w-2xl max-h-[85vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+            <div className="sticky top-0 bg-white border-b px-6 py-4 flex justify-between items-center">
+              <h2 className="text-xl font-bold">工程图批阅系统 — 使用帮助</h2>
+              <button onClick={() => setShowHelp(false)} className="text-gray-400 hover:text-gray-600 text-2xl leading-none">&times;</button>
+            </div>
+            <div className="px-6 py-4 space-y-6 text-sm leading-relaxed">
+
+              <section>
+                <h3 className="font-bold text-base mb-2">一、系统概述</h3>
+                <p>工程图批阅系统用于教师布置工程图作业、学生提交图纸、LLM 大模型自动评分。支持 PDF、图片、DXF 三种提交类型。</p>
+              </section>
+
+              <section>
+                <h3 className="font-bold text-base mb-2">二、初始密码</h3>
+                <table className="w-full border text-left text-sm">
+                  <thead><tr className="bg-gray-50"><th className="p-2 border">角色</th><th className="p-2 border">初始密码</th><th className="p-2 border">说明</th></tr></thead>
+                  <tbody>
+                    <tr><td className="p-2 border">教师</td><td className="p-2 border font-mono">MechCAD</td><td className="p-2 border text-gray-600">首次登录后可在"设置 → 个人信息 → 修改密码"中修改</td></tr>
+                    <tr><td className="p-2 border">学生</td><td className="p-2 border font-mono">cad123</td><td className="p-2 border text-gray-600">首次登录强制修改密码（至少6位）；教师可在班级名单管理中重置学生密码</td></tr>
+                  </tbody>
+                </table>
+              </section>
+
+              <section>
+                <h3 className="font-bold text-base mb-2">三、题目录入</h3>
+                <ol className="list-decimal pl-5 space-y-1">
+                  <li>在"题目管理"区域点击<strong>新建题目</strong></li>
+                  <li>输入<strong>标题</strong>（题号自动生成，格式 年月日-序号，如 260727-001）</li>
+                  <li>选择<strong>提交类型</strong>：PDF 文件 / 图片文件 / DXF 文件</li>
+                  <li>设置<strong>权限</strong>：仅限本人 / 其他教师可见</li>
+                  <li>填写<strong>适用班别</strong>（逗号分隔，如 机械1班,机械2班）</li>
+                  <li>填写<strong>题目内容</strong>、<strong>阶段一评分标准</strong>（图形相似度）、<strong>阶段二评分标准</strong>（量化标注）</li>
+                  <li>选择<strong>识读模板</strong>（零件图/装配图/平面图/组合体三视图/DXF）</li>
+                  <li>可上传<strong>题目附图</strong>（题目示意图）和<strong>参考工程图</strong>（标准答案，PDF 或 DXF）</li>
+                  <li>设置<strong>提交截止时间</strong>（过期后学生无法提交）</li>
+                  <li>点击<strong>提交</strong></li>
+                </ol>
+                <p className="mt-2 text-gray-600">提示：上传参考工程图后系统会自动触发 LLM 分析（PDF）/ DXF 数据提取；DXF 题目无需 LLM 识读，直接提取结构化数据。</p>
+              </section>
+
+              <section>
+                <h3 className="font-bold text-base mb-2">四、参考图分析</h3>
+                <p>创建题目并上传参考工程图后，系统自动分析。在题目列表的"参考图分析"列可查看状态：</p>
+                <ul className="list-disc pl-5 space-y-1 mt-1">
+                  <li><span className="text-yellow-600 font-medium">分析中…</span> — 正在处理，请等待</li>
+                  <li><span className="text-blue-600 font-medium">查看</span> — 分析完成，可查看结构化数据</li>
+                  <li><span className="text-gray-500 font-medium">分析</span> — 尚未分析，点击启动</li>
+                  <li><span className="text-red-500 font-medium">失败</span> — 分析出错，可点击"重试"</li>
+                </ul>
+                <p className="mt-2 text-gray-600">提示：DXF 参考图无需 LLM，直接提取实体/尺寸/图层数据并渲染预览图（含尺寸版本 + 无尺寸版本）。</p>
+              </section>
+
+              <section>
+                <h3 className="font-bold text-base mb-2">五、学生录入</h3>
+                <ol className="list-decimal pl-5 space-y-1">
+                  <li>在"题目管理"右侧点击<strong>班级管理</strong></li>
+                  <li>点击<strong>新增班级</strong>，输入班级名称（如 机械1班）</li>
+                  <li>点击该班级的<strong>查看名单</strong></li>
+                  <li>下载<strong>学生名单模板</strong>（CSV 格式，表头：姓名,学号）</li>
+                  <li>按模板填写学生信息，上传 CSV 导入</li>
+                  <li>也可手动逐条添加学生</li>
+                </ol>
+                <p className="mt-2 text-gray-600">提示：学生信息保存在 data/StudentInfo/班级名.csv，密码哈希存在 data/StudentAuth/班级名.json。</p>
+              </section>
+
+              <section>
+                <h3 className="font-bold text-base mb-2">六、学生初始密码与登录</h3>
+                <ul className="list-disc pl-5 space-y-1">
+                  <li>初始密码：<code className="bg-gray-100 px-1 rounded">cad123</code></li>
+                  <li>首次登录强制修改密码（至少 6 位）</li>
+                  <li>学生登录需填写：姓名 + 学号 + 密码</li>
+                  <li>教师可在"班级管理 → 查看名单"中<strong>重置学生密码</strong>为 cad123</li>
+                  <li>学生端登录后可在设置（⚙）中自行修改密码</li>
+                </ul>
+              </section>
+
+              <section>
+                <h3 className="font-bold text-base mb-2">七、成绩管理</h3>
+                <ol className="list-decimal pl-5 space-y-1">
+                  <li>在题目列表点击<strong>成绩</strong>进入成绩表</li>
+                  <li><strong>批量评分</strong>：选择学生 → 批量评分 → 系统依次调用 LLM 打分</li>
+                  <li><strong>单个评分</strong>：点击学生行右侧的评分按钮</li>
+                  <li><strong>查看详情</strong>：点击已评分学生的分数 → 弹出评分明细（Phase1 + Phase2）</li>
+                  <li><strong>编辑分数</strong>：双击成绩单元格直接修改（仅题目创建者可编辑）</li>
+                  <li><strong>补充提交</strong>：教师可为缺交学生代为上传文件</li>
+                  <li>评分公式：总分 = √(Phase1 × Phase2)，按阈值映射为 A+ ~ F 等级</li>
+                </ol>
+              </section>
+
+              <section>
+                <h3 className="font-bold text-base mb-2">八、设置页面</h3>
+                <p>点击顶部"设置"进入系统配置：</p>
+                <ul className="list-disc pl-5 space-y-1 mt-1">
+                  <li><strong>个人信息</strong> — 查看姓名/用户名，修改登录密码</li>
+                  <li><strong>模型配置</strong> — 添加/切换 LLM 模型（支持多模型并发）</li>
+                  <li><strong>LLM 参数</strong> — 温度、最大 token、超时等</li>
+                  <li><strong>图像处理</strong> — 分析用图分辨率、缩略图质量</li>
+                  <li><strong>评分等级</strong> — A+ ~ D 的分数阈值</li>
+                  <li><strong>分析模板</strong> — LLM 识读提示词和评分引导语</li>
+                  <li><strong>评分模板</strong> — 新建题目时预填的阶段一/二默认标准</li>
+                  <li><strong>系统管理</strong> — 模型测试、队列状态、清空队列、服务重启</li>
+                </ul>
+              </section>
+
+              <section>
+                <h3 className="font-bold text-base mb-2">九、常见问题</h3>
+                <dl className="space-y-3">
+                  <div>
+                    <dt className="font-medium">Q: 参考图分析一直显示"分析中"？</dt>
+                    <dd className="text-gray-600">检查 LLM 模型是否正常连接（设置 → 系统管理 → 模型测试）。PDF 文件损坏或格式不支持也会导致分析失败，错误信息会显示在页面上。</dd>
+                  </div>
+                  <div>
+                    <dt className="font-medium">Q: DXF 预览图看不到标注？</dt>
+                    <dd className="text-gray-600">系统会生成含尺寸和无尺寸两个版本。蓝色标注在含尺寸版本中显示。如仍看不到，检查 DXF 文件本身是否有标注实体。</dd>
+                  </div>
+                  <div>
+                    <dt className="font-medium">Q: 学生看不到题目？</dt>
+                    <dd className="text-gray-600">确认题目"适用班别"包含该学生所属班级，且未过截止时间。</dd>
+                  </div>
+                  <div>
+                    <dt className="font-medium">Q: 其他教师看不到我的题目？</dt>
+                    <dd className="text-gray-600">编辑题目，将"权限管理"设为"其他教师可见"。否则仅本人可见。</dd>
+                  </div>
+                  <div>
+                    <dt className="font-medium">Q: 教师默认密码是什么？如何修改？</dt>
+                    <dd className="text-gray-600">默认密码 MechCAD。登录后在"设置 → 个人信息 → 修改密码"中修改。</dd>
+                  </div>
+                  <div>
+                    <dt className="font-medium">Q: 学生忘记密码怎么办？</dt>
+                    <dd className="text-gray-600">教师可在"班级管理 → 查看名单"中重置学生密码为 cad123。</dd>
+                  </div>
+                </dl>
+              </section>
+
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
     </>
   );

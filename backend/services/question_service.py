@@ -84,11 +84,12 @@ def create_question(qid: str, title: str, description: str,
                     knowledge: str = "", submission_type: str = "pdf",
                     teacher: str = "", classes: str = "", deadline: str = "",
                     template_type: str = "零件图识读模板.txt",
-                    template_content: str = "") -> dict:
+                    template_content: str = "",
+                    visible_to_others: int = 0) -> dict:
     """创建题目：写索引 + 创建目录 + 写内容文件 + 复制模板。deadline=提交截止时间 ISO 格式
     template_content 非空时使用自定义内容，否则从全局模板复制。"""
-    if not qid.isdigit():
-        raise ValueError("题号必须为非负整数")
+    if not qid or not qid.replace("-", "").replace("_", "").isalnum():
+        raise ValueError("题号格式不正确")
     questions = read_questions_index()
     for q in questions:
         if q["id"] == qid:
@@ -111,7 +112,8 @@ def create_question(qid: str, title: str, description: str,
                 ("（自定义内容）" if template_content.strip() else ""))
 
     entry = {"id": qid, "title": title, "submission_type": submission_type,
-             "teacher": teacher, "classes": classes, "deadline": deadline}
+             "teacher": teacher, "classes": classes, "deadline": deadline,
+             "visible_to_others": visible_to_others}
     questions.append(entry)
     write_questions_index(questions)
     logger.info(f"题目已创建: [{qid}] {title} by {teacher}")
@@ -121,7 +123,8 @@ def create_question(qid: str, title: str, description: str,
 def update_question(qid: str, title: str, description: str,
                     phase1_criteria: str, phase2_criteria: str,
                     knowledge: str = "", submission_type: str = "pdf",
-                    teacher: str = "", classes: str = "", deadline: str = "") -> dict | None:
+                    teacher: str = "", classes: str = "", deadline: str = "",
+                    visible_to_others: int | None = None) -> dict | None:
     """编辑题目：更新索引 + 覆盖内容文件。仅拥有者可修改"""
     questions = read_questions_index()
     found = None
@@ -138,6 +141,8 @@ def update_question(qid: str, title: str, description: str,
                 q["classes"] = classes
             if deadline:
                 q["deadline"] = deadline
+            if visible_to_others is not None:
+                q["visible_to_others"] = visible_to_others
             found = q
             break
     if found is None:
@@ -244,6 +249,10 @@ def get_question_files(qid: str) -> dict:
             result["reference_pdf"] = f.name
         if f.name == "参考工程图.dxf":
             result["reference_dxf"] = f.name
+        if f.name == "参考工程图.png":
+            result["reference_preview"] = f.name
+        if f.name == "参考工程图_无尺寸.png":
+            result["reference_preview_no_dim"] = f.name
 
     return result
 

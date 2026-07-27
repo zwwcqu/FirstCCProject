@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import threading
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -83,6 +84,38 @@ def _check_question_ownership(request: Request, qid: str) -> None:
                 raise HTTPException(status_code=403, detail=f"题目 [{qid}] 由 {owner} 创建，您无权修改")
 
 
+# ── 参考图分析错误状态持久化 ─────────────────────────────
+
+def _save_ref_analysis_error(qid: str, error: str) -> None:
+    """保存参考图分析的错误信息"""
+    qdir = get_question_dir(qid)
+    qdir.mkdir(parents=True, exist_ok=True)
+    error_path = qdir / "参考图_分析.error.json"
+    error_path.write_text(json.dumps({"error": error, "ts": time.time()}, ensure_ascii=False), encoding="utf-8")
+
+
+def _clear_ref_analysis_error(qid: str) -> None:
+    """清除参考图分析的错误信息"""
+    qdir = get_question_dir(qid)
+    error_path = qdir / "参考图_分析.error.json"
+    try:
+        error_path.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def _get_ref_analysis_error(qid: str) -> dict | None:
+    """读取参考图分析的错误信息，无错误返回 None"""
+    qdir = get_question_dir(qid)
+    error_path = qdir / "参考图_分析.error.json"
+    if error_path.exists():
+        try:
+            return json.loads(error_path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+    return None
+
+
 def _run_reference_analysis(qid: str) -> None:
     """
     教师参考图分析，通过任务队列以最高优先级执行。
@@ -103,11 +136,13 @@ def _run_reference_analysis(qid: str) -> None:
     from services.llm_service import analyze_merged
     from services.task_queue import enqueue, PRIORITY_TEACHER
 
-    # 立即删除旧分析文件，防止查询接口返回旧数据（新分析完成前返回"未就绪"）
+    # 立即删除旧分析文件 + 旧错误状态，防止查询接口返回旧数据
     qdir = get_question_dir(qid)
+    _clear_ref_analysis_error(qid)
+    old_analysis = qdir / "参考图_分析.json"
     old_struct = qdir / "参考图_结构分析.json"
     old_quant = qdir / "参考图_量化分析.json"
-    for f in (old_struct, old_quant):
+    for f in (old_analysis, old_struct, old_quant):
         try:
             f.unlink(missing_ok=True)
         except Exception:
@@ -118,21 +153,28 @@ def _run_reference_analysis(qid: str) -> None:
         ref_pdf = qdir2 / "参考工程图.pdf"
         if not ref_pdf.exists():
             logger.warning(f"[{qid}] 参考工程图不存在，跳过分析")
+            _save_ref_analysis_error(qid, "参考工程图文件不存在")
             return
 
-        kn = get_question_files(qid).get("knowledge", "")
-        template_text = get_question_template(qid)
+        try:
+            kn = get_question_files(qid).get("knowledge", "")
+            template_text = get_question_template(qid)
 
-        logger.info(f"[{qid}] 开始参考图工程图识读…")
-        analysis = analyze_merged(ref_pdf, template_text, knowledge=kn)
-        # 校验：工程图概述不能为空
-        overview = analysis.get("工程图概述", "")
-        if not overview or len(str(overview)) < 10:
-            logger.error(f"[{qid}] 参考图识读结果为空（工程图概述过短），请检查模型是否支持图像识别")
-            return
+            logger.info(f"[{qid}] 开始参考图工程图识读…")
+            analysis = analyze_merged(ref_pdf, template_text, knowledge=kn)
+            # 校验：工程图概述不能为空
+            overview = analysis.get("工程图概述", "")
+            if not overview or len(str(overview)) < 10:
+                logger.error(f"[{qid}] 参考图识读结果为空（工程图概述过短），请检查模型是否支持图像识别")
+                _save_ref_analysis_error(qid, "模型返回的工程图概述为空或过短，请检查模型是否支持图像识别")
+                return
 
-        save_reference_analysis(qid, analysis)
-        logger.info(f"[{qid}] 参考图分析完成并已保存")
+            save_reference_analysis(qid, analysis)
+            _clear_ref_analysis_error(qid)
+            logger.info(f"[{qid}] 参考图分析完成并已保存")
+        except Exception as e:
+            logger.error(f"[{qid}] 参考图分析失败: {e}")
+            _save_ref_analysis_error(qid, f"分析过程出错: {str(e)}")
 
     enqueue(PRIORITY_TEACHER, _task,
             task_key=f"ref_analyze:{qid}",
@@ -140,16 +182,18 @@ def _run_reference_analysis(qid: str) -> None:
 
 
 def _run_reference_dxf_analysis(qid: str) -> None:
-    """DXF 参考图分析：ezdxf 提取 + 渲染预览（同步完成，无需 LLM）"""
-    from services.dxf_service import extract_dxf, render_dxf_preview
+    """DXF 参考图分析：使用统一 process_dxf 提取数据 + 渲染预览"""
+    from services.dxf_service import process_dxf
 
     qdir = get_question_dir(qid)
     ref_dxf = qdir / "参考工程图.dxf"
     if not ref_dxf.exists():
         logger.warning(f"[{qid}] 参考 DXF 不存在，跳过分析")
+        _save_ref_analysis_error(qid, "参考 DXF 文件不存在")
         return
 
-    # 清理旧分析文件
+    # 清理旧分析文件 + 旧错误状态
+    _clear_ref_analysis_error(qid)
     for old_name in ("参考图_分析.json", "参考图_结构分析.json", "参考图_量化分析.json"):
         old_path = qdir / old_name
         try:
@@ -158,18 +202,13 @@ def _run_reference_dxf_analysis(qid: str) -> None:
             pass
 
     try:
-        # 提取 DXF 结构化数据
         logger.info(f"[{qid}] 开始 DXF 数据提取…")
-        dxf_data = extract_dxf(ref_dxf)
+        dxf_data = process_dxf(ref_dxf, qdir)
         save_reference_analysis(qid, dxf_data)
-        logger.info(f"[{qid}] DXF 参考图分析完成")
-
-        # 渲染预览图
-        preview_path = qdir / "参考工程图.png"
-        render_dxf_preview(ref_dxf, preview_path)
-        logger.info(f"[{qid}] DXF 预览图已生成")
+        logger.info(f"[{qid}] DXF 参考图分析完成（含尺寸 + 无尺寸预览）")
     except Exception as e:
         logger.error(f"[{qid}] DXF 参考图分析失败: {e}")
+        _save_ref_analysis_error(qid, f"DXF 分析失败: {str(e)}")
 
 
 # ── 登录 / 登出 ──────────────────────────────────────────
@@ -220,12 +259,16 @@ async def check_login(request: Request):
 
 @router.get("/questions")
 async def get_questions(request: Request):
-    """获取所有题目列表（含文件信息）"""
+    """获取题目列表（含文件信息）。非本人题目仅当 visible_to_others=1 时可见"""
     _require_auth(request)
+    teacher = _get_teacher_username(request)
     questions = list_questions()
     result = []
     for q in questions:
-        files = get_question_files(q["id"])     # 附带描述/图片/参考图信息
+        is_owner = (teacher and q.get("teacher", "") == teacher) or not q.get("teacher")
+        if not is_owner and q.get("visible_to_others", 0) != 1:
+            continue  # 非本人且未开放可见 → 隐藏
+        files = get_question_files(q["id"])
         q["files"] = files
         result.append(q)
     return result
@@ -234,7 +277,7 @@ async def get_questions(request: Request):
 @router.post("/questions")
 async def create_question_handler(
     request: Request,
-    qid: str = Form(...),
+    qid: str = Form(""),
     title: str = Form(...),
     description: str = Form(""),
     phase1_criteria: str = Form(""),
@@ -247,15 +290,31 @@ async def create_question_handler(
     deadline: str = Form(""),                            # 提交截止时间 ISO 格式
     template_type: str = Form("零件图识读模板.txt"),      # 识读模板类型
     template_content: str = Form(""),                    # 自定义模板内容（非空则覆盖）
+    visible_to_others: int = Form(0),                    # 0=仅限本人, 1=其他教师可见
 ):
     """新增题目"""
     _require_auth(request)
     teacher = _get_teacher_username(request)
+    # 题号自动生成：格式 年月日-序号（如 260727-001）
+    import datetime
+    if not qid.strip():
+        today = datetime.date.today().strftime("%y%m%d")  # 260727
+        existing = list_questions()
+        seq = 1
+        for q in existing:
+            qid_str = q.get("id", "")
+            if qid_str.startswith(today + "-"):
+                try:
+                    seq = max(seq, int(qid_str.split("-")[-1]) + 1)
+                except ValueError:
+                    pass
+        qid = f"{today}-{seq:03d}"
     try:
         entry = create_question(qid, title, description, phase1_criteria, phase2_criteria,
                                 knowledge, submission_type, teacher=teacher, classes=classes,
                                 deadline=deadline, template_type=template_type,
-                                template_content=template_content)
+                                template_content=template_content,
+                                visible_to_others=visible_to_others)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     if image and image.filename:
@@ -288,6 +347,7 @@ async def update_question_handler(
     classes: str = Form(""),                             # 适用班别（逗号分隔）
     deadline: str = Form(""),                            # 提交截止时间 ISO 格式
     template_content: str = Form(""),                    # 自定义模板内容（非空则保存）
+    visible_to_others: int = Form(0),                    # 0=仅限本人, 1=其他教师可见
 ):
     """编辑已有题目"""
     _require_auth(request)
@@ -295,7 +355,7 @@ async def update_question_handler(
     try:
         entry = update_question(qid, title, description, phase1_criteria, phase2_criteria,
                                 knowledge, submission_type, teacher=teacher, classes=classes,
-                                deadline=deadline)
+                                deadline=deadline, visible_to_others=visible_to_others)
     except PermissionError as e:
         raise HTTPException(status_code=403, detail=str(e))
     if entry is None:
@@ -363,12 +423,28 @@ async def trigger_analysis(request: Request, qid: str):
 
 @router.get("/questions/{qid}/analysis")
 async def get_analysis_result(request: Request, qid: str):
-    """获取参考图的分析结果（结构 + 量化 JSON）"""
+    """获取参考图的分析结果。返回状态：ready(完成) / analyzing(进行中) / error(失败) / not_started(未开始)"""
     _require_auth(request)
     analysis = get_reference_analysis(qid)
-    if analysis is None:
-        return {"ok": True, "ready": False, "analysis": None}
-    return {"ok": True, "ready": True, "analysis": analysis}
+    if analysis is not None:
+        return {"ok": True, "ready": True, "status": "done", "analysis": analysis}
+
+    # 检查是否有错误记录（上次分析失败）
+    error_info = _get_ref_analysis_error(qid)
+    if error_info is not None:
+        return {"ok": True, "ready": False, "status": "error",
+                "error": error_info.get("error", "未知错误")}
+
+    # 检查任务是否在队列中（排队中或执行中）
+    from services.task_queue import get_queue_info
+    task_key = f"ref_analyze:{qid}"
+    queue_info = get_queue_info()
+    is_active = any(item.get("_key") == task_key for item in queue_info.get("items", []))
+    if is_active:
+        return {"ok": True, "ready": False, "status": "analyzing"}
+
+    # 无分析文件、无错误、无活跃任务 → 尚未分析或状态未知
+    return {"ok": True, "ready": False, "status": "not_started"}
 
 
 # ── 成绩查询 ─────────────────────────────────────────────
@@ -930,27 +1006,25 @@ async def get_profile(request: Request):
 
 @router.put("/profile")
 async def update_profile(request: Request):
-    """修改教师姓名和用户名"""
+    """修改教师姓名（用户名不可更改）"""
     _require_auth(request)
     body = await request.json()
     new_name = (body.get("name") or "").strip()
-    new_username = (body.get("username") or "").strip()
-    if not new_name or not new_username:
-        raise HTTPException(status_code=400, detail="姓名和用户名不能为空")
+    if not new_name:
+        raise HTTPException(status_code=400, detail="姓名不能为空")
     token = request.cookies.get(TEACHER_COOKIE) or ""
     if token:
         sf = __import__("config").DATA_DIR / ".sessions" / f"{token}.json"
         if sf.exists():
             data = json.loads(sf.read_text(encoding="utf-8"))
-            old_username = data.get("teacher_username", "")
-            if old_username:
+            username = data.get("teacher_username", "")
+            if username:
                 from auth import update_teacher_profile
-                ok, msg = update_teacher_profile(old_username, new_name, new_username)
+                ok, msg = update_teacher_profile(username, new_name, username)  # 用户名不变
                 if not ok:
                     raise HTTPException(status_code=400, detail=msg)
-                # 更新 session 中的信息
+                # 更新 session 中的姓名
                 data["teacher_name"] = new_name
-                data["teacher_username"] = new_username
                 sf.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
                 return {"ok": True}
     raise HTTPException(status_code=400, detail="请使用多教师账号登录")
@@ -986,19 +1060,34 @@ async def teacher_change_password(request: Request):
 
 # ── 系统设置 ─────────────────────────────────────────────
 
+def _mask_api_key(key: str) -> str:
+    """遮蔽 API Key：保留首尾各 4 字符，中间用 **** 代替"""
+    if not key:
+        return ""
+    if len(key) <= 8:
+        return key[:2] + "****" + key[-2:]
+    return key[:4] + "****" + key[-4:]
+
+
 @router.get("/settings")
 async def get_settings(request: Request):
-    """获取完整的教师可配置设置，缺失字段用默认值补齐"""
+    """获取完整的教师可配置设置。api_key 已脱敏，不可通过前端获取原始值。"""
     _require_auth(request)
     from config import get_llm_params, get_image_params, get_grade_thresholds, get_prompt_templates, get_scoring_templates
     settings = read_settings()
-    # 等级阈值转为前端需要的 {等级: 分数} 格式
     raw_thresholds = settings.get("grade_thresholds", {})
     if not raw_thresholds:
         thresholds_list = get_grade_thresholds()
         raw_thresholds = {name: score for score, name in thresholds_list}
+    # 遮蔽 API Key
+    models = settings.get("models", [])
+    safe_models = []
+    for m in models:
+        sm = dict(m)
+        sm["api_key"] = _mask_api_key(sm.get("api_key", ""))
+        safe_models.append(sm)
     return {
-        "models": settings.get("models", []),
+        "models": safe_models,
         "llm_active": settings.get("llm_active", 0),
         "llm_params": get_llm_params(),
         "image_params": get_image_params(),
@@ -1016,9 +1105,14 @@ async def update_settings(request: Request):
     settings = read_settings()
 
     if "models" in body:
+        old_models = {m["name"]: m for m in settings.get("models", [])}
         models = body["models"]
         for m in models:
             m["concurrency"] = max(1, min(5, m.get("concurrency", 1)))
+            # API Key 安全：前端传来遮蔽值则保留旧 Key
+            key = m.get("api_key", "")
+            if "****" in key and m["name"] in old_models:
+                m["api_key"] = old_models[m["name"]].get("api_key", "")
         settings["models"] = models
     if "llm_active" in body:
         settings["llm_active"] = int(body["llm_active"])
@@ -1041,17 +1135,36 @@ async def update_settings(request: Request):
     return {"ok": True}
 
 
+def _resolve_api_key(api_key: str, model_name: str = "") -> str:
+    """如果前端传入的 api_key 是脱敏值，则从 settings 中查找真实 Key"""
+    if "****" in api_key:
+        settings = read_settings()
+        for m in settings.get("models", []):
+            if m.get("name", "") == model_name:
+                return m.get("api_key", "")
+        # fallback: try by model id
+        for m in settings.get("models", []):
+            if m.get("model", "") == model_name:
+                return m.get("api_key", "")
+    return api_key
+
+
 @router.post("/settings/test")
 async def test_llm_connection(request: Request):
-    """测试大模型连接。body: {api_base, api_key, model}"""
+    """测试大模型连接。body: {api_base, api_key, model}。api_key 可为脱敏值，后端自动查真实 Key。"""
     _require_auth(request)
     body = await request.json()
     base_url = (body.get("api_base") or "").strip()
-    api_key = (body.get("api_key") or "").strip()
+    api_key = _resolve_api_key(
+        (body.get("api_key") or "").strip(),
+        (body.get("name") or body.get("model") or "").strip(),
+    )
     model = (body.get("model") or "").strip()
 
     if not base_url:
         return {"ok": False, "message": "请先填写 API 地址"}
+    if not api_key:
+        return {"ok": False, "message": "API Key 未配置"}
 
     try:
         from openai import OpenAI
@@ -1074,15 +1187,20 @@ async def test_llm_connection(request: Request):
 
 @router.post("/settings/test-vision")
 async def test_vision_capability(request: Request):
-    """测试大模型读图能力。body: {api_base, api_key, model}。使用 config/DrawingForCheck.png 作为测试图"""
+    """测试大模型读图能力。body: {api_base, api_key, model}。api_key 可为脱敏值。"""
     _require_auth(request)
     body = await request.json()
     base_url = (body.get("api_base") or "").strip()
-    api_key = (body.get("api_key") or "").strip()
+    api_key = _resolve_api_key(
+        (body.get("api_key") or "").strip(),
+        (body.get("name") or body.get("model") or "").strip(),
+    )
     model = (body.get("model") or "").strip()
 
     if not base_url:
         return {"ok": False, "message": "请先填写 API 地址"}
+    if not api_key:
+        return {"ok": False, "message": "API Key 未配置"}
 
     # 读取测试图
     test_image_path = Path(__file__).parent.parent.parent / "config" / "DrawingForCheck.png"

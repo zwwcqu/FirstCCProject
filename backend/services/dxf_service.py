@@ -55,8 +55,7 @@ def _get_dxf_params() -> dict:
     """读取 DXF 处理参数（优先 settings，缺失使用默认值）"""
     from config import read_settings
     defaults = {
-        "preview_dpi": 150,
-        "preview_max_size": 2048,
+        "preview_max_size": 768,       # 长边像素数（图纸 ISO/GB mm）
         "preview_bg": "#FFFFFF",
         "preview_fg": "#000000",
         "preview_linewidth_scale": 1.0,
@@ -70,11 +69,13 @@ def _get_dxf_params() -> dict:
 # 中心线图层关键词（不区分大小写）
 _CENTERLINE_LAYER_KEYWORDS = [
     "中心线", "center", "centerline", "c-line", "轴线",
+    "点划线", "点画线", " dash", "dot dash",
 ]
 
 # 中心线线型关键词（不区分大小写）
 _CENTERLINE_LINETYPE_KEYWORDS = [
-    "center", "center2", "centerx2", "dashdot",
+    "center", "center2", "centerx2", "dashdot", "dash dot",
+    "acad_iso08", "acad_iso10", "acad_iso12",  # AutoCAD ISO 中心线线型
 ]
 
 
@@ -302,52 +303,115 @@ def _extract_arc(entity) -> list[dict]:
     }]
 
 
+def _clean_dimension_text(raw_text: str, measurement: float | None = None) -> str:
+    """清理标注文字：去除 MText 格式代码，将 <> 替换为实际测量值。
+    单独 <> 时返回纯测量值字符串；如 "3x<>" 且测量值为 5.0 则返回 "3x5.0"。
+    """
+    import re
+    if not raw_text:
+        return ""
+    # 去除 MText 格式标记 {\\f...; ...}
+    cleaned = re.sub(r'\\[fF][^;]*;', '', raw_text)
+    cleaned = re.sub(r'[{}]', '', cleaned)
+    cleaned = re.sub(r'\\P', ' ', cleaned)
+    cleaned = cleaned.strip()
+    # 替换 <> 为实际测量值
+    if "<>" in cleaned and measurement is not None:
+        meas_str = str(round(measurement, 2)) if measurement != int(measurement) else str(int(measurement))
+        cleaned = cleaned.replace("<>", meas_str)
+    elif cleaned == "<>" and measurement is not None:
+        meas_str = str(round(measurement, 2)) if measurement != int(measurement) else str(int(measurement))
+        cleaned = meas_str
+    return cleaned
+
+
 def _extract_dimension(entity) -> dict | None:
-    """提取标注实体（线性、半径、直径、角度等）"""
+    """提取标注实体，支持线性/对齐/角度/直径/半径/坐标标注。
+
+    使用 ezdxf 的 dimtype 标志位（低 4 位）判断标注类型，
+    通过 entity.get_measurement() 获取测量值（由 ezdxf 从 defpoints 计算）。
+    """
     try:
-        dim_type = entity.dxftype()  # DIMENSION
-        # 获取测量值和标注文字
-        measurement = None
-        text = ""
         layer = entity.dxf.layer
         color = entity.dxf.color
 
-        # 尝试获取标注文字
+        # ── 标注类型：dimtype 低 4 位 ──────────────────────
+        raw_dimtype = entity.dxf.dimtype
+        base_type = raw_dimtype & 0x0F  # 位 0-3 = 标注类型
+        _DIM_TYPE_NAMES = {
+            0: "linear",       # Rotated / horizontal / vertical
+            1: "aligned",
+            2: "angular",      # 2-line angular
+            3: "diameter",
+            4: "radius",
+            5: "angular_3pt",  # 3-point angular
+            6: "ordinate",
+        }
+        dim_type_name = _DIM_TYPE_NAMES.get(base_type, f"unknown_{base_type}")
+
+        # ── 测量值：ezdxf 从 defpoints 自动计算 ────────────
+        measurement = None
         try:
-            text = entity.dxf.text or ""
+            measurement = entity.get_measurement()
         except Exception:
             pass
 
-        # 获取测量值
+        # ── 标注文字：去除 MText 格式 ──────────────────────
+        raw_text = ""
         try:
-            measurement = entity.dxf.measurement
+            raw_text = entity.dxf.text or ""
+        except Exception:
+            pass
+        text_override = _clean_dimension_text(raw_text, measurement)
+
+        # ── 几何定义点 ─────────────────────────────────────
+        defpoints: dict[str, list[float]] = {}
+        for attr_name in ("defpoint", "defpoint2", "defpoint3", "defpoint4"):
+            try:
+                pt = getattr(entity.dxf, attr_name)
+                # 跳过零向量（该 defpoint 未使用）
+                if pt is not None and not (abs(pt[0]) < 0.0001 and abs(pt[1]) < 0.0001 and abs(pt[2]) < 0.0001):
+                    defpoints[attr_name] = [round(pt[0], 4), round(pt[1], 4)]
+            except Exception:
+                pass
+
+        # ── 文字位置 ───────────────────────────────────────
+        text_position = None
+        try:
+            tmp = entity.dxf.text_midpoint
+            if tmp is not None and not (abs(tmp[0]) < 0.0001 and abs(tmp[1]) < 0.0001 and abs(tmp[2]) < 0.0001):
+                text_position = [round(tmp[0], 4), round(tmp[1], 4)]
         except Exception:
             pass
 
-        # 获取标注类型
-        dim_type_name = "unknown"
-        try:
-            # ezdxf 使用 dimtype 标志位判断
-            flags = entity.dxf.dimtype if hasattr(entity.dxf, 'dimtype') else 0
-            # 简化：通过是否包含特定属性判断
-            if entity.dxf.hasattr("dimradius"):
-                dim_type_name = "radius"
-            elif entity.dxf.hasattr("dimdiameter"):
-                dim_type_name = "diameter"
-            elif entity.dxf.hasattr("dimangular"):
-                dim_type_name = "angular"
-            else:
-                dim_type_name = "linear"
-        except Exception:
-            dim_type_name = "linear"
-
-        return {
+        result: dict = {
             "type": dim_type_name,
-            "text": str(text) if text else "",
-            "measurement": round(float(measurement), 4) if measurement is not None else None,
             "layer": layer,
             "color": color,
+            "measurement": round(float(measurement), 4) if measurement is not None else None,
+            "text": text_override,
+            "defpoints": defpoints,
+            "text_position": text_position,
         }
+
+        # ── 直径/半径额外字段 ──────────────────────────────
+        if base_type in (3, 4):
+            try:
+                ll = entity.dxf.leader_length
+                if ll is not None:
+                    result["leader_length"] = round(float(ll), 4)
+            except Exception:
+                pass
+
+        # ── 坐标标注方向 ───────────────────────────────────
+        if base_type == 6:
+            try:
+                octype = entity.dxf.ordinate_type
+                result["ordinate_type"] = "x" if octype == 0 else "y"
+            except Exception:
+                pass
+
+        return result
     except Exception as e:
         logger.debug(f"提取标注失败: {e}")
         return None
@@ -862,108 +926,138 @@ def _explode_insert(entity, doc) -> list[dict]:
             result.extend(segs)
         elif dxftype in ("TEXT", "MTEXT"):
             pass  # 块内文字通常为标注文字，正文已在 main modelspace 提取
-        elif dxftype == "DIMENSION":
-            dim = _extract_dimension(e)
-            if dim:
-                result.append(dim)  # type: ignore — dim is dict, not list[dict] but we filter later
 
-    # 过滤掉非 dict 元素（如 _extract_dimension 返回的 dict）
+    # 仅返回几何实体（标注/文字已在 main modelspace 处理）
     return [x for x in result if isinstance(x, dict) and x.get("type") in ("line", "circle", "arc")]
 
 
 # ── DXF 预览渲染 ──────────────────────────────────────────
 
-def render_dxf_preview(filepath: Path, output_path: Path) -> Path:
+def render_dxf_preview(
+    filepath: Path,
+    output_path: Path,
+    *,
+    skip_dimensions: bool = False,
+) -> Path:
     """
-    使用 matplotlib 后端将 DXF 渲染为 PNG 预览图。
+    将 DXF 渲染为 PNG 预览图。
+
+    图纸坐标为 mm（ISO/GB 标准），长边 = max_size px，短边等比例。
+    正确处理 DXF 索引色：BYLAYER(256)/BYBLOCK(0) → 图层色 → ACI 色表 → RGB。
 
     Args:
-        filepath: 源 DXF 文件路径
-        output_path: 输出 PNG 路径（父目录将自动创建）
-
-    Returns:
-        渲染后的 PNG 文件路径
+        filepath: DXF 文件路径
+        output_path: 输出 PNG 路径
+        skip_dimensions: True 跳过标注实体（生成无尺寸版本）
     """
     _check_ezdxf()
     params = _get_dxf_params()
-    dpi = params["preview_dpi"]
-    max_size = params["preview_max_size"]
-    bg = params["preview_bg"]
-    fg = params["preview_fg"]
-    lw_scale = params["preview_linewidth_scale"]
+    max_size: int = params["preview_max_size"]
+    bg: str = params["preview_bg"]
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    logger.info(f"渲染 DXF 预览: {filepath} → {output_path}")
-
     doc = ezdxf.readfile(str(filepath))
     msp = doc.modelspace()
 
-    # 使用 ezdxf 的 matplotlib 后端
-    from ezdxf.addons.drawing import RenderContext, Frontend
-    from ezdxf.addons.drawing.matplotlib import MatplotlibBackend
+    # ── 颜色修正（白底黑线）─────────────────────────────────
+    # DXF 索引色 7 = 白/黑（AutoCAD 依背景自动切换），ezdxf 固定 #FFFFFF
+    # → 白线白底不可见，改为黑色。
+    # "文本层"（标注所在层，颜色 212 深紫 a500a5）与黑线区分度低
+    # → 改为蓝色，方便教师查看尺寸。
+    for layer in doc.layers:
+        if layer.dxf.color == 7:
+            layer.rgb = (0, 0, 0)
+        if layer.dxf.name == "文本层":
+            layer.rgb = (0, 102, 204)
 
+    # ── 修复标注虚拟实体 BYBLOCK→白色 的 ezdxf 缺陷 ────────
+    # DIMENSION 的匿名几何块中所有实体 color=0 (BYBLOCK)，但 ezdxf
+    # draw_composite_entity 对 DIMENSION 不 push_state，导致 BYBLOCK
+    # 无法继承父标注颜色 → 固定解析为 #ffffff（白底白线不可见）。
+    # 修复：将块内实体的 color 改为 256 (BYLAYER)，使用图层色。
+    for entity in msp:
+        if entity.dxftype() == "DIMENSION":
+            try:
+                block = entity.get_geometry_block()
+                for be in block:
+                    if be.dxf.color == 0:
+                        be.dxf.color = 256
+            except Exception:
+                pass
+
+    # ── 图纸包围盒（mm）→ 像素尺寸 ───────────────────────────
+    from ezdxf.bbox import extents, Cache
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
+    from ezdxf.addons.drawing import RenderContext, Frontend
+    from ezdxf.addons.drawing.matplotlib import MatplotlibBackend
 
-    # 计算图形尺寸
-    from ezdxf.bbox import Cache
-    bbox = Cache()  # type: ignore
     try:
-        from ezdxf.bbox import extents
-        bounds = extents(msp, cache=bbox)
+        bounds = extents(msp, cache=Cache())
+        has_data = bounds.has_data
     except Exception:
-        bounds = None
+        has_data = False
 
-    if bounds is None or not bounds.has_data:
-        # 无实体，生成空白图
-        fig, ax = plt.subplots(figsize=(8, 6), dpi=dpi)
-        ax.set_facecolor(bg)
-        fig.patch.set_facecolor(bg)
-        ax.set_xlim(0, 100)
-        ax.set_ylim(0, 100)
+    if not has_data:
+        px_w, px_h = 768, 576
+        xmin, xmax, ymin, ymax = 0, 100, 0, 100
     else:
-        bbox_width = bounds.size.x
-        bbox_height = bounds.size.y
-
-        # 按 max_size 限制图片尺寸
-        if max(bbox_width, bbox_height) > 0:
-            scale = max_size / max(bbox_width, bbox_height)
+        w_mm = bounds.size.x   # 图纸宽度 mm
+        h_mm = bounds.size.y   # 图纸高度 mm
+        if w_mm >= h_mm:
+            px_w = max_size
+            px_h = max(1, int(max_size * h_mm / w_mm))
         else:
-            scale = 1.0
-        fig_w = max(1, bbox_width * scale / dpi)
-        fig_h = max(1, bbox_height * scale / dpi)
+            px_h = max_size
+            px_w = max(1, int(max_size * w_mm / h_mm))
+        xmin, xmax = bounds.extmin.x, bounds.extmax.x
+        ymin, ymax = bounds.extmin.y, bounds.extmax.y
 
-        fig, ax = plt.subplots(figsize=(fig_w, fig_h), dpi=dpi)
-        ax.set_facecolor(bg)
-        fig.patch.set_facecolor(bg)
-        ax.set_xlim(bounds.extmin.x, bounds.extmax.x)
-        ax.set_ylim(bounds.extmin.y, bounds.extmax.y)
-
+    # ── 创建画布（100 DPI 内部基准，仅供 matplot​lib 使用）───
+    fig = plt.figure(figsize=(px_w / 100, px_h / 100), dpi=100, facecolor=bg)
+    ax = fig.add_axes([0, 0, 1, 1])
+    ax.set_xlim(xmin, xmax)
+    ax.set_ylim(ymin, ymax)
     ax.set_aspect('equal')
     ax.axis('off')
+    ax.set_facecolor(bg)
 
-    # 创建渲染上下文和后端
+    # ── 渲染 ─────────────────────────────────────────────────
     ctx = RenderContext(doc)
-    backend = MatplotlibBackend(ax)
-
-    # 配置线宽缩放
-    try:
-        from ezdxf.addons.drawing.properties import Properties
-        # Frontend 自动处理
-    except ImportError:
-        pass
-
+    backend = MatplotlibBackend(ax, adjust_figure=False)
     frontend = Frontend(ctx, backend)
-    frontend.draw_layout(msp, finalize=True)
 
-    fig.savefig(str(output_path), dpi=dpi, bbox_inches='tight',
-                pad_inches=0.1, facecolor=bg, edgecolor='none')
+    if skip_dimensions:
+        frontend.draw_layout(msp, finalize=True,
+                             filter_func=lambda e: e.dxftype() != "DIMENSION")
+    else:
+        frontend.draw_layout(msp, finalize=True)
+
+    fig.savefig(str(output_path), dpi=100, facecolor=bg, edgecolor='none')
     plt.close(fig)
-
-    logger.info(f"DXF 预览已生成: {output_path}")
     return output_path
+
+
+# ── 统一 DXF 分析（教师参考图 + 学生作业共用）───────────────
+
+def process_dxf(filepath: Path, output_dir: Path | None = None) -> dict:
+    """
+    解析 DXF 并渲染预览图。教师参考图和学生作业统一入口。
+
+    Args:
+        filepath: DXF 文件路径
+        output_dir: 预览图输出目录（默认与 DXF 同目录）
+
+    Returns:
+        extract_dxf 的结构化数据 dict
+    """
+    data = extract_dxf(filepath)
+    out_dir = output_dir or filepath.parent
+    stem = filepath.stem
+    render_dxf_preview(filepath, out_dir / f"{stem}.png")
+    render_dxf_preview(filepath, out_dir / f"{stem}_无尺寸.png", skip_dimensions=True)
+    return data
 
 
 # ── 统一 DXF 评分入口（教师批量 + 学生提交共用）─────────────
@@ -995,28 +1089,27 @@ def run_dxf_grade(
     """
     from services.llm_service import grade_dxf
 
-    # 1. 提取学生 DXF 数据（如尚未提取）
+    # 1. 提取学生 DXF 数据（如尚未提取则统一 process_dxf）
     if stu_dxf_data is None:
-        stu_dxf_data = extract_dxf(student_dxf_path)
+        stu_dxf_data = process_dxf(student_dxf_path)
 
-    # 2. 确保学生预览图存在
-    stu_png = student_dxf_path.with_suffix(".png")
-    if not stu_png.exists():
-        render_dxf_preview(student_dxf_path, stu_png)
-
-    # 3. 参考预览图（PNG 优先，DXF 兜底）
-    ref_png = ref_dir / "参考工程图.png"
-    ref_dxf = ref_dir / "参考工程图.dxf"
-    ref_preview = ref_png if ref_png.exists() else ref_dxf
+    # 3. 预览图：阶段一视觉对比用无尺寸图（纯几何，去掉标注干扰）
+    ref_nodim = ref_dir / "参考工程图_无尺寸.png"
+    ref_preview = ref_nodim if ref_nodim.exists() else (ref_dir / "参考工程图.png")
+    if not ref_preview.exists():
+        ref_preview = ref_dir / "参考工程图.dxf"
     if not ref_preview.exists():
         raise RuntimeError("参考 DXF 预览图不存在，请联系老师")
+
+    stu_png_nodim = student_dxf_path.parent / f"{student_dxf_path.stem}_无尺寸.png"
+    stu_preview = stu_png_nodim if stu_png_nodim.exists() else stu_png
 
     # 4. LLM 评分
     grade_result = grade_dxf(
         ref_data=ref_data,
         stu_data=stu_dxf_data,
         ref_preview_path=ref_preview,
-        stu_preview_path=stu_png,
+        stu_preview_path=stu_preview,
         phase1_criteria=phase1_criteria,
         phase2_criteria=phase2_criteria,
         knowledge=knowledge,
