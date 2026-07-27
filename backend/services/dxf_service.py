@@ -1664,7 +1664,7 @@ def preprocess_dxf(input_path: Path, output_path: Path) -> None:
 
 # ── 重叠线清理 ─────────────────────────────────────────
 
-_TOL = 1e-8
+_TOL = 1e-6
 
 _SOLID_LTYPES = {"", "bylayer", "continuous", "solid"}
 _DASHED_LTYPE_KWS = ["dash", "dotted", "hidden", "dashdot",
