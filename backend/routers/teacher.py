@@ -272,6 +272,9 @@ async def get_questions(request: Request):
         is_owner = (teacher and q.get("teacher", "") == teacher) or not q.get("teacher")
         if not is_owner and q.get("visible_to_others", 0) != 1:
             continue  # 非本人且未开放可见 → 隐藏
+        # 向后兼容：旧题目没有 required_frames 字段
+        if "required_frames" not in q:
+            q["required_frames"] = []
         files = get_question_files(q["id"])
         q["files"] = files
         result.append(q)
@@ -295,6 +298,7 @@ async def create_question_handler(
     template_type: str = Form("零件图识读模板.txt"),      # 识读模板类型
     template_content: str = Form(""),                    # 自定义模板内容（非空则覆盖）
     visible_to_others: int = Form(0),                    # 0=仅限本人, 1=其他教师可见
+    required_frames: str = Form(""),                     # DXF 答题图框列表 JSON（如 ["主视图","俯视图"]）
 ):
     """新增题目"""
     _require_auth(request)
@@ -313,12 +317,21 @@ async def create_question_handler(
                 except ValueError:
                     pass
         qid = f"{today}-{seq:03d}"
+    # 解析 required_frames JSON（前端传空字符串 = 无图框）
+    try:
+        parsed_frames = json.loads(required_frames) if required_frames.strip() else []
+        if not isinstance(parsed_frames, list):
+            parsed_frames = []
+    except (json.JSONDecodeError, ValueError):
+        parsed_frames = []
+
     try:
         entry = create_question(qid, title, description, phase1_criteria, phase2_criteria,
                                 knowledge, submission_type, teacher=teacher, classes=classes,
                                 deadline=deadline, template_type=template_type,
                                 template_content=template_content,
-                                visible_to_others=visible_to_others)
+                                visible_to_others=visible_to_others,
+                                required_frames=parsed_frames)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     if image and image.filename:
@@ -352,14 +365,24 @@ async def update_question_handler(
     deadline: str = Form(""),                            # 提交截止时间 ISO 格式
     template_content: str = Form(""),                    # 自定义模板内容（非空则保存）
     visible_to_others: int = Form(0),                    # 0=仅限本人, 1=其他教师可见
+    required_frames: str = Form(""),                     # DXF 答题图框列表 JSON
 ):
     """编辑已有题目"""
     _require_auth(request)
     teacher = _get_teacher_username(request)
+    # 解析 required_frames JSON
+    try:
+        parsed_frames = json.loads(required_frames) if required_frames.strip() else []
+        if not isinstance(parsed_frames, list):
+            parsed_frames = []
+    except (json.JSONDecodeError, ValueError):
+        parsed_frames = []
+
     try:
         entry = update_question(qid, title, description, phase1_criteria, phase2_criteria,
                                 knowledge, submission_type, teacher=teacher, classes=classes,
-                                deadline=deadline, visible_to_others=visible_to_others)
+                                deadline=deadline, visible_to_others=visible_to_others,
+                                required_frames=parsed_frames)
     except PermissionError as e:
         raise HTTPException(status_code=403, detail=str(e))
     if entry is None:
@@ -1077,7 +1100,7 @@ def _mask_api_key(key: str) -> str:
 async def get_settings(request: Request):
     """获取完整的教师可配置设置。api_key 已脱敏，不可通过前端获取原始值。"""
     _require_auth(request)
-    from config import get_llm_params, get_image_params, get_grade_thresholds, get_prompt_templates, get_scoring_templates
+    from config import get_llm_params, get_image_params, get_dxf_params, get_grade_thresholds, get_prompt_templates, get_scoring_templates
     settings = read_settings()
     raw_thresholds = settings.get("grade_thresholds", {})
     if not raw_thresholds:
@@ -1095,6 +1118,7 @@ async def get_settings(request: Request):
         "llm_active": settings.get("llm_active", 0),
         "llm_params": get_llm_params(),
         "image_params": get_image_params(),
+        "dxf_params": get_dxf_params(),
         "grade_thresholds": raw_thresholds,
         "prompt_templates": get_prompt_templates(),
         "scoring_templates": get_scoring_templates(),
@@ -1122,7 +1146,8 @@ async def update_settings(request: Request):
         settings["llm_active"] = int(body["llm_active"])
 
     # 新增可配置区块（仅更新 body 中包含的字段）
-    for section in ("llm_params", "image_params", "grade_thresholds",
+    for section in ("llm_params", "image_params", "dxf_params",
+                    "grade_thresholds",
                     "prompt_templates", "scoring_templates"):
         if section in body and isinstance(body[section], dict):
             settings[section] = {**settings.get(section, {}), **body[section]}

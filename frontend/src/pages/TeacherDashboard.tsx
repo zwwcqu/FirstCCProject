@@ -152,6 +152,7 @@ export default function TeacherDashboard() {
   const [image, setImage] = useState<File | null>(null);
   const [refPdf, setRefPdf] = useState<File | null>(null);
   const [submissionType, setSubmissionType] = useState("pdf");  // 学生提交文件类型：pdf / image
+  const [requiredFrames, setRequiredFrames] = useState<string[]>([]); // DXF 答题图框列表
   const [qClasses, setQClasses] = useState<string[]>([]);     // 适用班别（复选框）
   const [deadline, setDeadline] = useState("");               // 提交截止时间
   const [existingImages, setExistingImages] = useState<string[]>([]);
@@ -294,6 +295,7 @@ export default function TeacherDashboard() {
     setImage(null);
     setRefPdf(null);
     setSubmissionType("pdf");
+    setRequiredFrames([]);
     setQClasses([]);
     setDeadline("");
     setExistingImages([]);
@@ -320,6 +322,7 @@ export default function TeacherDashboard() {
     fd.append("template_type", templateType);
     fd.append("template_content", templateContent);
     fd.append("visible_to_others", String(visibleToOthers));
+    fd.append("required_frames", JSON.stringify(requiredFrames));
     if (image) fd.append("image", image);
     if (refPdf) fd.append("reference_pdf", refPdf);
     try {
@@ -346,6 +349,7 @@ export default function TeacherDashboard() {
     fd.append("template_type", templateType);
     fd.append("template_content", templateContent);
     fd.append("visible_to_others", String(visibleToOthers));
+    fd.append("required_frames", JSON.stringify(requiredFrames));
     if (image) fd.append("image", image);
     if (refPdf) fd.append("reference_pdf", refPdf);
     try {
@@ -406,6 +410,7 @@ export default function TeacherDashboard() {
       setQClasses(((q as any).classes || "").split(",").filter(Boolean));
       setDeadline((q as any).deadline || "");
       setVisibleToOthers((q as any).visible_to_others ?? 0);
+      setRequiredFrames(Array.isArray((q as any).required_frames) ? (q as any).required_frames : []);
       setImage(null);
       setRefPdf(null);
       setExistingImages(detail.files?.images || []);
@@ -612,6 +617,9 @@ export default function TeacherDashboard() {
   };
 
   const GRADE_OPTIONS = ["A+", "A", "B+", "B", "C+", "C", "D+", "D", "F"];
+
+  // DXF 答题图框选项（ACI颜色索引：1红, 2黄, 3绿, 5蓝, 6洋红）
+  const FRAME_OPTIONS = ["主视图", "俯视图", "左视图", "其他视图1", "其他视图2"];
 
   const handleOpenReview = async (sid: string) => {
     if (!gradesView) return;
@@ -850,6 +858,7 @@ export default function TeacherDashboard() {
                               fd.append("phase2_criteria", q.files?.phase2_criteria || "");
                               fd.append("submission_type", (q as any).submission_type || "pdf");
                               fd.append("deadline", input);
+                              fd.append("required_frames", JSON.stringify((q as any).required_frames || []));
                               updateQuestion(q.id, fd).then(() => loadQuestions()).catch(e => alert(e.message));
                             }
                           }}
@@ -1208,8 +1217,36 @@ export default function TeacherDashboard() {
                     </label>
                   </div>
                 </div>
+
+                {/* DXF 答题图框设置（仅 DXF 类型时显示） */}
+                {submissionType === "dxf" && (
+                  <div className="border rounded p-3 bg-blue-50/30">
+                    <label className="block text-sm font-medium text-gray-700 mb-2">答题图框（DXF）</label>
+                    <p className="text-xs text-gray-400 mb-2">选择学生需要绘制的图框，留空=无图框（不限绘制区域）。图框线粗 1.0mm</p>
+                    <div className="flex flex-wrap gap-3">
+                      {FRAME_OPTIONS.map((frame, i) => {
+                        const colors = ["bg-red-400", "bg-yellow-400", "bg-green-400", "bg-blue-400", "bg-fuchsia-400"];
+                        return (
+                          <label key={frame} className="flex items-center gap-1.5 cursor-pointer text-sm">
+                            <input type="checkbox" checked={requiredFrames.includes(frame)}
+                              onChange={(e) => {
+                                if (e.target.checked) setRequiredFrames([...requiredFrames, frame]);
+                                else setRequiredFrames(requiredFrames.filter(x => x !== frame));
+                              }}
+                              className="w-4 h-4" />
+                            <span className={`inline-block w-3 h-3 rounded-full ${colors[i]}`} />
+                            {frame}
+                          </label>
+                        );
+                      })}
+                    </div>
+                    <p className="text-xs text-gray-400 mt-1.5">
+                      空列表=无图框（不限区域）；至少选一个=有图框，仅检查选中图框内的绘制内容
+                    </p>
+                  </div>
+                )}
+
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">权限管理</label>
                   <div className="flex gap-4">
                     <label className="flex items-center gap-2 cursor-pointer">
                       <input type="radio" name="visible_to_others" value={0}

@@ -268,6 +268,8 @@ export default function SettingsPage() {
   const [llmParams, setLlmParams] = useState<Record<string, any>>({});
   // 图像参数
   const [imageParams, setImageParams] = useState<Record<string, any>>({});
+  // DXF 参数
+  const [dxfParams, setDxfParams] = useState<Record<string, any>>({});
   // 等级阈值
   const [gradeThresholds, setGradeThresholds] = useState<Record<string, number>>({});
   // 提示词模板
@@ -300,6 +302,7 @@ export default function SettingsPage() {
       setActive(s.llm_active || 0);
       setLlmParams(s.llm_params || {});
       setImageParams(s.image_params || {});
+      setDxfParams(s.dxf_params || {});
       setGradeThresholds(s.grade_thresholds || {});
       setPromptTemplates(s.prompt_templates || {});
       setScoringTemplates(s.scoring_templates || {});
@@ -561,6 +564,35 @@ export default function SettingsPage() {
               className="bg-blue-600 text-white px-4 py-1.5 rounded hover:bg-blue-700 disabled:opacity-50 text-sm">
               {saving ? "保存中…" : "保存图像参数"}
             </button>
+
+            {/* DXF 处理参数 */}
+            <div className="border-t pt-4 mt-4">
+              <h3 className="text-md font-semibold mb-2">DXF 处理参数</h3>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className={labelClass}>preview_dpi — 预览图 DPI</label>
+                  <input type="number" min={72} max={600} value={dxfParams.preview_dpi ?? 150}
+                    onChange={e => setDxfParams({ ...dxfParams, preview_dpi: parseInt(e.target.value) || 150 })}
+                    className={inputClass} />
+                </div>
+                <div>
+                  <label className={labelClass}>preview_max_size — 预览图长边最大像素</label>
+                  <input type="number" min={512} max={4096} value={dxfParams.preview_max_size ?? 2048}
+                    onChange={e => setDxfParams({ ...dxfParams, preview_max_size: parseInt(e.target.value) || 2048 })}
+                    className={inputClass} />
+                </div>
+                <div>
+                  <label className={labelClass}>preview_linewidth_scale — 预览图线宽缩放</label>
+                  <input type="number" step="0.1" min={0.1} max={5} value={dxfParams.preview_linewidth_scale ?? 1.0}
+                    onChange={e => setDxfParams({ ...dxfParams, preview_linewidth_scale: parseFloat(e.target.value) || 1.0 })}
+                    className={inputClass} />
+                </div>
+              </div>
+              <button onClick={() => saveSection("dxf_params", dxfParams)} disabled={saving}
+                className="bg-blue-600 text-white px-4 py-1.5 rounded hover:bg-blue-700 disabled:opacity-50 text-sm mt-4">
+                {saving ? "保存中…" : "保存 DXF 参数"}
+              </button>
+            </div>
           </div>
         )}
 

@@ -93,6 +93,9 @@ async def get_questions(class_name: str = ""):
     # 过滤：题目的 classes 字段包含该班别，或 classes 为空（未限制）
     result = []
     for q in all_qs:
+        # 向后兼容：旧题目没有 required_frames 字段
+        if "required_frames" not in q:
+            q["required_frames"] = []
         q_classes = (q.get("classes") or "").strip()
         if not q_classes or class_name in q_classes:
             result.append(q)

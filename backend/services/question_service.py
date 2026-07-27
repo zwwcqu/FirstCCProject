@@ -71,10 +71,12 @@ def list_questions() -> list[dict]:
 
 
 def get_question(qid: str) -> dict | None:
-    """按题号查找题目，未找到返回 None"""
+    """按题号查找题目，未找到返回 None。自动补齐旧题目缺少的字段。"""
     questions = read_questions_index()
     for q in questions:
         if q["id"] == qid:
+            if "required_frames" not in q:
+                q["required_frames"] = []
             return q
     return None
 
@@ -85,7 +87,8 @@ def create_question(qid: str, title: str, description: str,
                     teacher: str = "", classes: str = "", deadline: str = "",
                     template_type: str = "零件图识读模板.txt",
                     template_content: str = "",
-                    visible_to_others: int = 0) -> dict:
+                    visible_to_others: int = 0,
+                    required_frames: list[str] | None = None) -> dict:
     """创建题目：写索引 + 创建目录 + 写内容文件 + 复制模板。deadline=提交截止时间 ISO 格式
     template_content 非空时使用自定义内容，否则从全局模板复制。"""
     if not qid or not qid.replace("-", "").replace("_", "").isalnum():
@@ -113,7 +116,8 @@ def create_question(qid: str, title: str, description: str,
 
     entry = {"id": qid, "title": title, "submission_type": submission_type,
              "teacher": teacher, "classes": classes, "deadline": deadline,
-             "visible_to_others": visible_to_others}
+             "visible_to_others": visible_to_others,
+             "required_frames": required_frames if required_frames is not None else []}
     questions.append(entry)
     write_questions_index(questions)
     logger.info(f"题目已创建: [{qid}] {title} by {teacher}")
@@ -124,7 +128,8 @@ def update_question(qid: str, title: str, description: str,
                     phase1_criteria: str, phase2_criteria: str,
                     knowledge: str = "", submission_type: str = "pdf",
                     teacher: str = "", classes: str = "", deadline: str = "",
-                    visible_to_others: int | None = None) -> dict | None:
+                    visible_to_others: int | None = None,
+                    required_frames: list[str] | None = None) -> dict | None:
     """编辑题目：更新索引 + 覆盖内容文件。仅拥有者可修改"""
     questions = read_questions_index()
     found = None
@@ -143,6 +148,8 @@ def update_question(qid: str, title: str, description: str,
                 q["deadline"] = deadline
             if visible_to_others is not None:
                 q["visible_to_others"] = visible_to_others
+            if required_frames is not None:
+                q["required_frames"] = required_frames
             found = q
             break
     if found is None:

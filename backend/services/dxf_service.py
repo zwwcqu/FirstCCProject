@@ -26,6 +26,49 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+# 答题图框线宽（mm），系统常数，非教师可配置
+FRAME_LINEWIDTH = 1.0
+# DXF 线宽存储单位：1/100 mm，1.0mm = 100
+FRAME_LINEWEIGHT_DXF = int(FRAME_LINEWIDTH * 100)
+
+
+def arc_bbox(cx: float, cy: float, radius: float,
+             start_angle: float, end_angle: float) -> tuple[float, float, float, float]:
+    """
+    计算圆弧的精确包围盒。
+    取起止端点 + 四个象限点中落在弧上的点。
+    角度单位为度（DXF 标准）。
+    """
+    a1, a2 = start_angle, end_angle
+
+    # 归一化：让 a2 > a1（跨越 0° 时 +360）
+    if a1 > a2:
+        a2 += 360
+
+    pts = []
+
+    # 起止端点
+    rad1 = math.radians(a1)
+    rad2 = math.radians(a2)
+    pts.append((cx + radius * math.cos(rad1), cy + radius * math.sin(rad1)))
+    pts.append((cx + radius * math.cos(rad2), cy + radius * math.sin(rad2)))
+
+    # 四个象限角度 0, 90, 180, 270
+    for quad_angle in [0, 90, 180, 270]:
+        # 直接判断 + 跨越 0° 时的 +360 判断，稳妥处理 wrap-around
+        if (a1 <= quad_angle <= a2) or (a1 <= quad_angle + 360 <= a2):
+            rad = math.radians(quad_angle)
+            pts.append((cx + radius * math.cos(rad), cy + radius * math.sin(rad)))
+
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def circle_bbox(cx: float, cy: float, radius: float) -> tuple[float, float, float, float]:
+    """计算圆的包围盒"""
+    return cx - radius, cy - radius, cx + radius, cy + radius
+
 # ezdxf 是可选依赖，在首次使用时延迟导入
 _ezdxf_available = False
 _ezdxf_import_error: str | None = None
@@ -98,9 +141,11 @@ def _explode_polyline_2d(entity) -> list[dict]:
     对圆弧段（bulge）取中间点近似，使弧段由多段直线拟合。
     """
     segments: list[dict] = []
+    source_type = entity.dxftype()
     layer = entity.dxf.layer
     linetype = entity.dxf.linetype or ""
     color = entity.dxf.color
+    lineweight = _entity_lineweight(entity)
 
     try:
         # OCS → WCS 变换
@@ -139,6 +184,8 @@ def _explode_polyline_2d(entity) -> list[dict]:
                     "end": [round(p2[0], 4), round(p2[1], 4)],
                     "layer": layer, "linetype": linetype, "color": color,
                     "type": "line",
+                    "lineweight": lineweight,
+                        "source_type": source_type,
                 })
             else:
                 # 弧段 → 用多段直线近似
@@ -183,8 +230,37 @@ def _explode_polyline_2d(entity) -> list[dict]:
                         "end": [round(pt[0], 4), round(pt[1], 4)],
                         "layer": layer, "linetype": linetype, "color": color,
                         "type": "line",
+                        "lineweight": lineweight,
+                        "source_type": source_type,
                     })
                     prev_pt = pt
+
+        # 闭合多段线：首尾相连（最后一点→第一点）
+        if len(bulge_points) >= 3:
+            try:
+                is_closed = entity.closed
+            except Exception:
+                is_closed = False
+            if is_closed:
+                # 最后一点→第一点
+                x_last, y_last = bulge_points[-1][0], bulge_points[-1][1]
+                x_first, y_first = bulge_points[0][0], bulge_points[0][1]
+                if ocs:
+                    w_last = ocs.to_wcs((x_last, y_last, 0))
+                    w_first = ocs.to_wcs((x_first, y_first, 0))
+                    p_last = (w_last.x, w_last.y)
+                    p_first = (w_first.x, w_first.y)
+                else:
+                    p_last = (x_last, y_last)
+                    p_first = (x_first, y_first)
+                segments.append({
+                    "start": [round(p_last[0], 4), round(p_last[1], 4)],
+                    "end": [round(p_first[0], 4), round(p_first[1], 4)],
+                    "layer": layer, "linetype": linetype, "color": color,
+                    "type": "line",
+                    "lineweight": lineweight,
+                        "source_type": source_type,
+                })
         return segments
 
     # POLYLINE (3D) 或简单 LWPOLYLINE 无 bulge
@@ -203,7 +279,27 @@ def _explode_polyline_2d(entity) -> list[dict]:
                 "end": [round(p2[0], 4), round(p2[1], 4)],
                 "layer": layer, "linetype": linetype, "color": color,
                 "type": "line",
+                "lineweight": lineweight,
+                        "source_type": source_type,
             })
+
+        # 闭合多段线：首尾相连
+        if len(points) >= 3:
+            try:
+                is_closed = entity.closed
+            except Exception:
+                is_closed = False
+            if is_closed:
+                p_last = points[-1]
+                p_first = points[0]
+                segments.append({
+                    "start": [round(p_last[0], 4), round(p_last[1], 4)],
+                    "end": [round(p_first[0], 4), round(p_first[1], 4)],
+                    "layer": layer, "linetype": linetype, "color": color,
+                    "type": "line",
+                    "lineweight": lineweight,
+                        "source_type": source_type,
+                })
         return segments
 
     # 如果都失败，把 entity 作为单个整体保留（不考虑 bulge 的退化情况）
@@ -215,9 +311,11 @@ def _explode_mline(entity) -> list[dict]:
     如果 ezdxf 版本支持，使用 .get_line_segments() 获取各线段。
     """
     segments: list[dict] = []
+    source_type = entity.dxftype()
     layer = entity.dxf.layer
     linetype = entity.dxf.linetype or ""
     color = entity.dxf.color
+    lineweight = _entity_lineweight(entity)
 
     try:
         # ezdxf MLINE 提供 .lines 属性或可通过遍历获取
@@ -230,6 +328,8 @@ def _explode_mline(entity) -> list[dict]:
                         "end": [round(line.dxf.end[0], 4), round(line.dxf.end[1], 4)],
                         "layer": layer, "linetype": linetype, "color": color,
                         "type": "line",
+                        "lineweight": lineweight,
+                        "source_type": source_type,
                     })
                 else:
                     # line 可能是 (start, end) 元组
@@ -239,6 +339,8 @@ def _explode_mline(entity) -> list[dict]:
                         "end": [round(e[0], 4), round(e[1], 4)],
                         "layer": layer, "linetype": linetype, "color": color,
                         "type": "line",
+                        "lineweight": lineweight,
+                        "source_type": source_type,
                     })
     except Exception:
         pass
@@ -256,6 +358,23 @@ def _explode_mline(entity) -> list[dict]:
     return segments
 
 
+def _entity_lineweight(entity) -> int:
+    """获取实体的 DXF 线宽值（1/100 mm）。BYLAYER(-1) 时尝试从图层属性推断。"""
+    try:
+        lw = entity.dxf.lineweight
+        if lw is None or lw < 0:  # BYLAYER / BYBLOCK / DEFAULT
+            # 从图层获取
+            try:
+                lw = entity.doc.layers.get(entity.dxf.layer).dxf.lineweight
+            except Exception:
+                lw = -1
+        if lw is None or lw < 0:
+            return 0
+        return int(lw)
+    except Exception:
+        return 0
+
+
 def _extract_line(entity) -> list[dict]:
     """提取 LINE 实体"""
     layer = entity.dxf.layer
@@ -267,7 +386,9 @@ def _extract_line(entity) -> list[dict]:
         "layer": layer,
         "linetype": linetype,
         "color": color,
+        "lineweight": _entity_lineweight(entity),
         "type": "line",
+        "source_type": "LINE",
     }]
 
 
@@ -282,6 +403,7 @@ def _extract_circle(entity) -> list[dict]:
         "layer": layer,
         "linetype": linetype,
         "color": color,
+        "lineweight": _entity_lineweight(entity),
         "type": "circle",
     }]
 
@@ -299,6 +421,7 @@ def _extract_arc(entity) -> list[dict]:
         "layer": layer,
         "linetype": linetype,
         "color": color,
+        "lineweight": _entity_lineweight(entity),
         "type": "arc",
     }]
 
@@ -557,6 +680,32 @@ def _compute_bounds(all_entities: dict) -> dict:
         if "start" in cl:
             xs.extend([cl["start"][0], cl["end"][0]])
             ys.extend([cl["start"][1], cl["end"][1]])
+    for el in all_entities.get("ellipses", []):
+        cx, cy = el["center"]
+        ma = el["major_axis"]
+        major_len = math.hypot(ma[0], ma[1])
+        minor_len = major_len * el["ratio"]
+        r = max(major_len, minor_len)
+        xs.extend([cx - r, cx + r])
+        ys.extend([cy - r, cy + r])
+    for sp in all_entities.get("splines", []):
+        for cp in sp.get("control_points", []):
+            xs.append(cp[0])
+            ys.append(cp[1])
+    for pt in all_entities.get("points", []):
+        pos = pt.get("position")
+        if pos:
+            xs.append(pos[0]); ys.append(pos[1])
+    for ld in all_entities.get("leaders", []):
+        for v in ld.get("vertices", []):
+            xs.append(v[0]); ys.append(v[1])
+    for tol in all_entities.get("tolerances", []):
+        pos = tol.get("position")
+        if pos:
+            xs.append(pos[0]); ys.append(pos[1])
+    for sd in all_entities.get("solids", []):
+        for c in sd.get("corners", []):
+            xs.append(c[0]); ys.append(c[1])
 
     if not xs or not ys:
         return {"min_x": 0, "max_x": 1, "min_y": 0, "max_y": 1}
@@ -569,27 +718,301 @@ def _compute_bounds(all_entities: dict) -> dict:
     }
 
 
+# ── 图框检测与实体分类 ─────────────────────────────────────
+
+# ACI 颜色索引 → 视图名称映射
+FRAME_COLOR_MAP: dict[int, str] = {
+    1: "主视图",
+    2: "俯视图",
+    3: "左视图",
+    5: "其他视图1",
+    6: "其他视图2",
+}
+
+
+def _detect_frames(all_lines: list[dict]) -> tuple[list[dict], list[dict]]:
+    """
+    从 LINE 实体中检测图框。
+
+    检测条件：lineweight == FRAME_LINEWEIGHT_DXF (100) 且 color 在 FRAME_COLOR_MAP 中。
+    返回 (frames, non_frame_lines)，其中 frames 为检测到的图框列表：
+      [{name, color, bbox: {min_x, min_y, max_x, max_y}}]
+    non_frame_lines 为排除了图框线条后的剩余 LINE。
+    """
+    frame_lines: dict[int, list[dict]] = {c: [] for c in FRAME_COLOR_MAP}
+    normal_lines: list[dict] = []
+
+    for ln in all_lines:
+        lw = ln.get("lineweight", 0)
+        color = ln.get("color", 0)
+        if lw == FRAME_LINEWEIGHT_DXF and color in FRAME_COLOR_MAP:
+            frame_lines[color].append(ln)
+        else:
+            normal_lines.append(ln)
+
+    frames = []
+    for color, color_lines in frame_lines.items():
+        if len(color_lines) < 4:
+            # 不足 4 条线，不足以构成矩形图框 → 归为普通线
+            normal_lines.extend(color_lines)
+            continue
+
+        # 收集所有端点坐标，计算包围盒
+        xs, ys = [], []
+        for ln in color_lines:
+            xs.append(ln["start"][0])
+            xs.append(ln["end"][0])
+            ys.append(ln["start"][1])
+            ys.append(ln["end"][1])
+
+        frames.append({
+            "name": FRAME_COLOR_MAP[color],
+            "color": color,
+            "bbox": {
+                "min_x": round(min(xs), 4),
+                "min_y": round(min(ys), 4),
+                "max_x": round(max(xs), 4),
+                "max_y": round(max(ys), 4),
+            },
+        })
+
+    return frames, normal_lines
+
+
+def _point_in_bbox(px: float, py: float, bbox: dict) -> bool:
+    """判断点是否在图框包围盒内"""
+    return (bbox["min_x"] - 1e-6 <= px <= bbox["max_x"] + 1e-6
+            and bbox["min_y"] - 1e-6 <= py <= bbox["max_y"] + 1e-6)
+
+
+def _line_in_frame(line: dict, bbox: dict) -> bool:
+    """LINE 两端点都在框内 → 属于该图框"""
+    return (_point_in_bbox(line["start"][0], line["start"][1], bbox)
+            and _point_in_bbox(line["end"][0], line["end"][1], bbox))
+
+
+def _entity_bbox_in_frame(entity_bbox: tuple[float, float, float, float],
+                          frame_bbox: dict) -> bool:
+    """实体的包围盒完全在图框包围盒内"""
+    return (frame_bbox["min_x"] - 1e-6 <= entity_bbox[0]
+            and frame_bbox["min_y"] - 1e-6 <= entity_bbox[1]
+            and entity_bbox[2] <= frame_bbox["max_x"] + 1e-6
+            and entity_bbox[3] <= frame_bbox["max_y"] + 1e-6)
+
+
+def _dimension_in_frame(dim: dict, bbox: dict) -> bool:
+    """标注的任一 defpoint（几何定义点）在框内 → 属于该图框"""
+    defpoints = dim.get("defpoints", {})
+    for key in ("defpoint", "defpoint2", "defpoint3", "defpoint4"):
+        pt = defpoints.get(key)
+        if pt and _point_in_bbox(pt[0], pt[1], bbox):
+            return True
+    # 如果 defpoints 为空，回退到 text_position
+    tp = dim.get("text_position")
+    if tp:
+        return _point_in_bbox(tp[0], tp[1], bbox)
+    return False
+
+
+def _centerline_in_frame(cl: dict, bbox: dict) -> bool:
+    """中心线两端都在框内 → 属于该图框"""
+    if "start" in cl and "end" in cl:
+        return (_point_in_bbox(cl["start"][0], cl["start"][1], bbox)
+                and _point_in_bbox(cl["end"][0], cl["end"][1], bbox))
+    return False
+
+
+def _hatch_in_frame(hatch: dict, bbox: dict) -> bool:
+    """HATCH 的第一个边界点在框内 → 属于该图框"""
+    boundary = hatch.get("boundary", [])
+    if not boundary:
+        return False
+    first = boundary[0]
+    if first and len(first) > 0:
+        pt = first[0]
+        return _point_in_bbox(pt[0], pt[1], bbox)
+    return False
+
+
+def _text_in_frame(text: dict, bbox: dict) -> bool:
+    """TEXT 位置在框内 → 属于该图框"""
+    pos = text.get("position")
+    if pos:
+        return _point_in_bbox(pos[0], pos[1], bbox)
+    return False
+
+
+def _point_in_frame(pt: dict, bbox: dict) -> bool:
+    """POINT 位置在框内 → 属于"""
+    pos = pt.get("position")
+    if pos:
+        return _point_in_bbox(pos[0], pos[1], bbox)
+    return False
+
+
+def _leader_in_frame(ld: dict, bbox: dict) -> bool:
+    """LEADER 任一顶点在框内 → 属于"""
+    for v in ld.get("vertices", []):
+        if _point_in_bbox(v[0], v[1], bbox):
+            return True
+    return False
+
+
+def _tolerance_in_frame(tol: dict, bbox: dict) -> bool:
+    """TOLERANCE 位置点在框内 → 属于"""
+    pos = tol.get("position")
+    if pos:
+        return _point_in_bbox(pos[0], pos[1], bbox)
+    return False
+
+
+def _solid_in_frame(sd: dict, bbox: dict) -> bool:
+    """SOLID 任一顶点在框内 → 属于"""
+    for c in sd.get("corners", []):
+        if _point_in_bbox(c[0], c[1], bbox):
+            return True
+    return False
+
+
+def _ellipse_in_frame(el: dict, bbox: dict) -> bool:
+    """椭圆中心在框内 → 属于该图框"""
+    return _point_in_bbox(el["center"][0], el["center"][1], bbox)
+
+
+def _spline_in_frame(sp: dict, bbox: dict) -> bool:
+    """样条所有控制点在框内 → 属于该图框"""
+    for cp in sp.get("control_points", []):
+        if not _point_in_bbox(cp[0], cp[1], bbox):
+            return False
+    return True if sp.get("control_points") else False
+
+
+def _classify_entities_by_frames(
+    lines: list[dict],
+    circles: list[dict],
+    arcs: list[dict],
+    frames: list[dict],
+    ellipses: list[dict] | None = None,
+    splines: list[dict] | None = None,
+    points: list[dict] | None = None,
+    leaders: list[dict] | None = None,
+    tolerances: list[dict] | None = None,
+    solids: list[dict] | None = None,
+    hatches: list[dict] | None = None,
+    dimensions: list[dict] | None = None,
+    texts: list[dict] | None = None,
+    centerlines: list[dict] | None = None,
+) -> tuple[dict[str, dict], list[dict]]:
+    """
+    将实体按图框分类。
+
+    返回 (views, frame_list):
+      views: { "全视图数据集": {lines, circles, arcs, hatches, dimensions, texts, centerlines},
+                "主视图": {lines, circles, arcs, ...}, ... }
+      frame_list: 检测到的图框列表（无图框时为空）
+    """
+    hatches = hatches or []
+    dimensions = dimensions or []
+    texts = texts or []
+    centerlines = centerlines or []
+    ellipses = ellipses or []
+    splines = splines or []
+    points = points or []
+    leaders = leaders or []
+    tolerances = tolerances or []
+    solids = solids or []
+
+    # ── 1. 按图框归类 ──
+    view_data: dict[str, dict] = {}
+    for frame in frames:
+        name = frame["name"]
+        bbox = frame["bbox"]
+        view_data[name] = {
+            "lines": [ln for ln in lines if _line_in_frame(ln, bbox)],
+            "circles": [c for c in circles
+                        if _entity_bbox_in_frame(
+                            circle_bbox(c["center"][0], c["center"][1], c["radius"]),
+                            bbox)],
+            "arcs": [a for a in arcs
+                     if _entity_bbox_in_frame(
+                         arc_bbox(a["center"][0], a["center"][1],
+                                  a["radius"], a["start_angle"], a["end_angle"]),
+                         bbox)],
+            "ellipses": [el for el in ellipses if _ellipse_in_frame(el, bbox)],
+            "splines": [sp for sp in splines if _spline_in_frame(sp, bbox)],
+            "points": [pt for pt in points if _point_in_frame(pt, bbox)],
+            "leaders": [ld for ld in leaders if _leader_in_frame(ld, bbox)],
+            "tolerances": [tol for tol in tolerances if _tolerance_in_frame(tol, bbox)],
+            "solids": [sd for sd in solids if _solid_in_frame(sd, bbox)],
+            "hatches": [h for h in hatches if _hatch_in_frame(h, bbox)],
+            "dimensions": [d for d in dimensions if _dimension_in_frame(d, bbox)],
+            "texts": [t for t in texts if _text_in_frame(t, bbox)],
+            "centerlines": [cl for cl in centerlines if _centerline_in_frame(cl, bbox)],
+        }
+
+    # ── 2. 全视图数据集 = 所有非图框线实体 ──
+    view_data["全视图数据集"] = {
+        "lines": lines,
+        "circles": circles,
+        "arcs": arcs,
+        "ellipses": ellipses,
+        "splines": splines,
+        "points": points,
+        "leaders": leaders,
+        "tolerances": tolerances,
+        "solids": solids,
+        "hatches": hatches,
+        "dimensions": dimensions,
+        "texts": texts,
+        "centerlines": centerlines,
+    }
+
+    return view_data, frames
+
+
 # ── 核心提取函数 ──────────────────────────────────────────
 
 def _build_extraction_result(
     lines: list[dict],
     circles: list[dict],
     arcs: list[dict],
-    hatches: list[dict],
-    centerlines: list[dict],
-    dimensions: list[dict],
-    texts: list[dict],
-    layers: dict,
+    ellipses: list[dict] | None = None,
+    splines: list[dict] | None = None,
+    points: list[dict] | None = None,
+    leaders: list[dict] | None = None,
+    tolerances: list[dict] | None = None,
+    solids: list[dict] | None = None,
+    hatches: list[dict] | None = None,
+    centerlines: list[dict] | None = None,
+    dimensions: list[dict] | None = None,
+    texts: list[dict] | None = None,
+    layers: dict | None = None,
+    frames: list[dict] | None = None,
+    views: dict[str, dict] | None = None,
 ) -> dict:
     """组装最终提取结果"""
-    all_lines = list(lines)
-    all_circles = list(circles)
-    all_arcs = list(arcs)
+    ellipses = ellipses or []
+    splines = splines or []
+    points = points or []
+    leaders = leaders or []
+    tolerances = tolerances or []
+    solids = solids or []
+    hatches = hatches or []
+    centerlines = centerlines or []
+    dimensions = dimensions or []
+    texts = texts or []
+    layers = layers or {}
 
     entities = {
-        "lines": all_lines,
-        "circles": all_circles,
-        "arcs": all_arcs,
+        "lines": list(lines),
+        "circles": list(circles),
+        "arcs": list(arcs),
+        "ellipses": ellipses,
+        "splines": splines,
+        "points": points,
+        "leaders": leaders,
+        "tolerances": tolerances,
+        "solids": solids,
         "hatches": hatches,
         "centerlines": centerlines,
     }
@@ -600,9 +1023,15 @@ def _build_extraction_result(
         "texts": texts,
         "layers": layers,
         "entity_counts": {
-            "lines": len(all_lines),
-            "circles": len(all_circles),
-            "arcs": len(all_arcs),
+            "lines": len(lines),
+            "circles": len(circles),
+            "arcs": len(arcs),
+            "ellipses": len(ellipses),
+            "splines": len(splines),
+            "points": len(points),
+            "leaders": len(leaders),
+            "tolerances": len(tolerances),
+            "solids": len(solids),
             "hatches": len(hatches),
             "centerlines": len(centerlines),
             "dimensions": len(dimensions),
@@ -610,6 +1039,10 @@ def _build_extraction_result(
         },
         "bounds": _compute_bounds(entities),
     }
+    if frames:
+        result["frames"] = frames
+    if views:
+        result["views"] = views
     return result
 
 
@@ -638,6 +1071,12 @@ def extract_dxf(filepath: Path) -> dict:
     lines: list[dict] = []
     circles: list[dict] = []
     arcs: list[dict] = []
+    ellipses: list[dict] = []
+    splines: list[dict] = []
+    points: list[dict] = []
+    leaders: list[dict] = []
+    tolerances: list[dict] = []
+    solids: list[dict] = []
     hatches: list[dict] = []
     centerlines: list[dict] = []
     dimensions: list[dict] = []
@@ -714,34 +1153,93 @@ def extract_dxf(filepath: Path) -> dict:
                 hatches.append(hatch_data)
 
         elif dxftype == "ELLIPSE":
-            # 椭圆 → 提取为中心点和两轴半径（近似为 arcs 类别）
+            # 椭圆 → 保留参数，不炸为 LINE
             try:
-                center = entity.dxf.center
-                major = entity.dxf.major_axis
-                ratio = entity.dxf.ratio
-                # 分解为多段 LINE 近似
-                ellipse_segs = _explode_ellipse_to_lines(entity)
-                layer_name = entity.dxf.layer
-                ltype = entity.dxf.linetype or ""
-                if _is_centerline_layer(layer_name) or _is_centerline_linetype(ltype):
-                    centerlines.extend(ellipse_segs)
-                else:
-                    lines.extend(ellipse_segs)
+                ellipses.append({
+                    "center": [round(entity.dxf.center[0], 4), round(entity.dxf.center[1], 4)],
+                    "major_axis": [round(entity.dxf.major_axis[0], 4), round(entity.dxf.major_axis[1], 4)],
+                    "ratio": round(entity.dxf.ratio, 4),
+                    "start_param": round(entity.dxf.start_param, 4),
+                    "end_param": round(entity.dxf.end_param, 4),
+                    "layer": entity.dxf.layer,
+                    "linetype": entity.dxf.linetype or "",
+                    "color": entity.dxf.color,
+                    "lineweight": _entity_lineweight(entity),
+                    "type": "ellipse",
+                })
             except Exception as e:
                 logger.debug(f"提取椭圆失败: {e}")
 
         elif dxftype == "SPLINE":
-            # 样条曲线 → 采样为 LINE 段
+            # 样条曲线 → 保留控制点，不炸为 LINE
             try:
-                spline_segs = _explode_spline_to_lines(entity)
-                layer_name = entity.dxf.layer
-                ltype = entity.dxf.linetype or ""
-                if _is_centerline_layer(layer_name) or _is_centerline_linetype(ltype):
-                    centerlines.extend(spline_segs)
-                else:
-                    lines.extend(spline_segs)
+                cp = [[round(p[0],4), round(p[1],4)]
+                      for p in entity.control_points]
+                splines.append({
+                    "control_points": cp,
+                    "degree": int(entity.dxf.degree) if entity.dxf.hasattr("degree") else 3,
+                    "layer": entity.dxf.layer,
+                    "linetype": entity.dxf.linetype or "",
+                    "color": entity.dxf.color,
+                    "lineweight": _entity_lineweight(entity),
+                    "type": "spline",
+                })
             except Exception as e:
                 logger.debug(f"提取样条曲线失败: {e}")
+
+        elif dxftype == "POINT":
+            try:
+                loc = entity.dxf.location
+                points.append({
+                    "position": [round(loc[0], 4), round(loc[1], 4)],
+                    "layer": entity.dxf.layer,
+                    "color": entity.dxf.color,
+                    "lineweight": _entity_lineweight(entity),
+                    "type": "point",
+                })
+            except Exception as e:
+                logger.debug(f"提取点失败: {e}")
+
+        elif dxftype == "LEADER":
+            try:
+                verts = [[round(v[0],4), round(v[1],4)] for v in entity.vertices]
+                leaders.append({
+                    "vertices": verts,
+                    "layer": entity.dxf.layer,
+                    "color": entity.dxf.color,
+                    "type": "leader",
+                })
+            except Exception as e:
+                logger.debug(f"提取引线失败: {e}")
+
+        elif dxftype == "TOLERANCE":
+            try:
+                tolerances.append({
+                    "position": [round(entity.dxf.insert[0],4), round(entity.dxf.insert[1],4)],
+                    "content": str(entity.dxf.content or ""),
+                    "layer": entity.dxf.layer,
+                    "color": entity.dxf.color,
+                    "lineweight": _entity_lineweight(entity),
+                    "type": "tolerance",
+                })
+            except Exception as e:
+                logger.debug(f"提取形位公差失败: {e}")
+
+        elif dxftype == "SOLID":
+            try:
+                corners = []
+                for attr in ("vtx0", "vtx1", "vtx2", "vtx3"):
+                    v = getattr(entity.dxf, attr, None)
+                    if v is not None:
+                        corners.append([round(v[0],4), round(v[1],4)])
+                solids.append({
+                    "corners": corners,
+                    "layer": entity.dxf.layer,
+                    "color": entity.dxf.color,
+                    "type": "solid",
+                })
+            except Exception as e:
+                logger.debug(f"提取SOLID失败: {e}")
 
         elif dxftype == "INSERT":
             # 块参照 → 展开块内实体
@@ -763,19 +1261,56 @@ def extract_dxf(filepath: Path) -> dict:
             except Exception as e:
                 logger.debug(f"展开块参照失败: {e}")
 
+    # ── 图框检测与实体分类（不改变 lines/circles/arcs 原始列表） ──
+    frames_detected, non_frame_lines = _detect_frames(lines)
+    if frames_detected:
+        views_sorted, _ = _classify_entities_by_frames(
+            non_frame_lines, circles, arcs, frames_detected,
+            ellipses=ellipses, splines=splines,
+            points=points, leaders=leaders,
+            tolerances=tolerances, solids=solids,
+            hatches=hatches, dimensions=dimensions,
+            texts=texts, centerlines=centerlines)
+    else:
+        views_sorted = {"全视图数据集": {
+            "lines": lines, "circles": circles, "arcs": arcs,
+            "ellipses": ellipses, "splines": splines,
+            "points": points, "leaders": leaders,
+            "tolerances": tolerances, "solids": solids,
+            "hatches": hatches, "dimensions": dimensions,
+            "texts": texts, "centerlines": centerlines,
+        }}
+        frames_detected = []
+
     result = _build_extraction_result(
-        lines, circles, arcs, hatches, centerlines,
-        dimensions, texts, layers,
+        lines, circles, arcs,
+        ellipses=ellipses, splines=splines,
+        points=points, leaders=leaders,
+        tolerances=tolerances, solids=solids,
+        hatches=hatches, centerlines=centerlines,
+        dimensions=dimensions, texts=texts, layers=layers,
+        frames=frames_detected,
+        views=views_sorted,
     )
     logger.info(
-        f"DXF 解析完成: {result['entity_counts']['lines']} 线, "
-        f"{result['entity_counts']['circles']} 圆, "
-        f"{result['entity_counts']['arcs']} 弧, "
-        f"{result['entity_counts']['hatches']} 填充, "
-        f"{result['entity_counts']['centerlines']} 中心线, "
-        f"{result['entity_counts']['dimensions']} 标注, "
-        f"{result['entity_counts']['texts']} 文本"
+        f"DXF 解析完成: "
+        f"{result['entity_counts']['lines']}线 "
+        f"{result['entity_counts']['circles']}圆 "
+        f"{result['entity_counts']['arcs']}弧 "
+        f"{result['entity_counts']['ellipses']}椭圆 "
+        f"{result['entity_counts']['splines']}样条 "
+        f"{result['entity_counts']['points']}点 "
+        f"{result['entity_counts']['leaders']}引线 "
+        f"{result['entity_counts']['tolerances']}公差 "
+        f"{result['entity_counts']['solids']}填充面 "
+        f"{result['entity_counts']['hatches']}填充 "
+        f"{result['entity_counts']['centerlines']}中心线 "
+        f"{result['entity_counts']['dimensions']}标注 "
+        f"{result['entity_counts']['texts']}文本"
     )
+    if frames_detected:
+        logger.info(f"  检测到 {len(frames_detected)} 个图框: "
+                     f"{[f['name'] for f in frames_detected]}")
     return result
 
 
@@ -784,9 +1319,11 @@ def extract_dxf(filepath: Path) -> dict:
 def _explode_ellipse_to_lines(entity) -> list[dict]:
     """将椭圆分解为多段 LINE（64 段近似）"""
     import math as _math
+    source_type = entity.dxftype()
     layer = entity.dxf.layer
     linetype = entity.dxf.linetype or ""
     color = entity.dxf.color
+    lineweight = _entity_lineweight(entity)
     center = (entity.dxf.center[0], entity.dxf.center[1])
     major_vec = (entity.dxf.major_axis[0], entity.dxf.major_axis[1])
     ratio = entity.dxf.ratio
@@ -814,6 +1351,8 @@ def _explode_ellipse_to_lines(entity) -> list[dict]:
                 "end": [pt[0], pt[1]],
                 "layer": layer, "linetype": linetype, "color": color,
                 "type": "line",
+                "lineweight": lineweight,
+                        "source_type": source_type,
             })
         prev_pt = pt
     return segments
@@ -821,9 +1360,11 @@ def _explode_ellipse_to_lines(entity) -> list[dict]:
 
 def _explode_spline_to_lines(entity) -> list[dict]:
     """将样条曲线通过采样展开为多段 LINE（128 点均匀采样）"""
+    source_type = entity.dxftype()
     layer = entity.dxf.layer
     linetype = entity.dxf.linetype or ""
     color = entity.dxf.color
+    lineweight = _entity_lineweight(entity)
 
     try:
         spline = entity.spline()
@@ -846,6 +1387,8 @@ def _explode_spline_to_lines(entity) -> list[dict]:
                 "end": [pt_rounded[0], pt_rounded[1]],
                 "layer": layer, "linetype": linetype, "color": color,
                 "type": "line",
+                "lineweight": lineweight,
+                        "source_type": source_type,
             })
         prev_pt = pt_rounded
     return segments
@@ -1039,11 +1582,96 @@ def render_dxf_preview(
     return output_path
 
 
+# ── DXF 预处理：MLINE / POLYLINE / LWPOLYLINE → LINE ─────
+
+def preprocess_dxf(input_path: Path, output_path: Path) -> None:
+    """
+    预处理 DXF 文件：仅将 MLINE / POLYLINE / LWPOLYLINE 爆炸为 LINE 实体，
+    其他实体原样保留。爆炸后的 LINE 继承原实体的图层、颜色、线型、线宽，
+    并附加 XDATA source_type 标识来源。
+
+    输出文件与原 DXF 同目录，文件名为 {原文件名_stem}_processed.dxf
+    """
+    import ezdxf
+    _check_ezdxf()
+
+    doc = ezdxf.readfile(str(input_path))
+    msp = doc.modelspace()
+
+    # 注册 XDATA 的 appid
+    APPID = "DXF_PREP"
+    if APPID not in doc.appids:
+        doc.appids.new(APPID)
+
+    # 收集需要替换的实体（先收集后修改，避免迭代中修改）
+    to_replace: list[tuple[object, str, list[dict]]] = []  # (entity, dxftype, segments)
+
+    for entity in msp:
+        dxftype = entity.dxftype()
+        if dxftype not in ("LWPOLYLINE", "POLYLINE", "MLINE"):
+            continue
+        try:
+            if dxftype == "MLINE":
+                segs = _explode_mline(entity)
+            else:
+                segs = _explode_polyline_2d(entity)
+        except Exception as e:
+            logger.debug(f"爆炸 {dxftype} 失败: {e}")
+            continue
+        if segs:
+            to_replace.append((entity, dxftype, segs))
+
+    # 替换
+    for entity, dxftype, segs in to_replace:
+        try:
+            msp.delete_entity(entity)
+        except Exception:
+            pass
+        for seg in segs:
+            new_line = msp.add_line(
+                start=(seg["start"][0], seg["start"][1]),
+                end=(seg["end"][0], seg["end"][1]),
+            )
+            new_line.dxf.layer = seg.get("layer", "0")
+            new_line.dxf.color = seg.get("color", 256)
+            ltype = seg.get("linetype", "")
+            if ltype and ltype.upper() != "BYLAYER":
+                try:
+                    new_line.dxf.linetype = ltype
+                except Exception:
+                    pass
+            lw = seg.get("lineweight", 0)
+            if lw > 0:
+                try:
+                    new_line.dxf.lineweight = lw
+                except Exception:
+                    pass
+            # 附加 XDATA：记录来源类型
+            try:
+                source = seg.get("source_type", dxftype)
+                new_line.add_xdata(APPID, [
+                    (1001, APPID),
+                    (1000, f"source_type={source}"),
+                ])
+            except Exception:
+                pass
+
+    doc.saveas(str(output_path))
+    logger.info(f"预处理 DXF 已保存: {output_path}  "
+                 f"(替换 {len(to_replace)} 个实体: "
+                 f"{', '.join(f'{t[1]}' for t in to_replace)})")
+
+
 # ── 统一 DXF 分析（教师参考图 + 学生作业共用）───────────────
 
 def process_dxf(filepath: Path, output_dir: Path | None = None) -> dict:
     """
     解析 DXF 并渲染预览图。教师参考图和学生作业统一入口。
+
+    流程：
+      1. 预处理：MLINE / POLYLINE / LWPOLYLINE → LINE（保存为 *_processed.dxf）
+      2. 从预处理后的 DXF 提取结构化数据
+      3. 渲染预览图（含尺寸 + 无尺寸）
 
     Args:
         filepath: DXF 文件路径
@@ -1052,11 +1680,29 @@ def process_dxf(filepath: Path, output_dir: Path | None = None) -> dict:
     Returns:
         extract_dxf 的结构化数据 dict
     """
-    data = extract_dxf(filepath)
     out_dir = output_dir or filepath.parent
     stem = filepath.stem
-    render_dxf_preview(filepath, out_dir / f"{stem}.png")
-    render_dxf_preview(filepath, out_dir / f"{stem}_无尺寸.png", skip_dimensions=True)
+
+    # 1. 预处理 → 保存 _processed.dxf
+    processed_path = out_dir / f"{stem}_processed.dxf"
+    if not processed_path.exists():
+        try:
+            preprocess_dxf(filepath, processed_path)
+        except Exception as e:
+            logger.warning(f"DXF 预处理失败，使用原始文件: {e}")
+            processed_path = filepath
+    else:
+        # 已存在则直接使用
+        pass
+
+    # 2. 从预处理后的 DXF 提取结构化数据
+    data = extract_dxf(processed_path)
+
+    # 3. 渲染预览图（含尺寸 + 无尺寸）
+    render_dxf_preview(processed_path, out_dir / f"{stem}.png")
+    render_dxf_preview(processed_path, out_dir / f"{stem}_无尺寸.png", skip_dimensions=True)
+
+    logger.info(f"DXF 处理完成: {filepath.name} → 预处理 {processed_path.name}")
     return data
 
 
