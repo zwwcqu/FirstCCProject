@@ -1282,6 +1282,26 @@ def extract_dxf(filepath: Path) -> dict:
         }}
         frames_detected = []
 
+    # ── 解析 BYLAYER 属性（提前确定颜色/线型/线宽） ──────────
+    def _resolve_bylayer(ents, layer_map):
+        for e in ents:
+            lname = e.get("layer", "0")
+            li = layer_map.get(lname, {})
+            # 颜色：256=BYLAYER, 0=BYBLOCK
+            if e.get("color") in (0, 256):
+                e["color"] = li.get("color", 7)
+            # 线型
+            lt = e.get("linetype", "")
+            if not lt or lt.upper() in ("", "BYLAYER"):
+                e["linetype"] = li.get("linetype", "Continuous")
+            # 线宽：-1=BYLAYER, -2=BYBLOCK（图层存的是 mm 值，转回 1/100 mm）
+            if e.get("lineweight", 0) in (-1, -2):
+                lw_mm = li.get("lineweight", 0)
+                e["lineweight"] = int(lw_mm * 100) if lw_mm > 0 else -3
+    for _lst in (lines, circles, arcs, ellipses, splines,
+                 points, leaders, tolerances, solids, centerlines):
+        _resolve_bylayer(_lst, layers)
+
     result = _build_extraction_result(
         lines, circles, arcs,
         ellipses=ellipses, splines=splines,
@@ -1474,6 +1494,128 @@ def _explode_insert(entity, doc) -> list[dict]:
     return [x for x in result if isinstance(x, dict) and x.get("type") in ("line", "circle", "arc")]
 
 
+# ── 图框过滤渲染辅助 ─────────────────────────────────────
+
+
+def _entity_in_any_bbox(entity, bboxes: list[dict]) -> bool:
+    """判断 ezdxf 实体是否位于任一图框包围盒内。
+    图框线（线宽 1.0mm + 颜色在 FRAME_COLOR_MAP 中）被排除，只显示框内内容。
+    """
+    _TOL_LOCAL = 1e-6
+    try:
+        dxftype = entity.dxftype()
+
+        # 排除图框线本身（框线不显示）
+        if dxftype == "LINE":
+            try:
+                lw = entity.dxf.lineweight
+                color = entity.dxf.color
+                if lw == FRAME_LINEWEIGHT_DXF and color in FRAME_COLOR_MAP:
+                    return False
+            except Exception:
+                pass
+
+        # 收集实体坐标点
+        pts: list[tuple[float, float]] = []
+
+        if dxftype == "LINE":
+            pts.append((entity.dxf.start[0], entity.dxf.start[1]))
+            pts.append((entity.dxf.end[0], entity.dxf.end[1]))
+        elif dxftype == "CIRCLE":
+            pts.append((entity.dxf.center[0], entity.dxf.center[1]))
+        elif dxftype == "ARC":
+            pts.append((entity.dxf.center[0], entity.dxf.center[1]))
+        elif dxftype == "DIMENSION":
+            # 标注：任一 defpoint 在框内即保留
+            for attr in ("defpoint", "defpoint2", "defpoint3", "defpoint4"):
+                try:
+                    pt = getattr(entity.dxf, attr)
+                    if pt is not None:
+                        pts.append((pt[0], pt[1]))
+                except Exception:
+                    pass
+            # 回退到文字中点
+            if not pts:
+                try:
+                    tp = entity.dxf.text_midpoint
+                    if tp is not None:
+                        pts.append((tp[0], tp[1]))
+                except Exception:
+                    pass
+        elif dxftype in ("TEXT", "MTEXT"):
+            pts.append((entity.dxf.insert[0], entity.dxf.insert[1]))
+        elif dxftype in ("LWPOLYLINE", "POLYLINE"):
+            try:
+                for point in list(entity.get_points("xy")):
+                    pts.append((point[0], point[1]))
+            except Exception:
+                pass
+        elif dxftype == "ELLIPSE":
+            pts.append((entity.dxf.center[0], entity.dxf.center[1]))
+        elif dxftype == "SPLINE":
+            try:
+                for cp in entity.control_points:
+                    pts.append((cp[0], cp[1]))
+            except Exception:
+                pass
+        elif dxftype == "POINT":
+            pts.append((entity.dxf.location[0], entity.dxf.location[1]))
+        elif dxftype == "INSERT":
+            pts.append((entity.dxf.insert[0], entity.dxf.insert[1]))
+        elif dxftype == "HATCH":
+            # 填充图案路径复杂，放宽检查
+            try:
+                has_any = False
+                for path in entity.paths:
+                    if hasattr(path, 'vertices') and path.vertices:
+                        for v in path.vertices:
+                            pts.append((v[0], v[1]))
+                            has_any = True
+                        break
+                if not has_any:
+                    return True  # 无顶点信息 → 保留
+            except Exception:
+                return True
+        elif dxftype == "SOLID":
+            for attr in ("vtx0", "vtx1", "vtx2", "vtx3"):
+                try:
+                    v = getattr(entity.dxf, attr)
+                    if v is not None:
+                        pts.append((v[0], v[1]))
+                except Exception:
+                    pass
+        elif dxftype == "LEADER":
+            try:
+                for v in entity.vertices:
+                    pts.append((v[0], v[1]))
+            except Exception:
+                pass
+        elif dxftype == "TOLERANCE":
+            try:
+                pts.append((entity.dxf.insert[0], entity.dxf.insert[1]))
+            except Exception:
+                pass
+        else:
+            # 未知类型 → 保留
+            return True
+
+        if not pts:
+            return True  # 无坐标点 → 保留
+
+        # 检查所有点是否都在任一个图框内（取任一即可）
+        for px, py in pts:
+            for bbox in bboxes:
+                if (bbox["min_x"] - _TOL_LOCAL <= px <= bbox["max_x"] + _TOL_LOCAL
+                        and bbox["min_y"] - _TOL_LOCAL <= py <= bbox["max_y"] + _TOL_LOCAL):
+                    return True
+
+        return False
+
+    except Exception:
+        # 异常时保留实体（安全兜底）
+        return True
+
+
 # ── DXF 预览渲染 ──────────────────────────────────────────
 
 def render_dxf_preview(
@@ -1481,6 +1623,7 @@ def render_dxf_preview(
     output_path: Path,
     *,
     skip_dimensions: bool = False,
+    frame_bboxes: list[dict] | None = None,
 ) -> Path:
     """
     将 DXF 渲染为 PNG 预览图。
@@ -1492,6 +1635,8 @@ def render_dxf_preview(
         filepath: DXF 文件路径
         output_path: 输出 PNG 路径
         skip_dimensions: True 跳过标注实体（生成无尺寸版本）
+        frame_bboxes: 可选，只渲染指定图框包围盒内的实体。
+                      格式: [{"min_x":..., "min_y":..., "max_x":..., "max_y":...}]
     """
     _check_ezdxf()
     params = _get_dxf_params()
@@ -1536,26 +1681,46 @@ def render_dxf_preview(
     from ezdxf.addons.drawing import RenderContext, Frontend
     from ezdxf.addons.drawing.matplotlib import MatplotlibBackend
 
-    try:
-        bounds = extents(msp, cache=Cache())
-        has_data = bounds.has_data
-    except Exception:
-        has_data = False
-
-    if not has_data:
-        px_w, px_h = 768, 576
-        xmin, xmax, ymin, ymax = 0, 100, 0, 100
-    else:
-        w_mm = bounds.size.x   # 图纸宽度 mm
-        h_mm = bounds.size.y   # 图纸高度 mm
-        if w_mm >= h_mm:
-            px_w = max_size
-            px_h = max(1, int(max_size * h_mm / w_mm))
+    # 如有图框过滤，以图框包围盒作为绘图区域
+    if frame_bboxes:
+        xs = [p for b in frame_bboxes for p in (b["min_x"], b["max_x"])]
+        ys = [p for b in frame_bboxes for p in (b["min_y"], b["max_y"])]
+        xmin, xmax = min(xs), max(xs)
+        ymin, ymax = min(ys), max(ys)
+        w_mm = xmax - xmin
+        h_mm = ymax - ymin
+        has_data = w_mm > 0 and h_mm > 0
+        if has_data:
+            if w_mm >= h_mm:
+                px_w = max_size
+                px_h = max(1, int(max_size * h_mm / w_mm))
+            else:
+                px_h = max_size
+                px_w = max(1, int(max_size * w_mm / h_mm))
         else:
-            px_h = max_size
-            px_w = max(1, int(max_size * w_mm / h_mm))
-        xmin, xmax = bounds.extmin.x, bounds.extmax.x
-        ymin, ymax = bounds.extmin.y, bounds.extmax.y
+            px_w, px_h = 768, 576
+            xmin, xmax, ymin, ymax = 0, 100, 0, 100
+    else:
+        try:
+            bounds = extents(msp, cache=Cache())
+            has_data = bounds.has_data
+        except Exception:
+            has_data = False
+
+        if not has_data:
+            px_w, px_h = 768, 576
+            xmin, xmax, ymin, ymax = 0, 100, 0, 100
+        else:
+            w_mm = bounds.size.x   # 图纸宽度 mm
+            h_mm = bounds.size.y   # 图纸高度 mm
+            if w_mm >= h_mm:
+                px_w = max_size
+                px_h = max(1, int(max_size * h_mm / w_mm))
+            else:
+                px_h = max_size
+                px_w = max(1, int(max_size * w_mm / h_mm))
+            xmin, xmax = bounds.extmin.x, bounds.extmax.x
+            ymin, ymax = bounds.extmin.y, bounds.extmax.y
 
     # ── 创建画布（100 DPI 内部基准，仅供 matplot​lib 使用）───
     fig = plt.figure(figsize=(px_w / 100, px_h / 100), dpi=100, facecolor=bg)
@@ -1571,7 +1736,18 @@ def render_dxf_preview(
     backend = MatplotlibBackend(ax, adjust_figure=False)
     frontend = Frontend(ctx, backend)
 
-    if skip_dimensions:
+    if frame_bboxes:
+        # 图框过滤 + 可选的跳过标注
+        if skip_dimensions:
+            frontend.draw_layout(msp, finalize=True,
+                                 filter_func=lambda e: (
+                                     _entity_in_any_bbox(e, frame_bboxes)
+                                     and e.dxftype() != "DIMENSION"
+                                 ))
+        else:
+            frontend.draw_layout(msp, finalize=True,
+                                 filter_func=lambda e: _entity_in_any_bbox(e, frame_bboxes))
+    elif skip_dimensions:
         frontend.draw_layout(msp, finalize=True,
                              filter_func=lambda e: e.dxftype() != "DIMENSION")
     else:
@@ -1580,6 +1756,64 @@ def render_dxf_preview(
     fig.savefig(str(output_path), dpi=100, facecolor=bg, edgecolor='none')
     plt.close(fig)
     return output_path
+
+
+# ── 按图框过滤提取数据 ────────────────────────────────────
+
+_VIEW_ENTITY_KEYS = [
+    "lines", "circles", "arcs", "ellipses", "splines",
+    "points", "leaders", "tolerances", "solids",
+    "hatches", "dimensions", "texts", "centerlines",
+]
+
+
+def filter_data_by_frames(data: dict, required_frames: list[str]) -> dict:
+    """
+    从 DXF 提取数据中只保留指定视图的图元和标注。
+
+    Args:
+        data: extract_dxf() 的完整返回结果（含 views 字段）
+        required_frames: 需要保留的视图名称列表，如 ["主视图", "俯视图"]
+
+    Returns:
+        过滤后的数据 dict（只含指定视图的图元，entity_counts 和 bounds 已重算）
+    """
+    if not required_frames:
+        return data
+
+    views = data.get("views", {})
+    if not views:
+        return data  # 无视图分类数据，返回原样
+
+    # 合并指定视图的图元
+    merged: dict[str, list] = {k: [] for k in _VIEW_ENTITY_KEYS}
+    for view_name in required_frames:
+        vd = views.get(view_name)
+        if vd is None:
+            continue
+        for key in _VIEW_ENTITY_KEYS:
+            merged[key].extend(vd.get(key, []))
+
+    if not any(merged.values()):
+        return data  # 视图内有数据，返回原样
+
+    # 组装结果
+    result = dict(data)
+    result["entities"] = {
+        k: merged[k]
+        for k in ("lines", "circles", "arcs", "ellipses", "splines",
+                   "points", "leaders", "tolerances", "solids",
+                   "hatches", "centerlines")
+    }
+    result["dimensions"] = merged["dimensions"]
+    result["texts"] = merged["texts"]
+    result["entity_counts"] = {
+        k: len(merged.get(k, [])) for k in _VIEW_ENTITY_KEYS
+    }
+    result["bounds"] = _compute_bounds(result["entities"])
+    # 标记已过滤
+    result["_filtered_by_frames"] = list(required_frames)
+    return result
 
 
 # ── DXF 预处理：MLINE / POLYLINE / LWPOLYLINE → LINE ─────
@@ -2072,6 +2306,667 @@ def clean_overlapping_entities(
     return out_lines, out_circles, out_arcs
 
 
+def ensure_overlap_ratios(data: dict) -> dict:
+    """确保分析数据中包含视图重叠率（兼容旧数据，缺失时自动补算）"""
+    if data.get("view_overlap_ratios") or not data.get("views") or not data.get("layers"):
+        return data
+    view_overlap: dict = {}
+    layers_info = data["layers"]
+    for vname, vdata in data["views"].items():
+        ratio = compute_view_overlap_ratios(
+            vdata.get("lines", []), vdata.get("circles", []),
+            vdata.get("arcs", []), layers_info)
+        view_overlap[vname] = ratio
+    if view_overlap:
+        data["view_overlap_ratios"] = view_overlap
+    return data
+
+
+# ── 视图重叠率计算 ────────────────────────────────────────
+
+def _entity_length(entity: dict) -> float:
+    """计算单个图元的总长度。LINE→线段长，CIRCLE→周长，ARC→弧长"""
+    t = entity.get("type", "")
+    if t == "line":
+        dx = entity["end"][0] - entity["start"][0]
+        dy = entity["end"][1] - entity["start"][1]
+        return math.hypot(dx, dy)
+    elif t == "circle":
+        return 2 * math.pi * entity["radius"]
+    elif t == "arc":
+        s = entity["start_angle"]
+        e = entity["end_angle"]
+        if s > e:
+            e += 360
+        span = abs(e - s)
+        return 2 * math.pi * entity["radius"] * (span / 360.0)
+    return 0.0
+
+
+def compute_view_overlap_ratios(
+    lines: list[dict],
+    circles: list[dict],
+    arcs: list[dict],
+    layers: dict,
+) -> dict:
+    """
+    计算视图的重叠率：按线型（实线/虚线/中心线）分别计算原始总长度和 clean 后总长度。
+
+    流程：
+      1. 按线型分类统计原始总长度
+      2. 调 clean_overlapping_entities() 合并重叠
+      3. 对清理后的图元再次按线型分类统计总长度
+      4. 返回每类的 清理后/清理前 比率
+
+    Returns:
+        {
+            "solid": {"raw_len": 100.0, "clean_len": 95.0, "ratio": 0.95},
+            "dashed": {"raw_len": 20.0, "clean_len": 18.0, "ratio": 0.90},
+            "centerline": {"raw_len": 10.0, "clean_len": 10.0, "ratio": 1.0},
+            "total": {"raw_len": 130.0, "clean_len": 123.0, "ratio": 0.946},
+        }
+    """
+    def _classify_and_sum(ents_lines, ents_circles, ents_arcs):
+        """按线型分类并统计总长度"""
+        result: dict[str, float] = {"solid": 0.0, "dashed": 0.0, "centerline": 0.0}
+        for ent in ents_lines:
+            lt = _resolve_entity_linetype(ent, layers)
+            cat = _linetype_category(lt)
+            result[cat] = result.get(cat, 0.0) + _entity_length(ent)
+        for ent in ents_circles:
+            lt = _resolve_entity_linetype(ent, layers)
+            cat = _linetype_category(lt)
+            result[cat] = result.get(cat, 0.0) + _entity_length(ent)
+        for ent in ents_arcs:
+            lt = _resolve_entity_linetype(ent, layers)
+            cat = _linetype_category(lt)
+            result[cat] = result.get(cat, 0.0) + _entity_length(ent)
+        return result
+
+    # 1. 原始总长度（按线型）
+    raw = _classify_and_sum(lines, circles, arcs)
+
+    # 2. clean 后
+    clean_lines, clean_circles, clean_arcs = clean_overlapping_entities(
+        lines, circles, arcs, layers)
+    cleaned = _classify_and_sum(clean_lines, clean_circles, clean_arcs)
+
+    # 3. 组装结果
+    result = {}
+    total_raw = 0.0
+    total_clean = 0.0
+    for cat in ("solid", "dashed", "centerline"):
+        r = raw.get(cat, 0.0)
+        c = cleaned.get(cat, 0.0)
+        total_raw += r
+        total_clean += c
+        if c > 0:
+            overlap = (r - c) / c
+        elif r == 0:
+            overlap = 0.0  # 无图元 → 无重叠
+        else:
+            overlap = -1.0  # raw>0 but clean=0 → 全部是重叠
+        result[cat] = {
+            "raw_len": r,
+            "clean_len": c,
+            "overlap_ratio": overlap,
+        }
+    if total_clean > 0:
+        total_overlap = (total_raw - total_clean) / total_clean
+    elif total_raw == 0:
+        total_overlap = 0.0
+    else:
+        total_overlap = -1.0
+    result["total"] = {
+        "raw_len": total_raw,
+        "clean_len": total_clean,
+        "overlap_ratio": total_overlap,
+    }
+    return result
+
+
+# ── 视图重合度计算（参考图 vs 学生图）────────────────────
+
+_COIN_TOL = 0.001  # 重合度容差
+
+def _get_bottom_left_point(lines, circles, arcs, layers_info=None):
+    """
+    从实线(LINE)端点取最左最下的点（min X, 同 X 时 min Y）。
+    只考虑实线（solid），排除虚线、中心线。
+    无实线时降级到实线 CIRCLE/ARC 圆心。
+    """
+    def _is_solid(entity):
+        if layers_info:
+            lt = _resolve_entity_linetype(entity, layers_info)
+            return _linetype_category(lt) == "solid"
+        return True
+
+    pts = []
+    for ln in lines:
+        if _is_solid(ln):
+            pts.append((ln["start"][0], ln["start"][1]))
+            pts.append((ln["end"][0], ln["end"][1]))
+    if not pts:
+        for c in circles:
+            if _is_solid(c):
+                pts.append((c["center"][0], c["center"][1]))
+        if not pts:
+            for a in arcs:
+                if _is_solid(a):
+                    pts.append((a["center"][0], a["center"][1]))
+    if not pts:
+        return None
+    # 最左最下：min X, 同 X 时 min Y
+    return min(pts, key=lambda p: (p[0], p[1]))
+    return min(pts, key=lambda p: (p[1], p[0]))
+
+
+def _translate_entities(lines, circles, arcs, dx, dy):
+    """平移所有图元"""
+    new_lines = []
+    for ln in lines:
+        nl = dict(ln)
+        nl["start"] = [ln["start"][0] + dx, ln["start"][1] + dy]
+        nl["end"] = [ln["end"][0] + dx, ln["end"][1] + dy]
+        new_lines.append(nl)
+    new_circles = []
+    for c in circles:
+        nc = dict(c)
+        nc["center"] = [c["center"][0] + dx, c["center"][1] + dy]
+        new_circles.append(nc)
+    new_arcs = []
+    for a in arcs:
+        na = dict(a)
+        na["center"] = [a["center"][0] + dx, a["center"][1] + dy]
+        new_arcs.append(na)
+    return new_lines, new_circles, new_arcs
+
+
+def _line_intersection_segment(la, lb):
+    """返回两条共线线段的重叠段，无重叠返回 None"""
+    if not _collinear(la, lb):
+        return None
+    rs, re = la["start"], la["end"]
+    t_a1 = _project_t(la["start"], rs, re)
+    t_a2 = _project_t(la["end"], rs, re)
+    t_b1 = _project_t(lb["start"], rs, re)
+    t_b2 = _project_t(lb["end"], rs, re)
+    a_lo, a_hi = min(t_a1, t_a2), max(t_a1, t_a2)
+    b_lo, b_hi = min(t_b1, t_b2), max(t_b1, t_b2)
+    ov = _overlap_interval(a_lo, a_hi, b_lo, b_hi)
+    if ov is None:
+        return None
+    lo, hi = ov
+    dx = re[0] - rs[0]
+    dy = re[1] - rs[1]
+    if dx * dx + dy * dy < _COIN_TOL:
+        return None
+    p1 = [rs[0] + lo * dx, rs[1] + lo * dy]
+    p2 = [rs[0] + hi * dx, rs[1] + hi * dy]
+    return {"start": p1, "end": p2, "type": "line"}
+
+
+def _circle_intersection(ref_circles, stu_circles):
+    """计算圆的交集：匹配的圆视为完全交集"""
+    matched = []
+    used = [False] * len(stu_circles)
+    for rc in ref_circles:
+        for i, sc in enumerate(stu_circles):
+            if used[i]:
+                continue
+            if (abs(rc["center"][0] - sc["center"][0]) < _COIN_TOL
+                    and abs(rc["center"][1] - sc["center"][1]) < _COIN_TOL
+                    and abs(rc["radius"] - sc["radius"]) < _COIN_TOL):
+                matched.append(rc)
+                used[i] = True
+                break
+    return matched, sum(_entity_length(c) for c in matched)
+
+
+def _arc_intersection_segment(a_ref, a_stu, tol=None):
+    """返回两个同圆心同半径圆弧的重叠弧段"""
+    from math import fmod
+    tol = tol or _COIN_TOL
+    if (abs(a_ref["center"][0] - a_stu["center"][0]) >= tol
+            or abs(a_ref["center"][1] - a_stu["center"][1]) >= tol
+            or abs(a_ref["radius"] - a_stu["radius"]) >= tol):
+        return None
+    def _norm(s, e):
+        if s > e:
+            e += 360
+        return s, e
+    rs, re = _norm(a_ref["start_angle"], a_ref["end_angle"])
+    ss, se = _norm(a_stu["start_angle"], a_stu["end_angle"])
+    ov = _overlap_interval(rs, re, ss, se)
+    if ov is None:
+        return None
+    lo, hi = ov
+    if hi - lo < _COIN_TOL:
+        return None
+    result = dict(a_ref)
+    result["start_angle"] = lo
+    result["end_angle"] = hi
+    return result
+
+
+def compute_view_coincidence(ref_view, stu_view, ref_layers, stu_layers):
+    """
+    计算参考图视图与学生图视图的重合度。
+
+    1. clean 预处理
+    2. 取 LINE 最下最左端点对齐
+    3. 平移学生图元
+    4. 按线型（实线/虚线/中心线）分别计算交集
+
+    Returns:
+        {
+            "solid": {"ref_len": 100, "intersection": 90, "coincidence": 0.9, "extra": 5, "extra_ratio": 0.05},
+            "dashed": {...},
+            "centerline": {...},
+            "total": {...},
+            "ref_point": [x, y], "stu_point": [x, y], "align_offset": {"dx": x, "dy": y}
+        }
+    """
+    ref_layers = ref_layers or {}
+    stu_layers = stu_layers or {}
+
+    # 0. 合并中心线到 lines（强制中心线 linetype=CENTER 确保正确分类）
+    def _merge_centerlines(base_lines, centerlines_list):
+        result = list(base_lines)
+        for cl in centerlines_list:
+            cl = dict(cl)
+            cl["linetype"] = "CENTER"  # 强制中心线线型
+            result.append(cl)
+        return result
+
+    ref_all_lines = _merge_centerlines(
+        ref_view.get("lines", []), ref_view.get("centerlines", []))
+    stu_all_lines = _merge_centerlines(
+        stu_view.get("lines", []), stu_view.get("centerlines", []))
+
+    # 1. clean
+    rl, rc, ra = clean_overlapping_entities(
+        ref_all_lines, ref_view.get("circles", []),
+        ref_view.get("arcs", []), ref_layers)
+    sl, sc_, sa = clean_overlapping_entities(
+        stu_all_lines, stu_view.get("circles", []),
+        stu_view.get("arcs", []), stu_layers)
+
+    # 2. 参考点（只从实线取）
+    ref_pt = _get_bottom_left_point(rl, rc, ra, ref_layers)
+    stu_pt = _get_bottom_left_point(sl, sc_, sa, stu_layers)
+    if ref_pt is None or stu_pt is None:
+        return {"error": "无法计算参考点（无图元）"}
+
+    dx = ref_pt[0] - stu_pt[0]
+    dy = ref_pt[1] - stu_pt[1]
+
+    # 3. 平移学生
+    sl_t, sc_t, sa_t = _translate_entities(sl, sc_, sa, dx, dy)
+
+    # 4. 按线型分类
+    def _split(lines, circles, arcs, layer_info):
+        cats = {"solid": {"l": [], "c": [], "a": []},
+                "dashed": {"l": [], "c": [], "a": []},
+                "centerline": {"l": [], "c": [], "a": []}}
+        for ent in lines:
+            lt = _resolve_entity_linetype(ent, layer_info)
+            c = _linetype_category(lt)
+            if c not in cats:
+                cats[c] = {"l": [], "c": [], "a": []}
+            cats[c]["l"].append(ent)
+        for ent in circles:
+            lt = _resolve_entity_linetype(ent, layer_info)
+            c = _linetype_category(lt)
+            if c not in cats:
+                cats[c] = {"l": [], "c": [], "a": []}
+            cats[c]["c"].append(ent)
+        for ent in arcs:
+            lt = _resolve_entity_linetype(ent, layer_info)
+            c = _linetype_category(lt)
+            if c not in cats:
+                cats[c] = {"l": [], "c": [], "a": []}
+            cats[c]["a"].append(ent)
+        return cats
+
+    ref_cat = _split(rl, rc, ra, ref_layers)
+    stu_cat = _split(sl_t, sc_t, sa_t, stu_layers)
+
+    # 5. 逐类计算
+    result = {}
+    total_ref = total_inter = total_extra = 0.0
+
+    for cat in ("solid", "dashed", "centerline"):
+        rk = ref_cat.get(cat, {"l": [], "c": [], "a": []})
+        sk = stu_cat.get(cat, {"l": [], "c": [], "a": []})
+
+        ref_len = (sum(_entity_length(l) for l in rk["l"])
+                   + sum(_entity_length(c) for c in rk["c"])
+                   + sum(_entity_length(a) for a in rk["a"]))
+
+        # 线交集
+        segs = []
+        for rl_ in rk["l"]:
+            for sl_ in sk["l"]:
+                s = _line_intersection_segment(rl_, sl_)
+                if s:
+                    segs.append(s)
+        # 合并共线碎片
+        dummy = {"0": {"linetype": "Continuous"}}
+        segs_m, _, _ = clean_overlapping_entities(segs, [], [], dummy)
+        inter_len = sum(_entity_length(s) for s in segs_m)
+
+        # 圆交集
+        _, ci_len = _circle_intersection(rk["c"], sk["c"])
+        inter_len += ci_len
+
+        # 弧交集
+        ai_segs = []
+        for ra_ in rk["a"]:
+            for sa_ in sk["a"]:
+                s = _arc_intersection_segment(ra_, sa_)
+                if s:
+                    ai_segs.append(s)
+        inter_len += sum(_entity_length(s) for s in ai_segs)
+
+        # stu 总长
+        stu_len = (sum(_entity_length(l) for l in sk["l"])
+                   + sum(_entity_length(c) for c in sk["c"])
+                   + sum(_entity_length(a) for a in sk["a"]))
+        extra_len = max(0.0, stu_len - inter_len)
+
+        if ref_len > 0:
+            ratio = inter_len / ref_len
+            er = extra_len / ref_len
+        elif inter_len == 0 and extra_len == 0:
+            ratio = 1.0   # 参考无图元、学生也无图元 → 视为完全一致
+            er = 0.0
+        else:
+            ratio = -1.0  # 参考无图元、学生有多余 → 标记为无法计算
+            er = -1.0
+
+        result[cat] = {
+            "ref_len": ref_len,
+            "intersection": inter_len,
+            "coincidence": ratio,
+            "extra": extra_len,
+            "extra_ratio": er,
+        }
+        total_ref += ref_len
+        total_inter += inter_len
+        total_extra += extra_len
+
+    if total_ref > 0:
+        tr = total_inter / total_ref
+        ter = total_extra / total_ref
+    elif total_inter == 0 and total_extra == 0:
+        tr = 1.0
+        ter = 0.0
+    else:
+        tr = -1.0
+        ter = -1.0
+    result["total"] = {
+        "ref_len": total_ref,
+        "intersection": total_inter,
+        "coincidence": tr,
+        "extra": total_extra,
+        "extra_ratio": ter,
+    }
+    result["ref_point"] = [ref_pt[0], ref_pt[1]]
+    result["stu_point"] = [stu_pt[0], stu_pt[1]]
+    result["align_offset"] = {"dx": dx, "dy": dy}
+    return result
+
+
+# ── 清理重叠并生成新 DXF（保留标注/公差等其他实体）────────────
+
+def clean_dxf_and_save(
+    input_path: Path,
+    output_path: Path,
+    *,
+    layers_data: dict | None = None,
+) -> Path:
+    """
+    读取 DXF → 清理重叠线/圆/弧 → 保留其他实体（标注/公差/文字...）→ 保存新 DXF。
+
+    流程：
+      1. 用 extract_dxf 的提取逻辑将 LINE/CIRCLE/ARC 转 dict
+      2. 调 clean_overlapping_entities() 合并重叠
+      3. 从原始 DXF 删除旧的 LINE/CIRCLE/ARC
+      4. 写入清理后的 LINE/CIRCLE/ARC（继承原图层/颜色/线型/线宽）
+      5. 保存新 DXF
+
+    Args:
+        input_path: 原始 DXF 路径
+        output_path: 输出 DXF 路径
+        layers_data: 图层信息（用于线型分类），None 时自动从 DXF 提取
+
+    Returns:
+        output_path
+    """
+    _check_ezdxf()
+    import ezdxf
+
+    doc = ezdxf.readfile(str(input_path))
+    msp = doc.modelspace()
+
+    # 1. 从 DXF 提取 LINE/CIRCLE/ARC 为 dict
+    orig_lines: list[dict] = []
+    orig_circles: list[dict] = []
+    orig_arcs: list[dict] = []
+    other_entities: list = []  # 非 LINE/CIRCLE/ARC 实体（保留不动）
+
+    for entity in msp:
+        dxftype = entity.dxftype()
+        if dxftype == "LINE":
+            orig_lines.extend(_extract_line(entity))
+        elif dxftype == "CIRCLE":
+            orig_circles.extend(_extract_circle(entity))
+        elif dxftype == "ARC":
+            orig_arcs.extend(_extract_arc(entity))
+        else:
+            other_entities.append(entity)
+
+    # 自动提取图层信息（如未提供）
+    if layers_data is None:
+        layers_data = _extract_layers(doc)
+
+    # 2. 清理重叠
+    cleaned_lines, cleaned_circles, cleaned_arcs = clean_overlapping_entities(
+        orig_lines, orig_circles, orig_arcs, layers_data)
+
+    logger.info(
+        f"重叠清理: LINE {len(orig_lines)}→{len(cleaned_lines)}, "
+        f"CIRCLE {len(orig_circles)}→{len(cleaned_circles)}, "
+        f"ARC {len(orig_arcs)}→{len(cleaned_arcs)}"
+    )
+
+    # 3. 删除原始 LINE/CIRCLE/ARC
+    # 注意：不能边迭代边删，用 handle 标记
+    handles_to_delete: set[str] = set()
+    for entity in msp:
+        if entity.dxftype() in ("LINE", "CIRCLE", "ARC"):
+            try:
+                handles_to_delete.add(entity.dxf.handle)
+            except Exception:
+                # 无 handle 的实体，尝试直接用对象删除
+                try:
+                    msp.delete_entity(entity)
+                except Exception:
+                    pass
+
+    for handle in handles_to_delete:
+        try:
+            entity = doc.entitydb.get(handle)
+            if entity is not None:
+                msp.delete_entity(entity)
+        except Exception:
+            pass
+
+    # 4. 写入清理后的 LINE
+    for d in cleaned_lines:
+        line = msp.add_line(
+            start=(d["start"][0], d["start"][1]),
+            end=(d["end"][0], d["end"][1]),
+        )
+        line.dxf.layer = d.get("layer", "0")
+        line.dxf.color = d.get("color", 256)
+        lt = d.get("linetype", "")
+        if lt and lt.upper() not in ("", "BYLAYER"):
+            try:
+                line.dxf.linetype = lt
+            except Exception:
+                pass
+        lw = d.get("lineweight", 0)
+        if lw > 0:
+            try:
+                line.dxf.lineweight = lw
+            except Exception:
+                pass
+
+    # 5. 写入清理后的 CIRCLE
+    for d in cleaned_circles:
+        circle = msp.add_circle(
+            center=(d["center"][0], d["center"][1]),
+            radius=d["radius"],
+        )
+        circle.dxf.layer = d.get("layer", "0")
+        circle.dxf.color = d.get("color", 256)
+        lt = d.get("linetype", "")
+        if lt and lt.upper() not in ("", "BYLAYER"):
+            try:
+                circle.dxf.linetype = lt
+            except Exception:
+                pass
+        lw = d.get("lineweight", 0)
+        if lw > 0:
+            try:
+                circle.dxf.lineweight = lw
+            except Exception:
+                pass
+
+    # 6. 写入清理后的 ARC
+    for d in cleaned_arcs:
+        arc = msp.add_arc(
+            center=(d["center"][0], d["center"][1]),
+            radius=d["radius"],
+            start_angle=d["start_angle"],
+            end_angle=d["end_angle"],
+        )
+        arc.dxf.layer = d.get("layer", "0")
+        arc.dxf.color = d.get("color", 256)
+        lt = d.get("linetype", "")
+        if lt and lt.upper() not in ("", "BYLAYER"):
+            try:
+                arc.dxf.linetype = lt
+            except Exception:
+                pass
+        lw = d.get("lineweight", 0)
+        if lw > 0:
+            try:
+                arc.dxf.lineweight = lw
+            except Exception:
+                pass
+
+    doc.saveas(str(output_path))
+    logger.info(f"清理后 DXF 已保存: {output_path}")
+    return output_path
+
+
+# ── 按视图拆分为独立 DXF 文件 ──────────────────────────────
+
+def save_view_dxfs(
+    processed_dxf_path: Path,
+    data: dict,
+    output_dir: Path,
+) -> list[dict]:
+    """
+    将 DXF 按视图拆分为独立的 DXF + PNG 文件（全部检测到的图框）。
+
+    用 _entity_in_any_bbox 过滤每个视图框内的图元，图框线本身不显示。
+    不合并重叠线，不修改原始图元。
+
+    Args:
+        processed_dxf_path: 预处理后的 DXF 路径
+        data: extract_dxf 的输出（含 frames/views）
+        output_dir: 输出目录
+
+    Returns:
+        每个视图的信息列表: [{name, dxf_path, png_path, bbox}]
+    """
+    _check_ezdxf()
+    import ezdxf
+
+    frames = data.get("frames", [])
+    if not frames:
+        return []
+    result = []
+
+    for frame in frames:
+        fname = frame["name"]
+        bbox = frame["bbox"]
+
+        # 输出路径：{stem}_{视图名}.dxf/.png（去掉 _processed 后缀）
+        stem = processed_dxf_path.stem
+        while stem.endswith("_processed"):
+            stem = stem[:-10]
+        dxf_out = output_dir / f"{stem}_{fname}.dxf"
+        png_out = output_dir / f"{stem}_{fname}.png"
+
+        # 创建过滤后的 DXF（只保留框内图元，排除图框线）
+        doc = ezdxf.readfile(str(processed_dxf_path))
+        msp = doc.modelspace()
+
+        to_del = []
+        for entity in msp:
+            # 图框线排除
+            if entity.dxftype() == "LINE":
+                try:
+                    lw = entity.dxf.lineweight
+                    color = entity.dxf.color
+                    if lw == FRAME_LINEWEIGHT_DXF and color in FRAME_COLOR_MAP:
+                        to_del.append(entity)
+                        continue
+                except Exception:
+                    pass
+            # 不在框内的排除
+            if not _entity_in_any_bbox(entity, [bbox]):
+                to_del.append(entity)
+
+        for e in to_del:
+            try:
+                msp.delete_entity(e)
+            except Exception:
+                pass
+
+        doc.saveas(str(dxf_out))
+
+        # 渲染预览图（无尺寸）
+        render_dxf_preview(processed_dxf_path, png_out,
+                           skip_dimensions=True, frame_bboxes=[bbox])
+
+        # 生成该视图的 clean 版（重叠合并）
+        clean_dxf_path = output_dir / f"{stem}_{fname}_clean.dxf"
+        try:
+            clean_dxf_and_save(dxf_out, clean_dxf_path)
+            clean_png = output_dir / f"{stem}_{fname}_clean.png"
+            render_dxf_preview(clean_dxf_path, clean_png, skip_dimensions=True)
+        except Exception as e:
+            logger.warning(f"  视图 clean 失败（{fname}）: {e}")
+
+        result.append({
+            "name": fname,
+            "dxf_path": str(dxf_out),
+            "png_path": str(png_out),
+            "clean_dxf_path": str(clean_dxf_path) if clean_dxf_path.exists() else None,
+            "bbox": bbox,
+        })
+        logger.info(f"  视图 DXF 已保存: {dxf_out.name}"
+                     + (f" + clean" if clean_dxf_path.exists() else ""))
+
+    return result
+
+
 # ── 统一 DXF 分析（教师参考图 + 学生作业共用）───────────────
 
 def process_dxf(filepath: Path, output_dir: Path | None = None) -> dict:
@@ -2082,28 +2977,30 @@ def process_dxf(filepath: Path, output_dir: Path | None = None) -> dict:
       1. 预处理：MLINE / POLYLINE / LWPOLYLINE → LINE（保存为 *_processed.dxf）
       2. 从预处理后的 DXF 提取结构化数据
       3. 渲染预览图（含尺寸 + 无尺寸）
+      4. 为每个检测到的图框生成独立 DXF + PNG（命名为 {stem}_{视图名}.dxf/.png）
+      5. 生成重叠合并版 DXF + PNG（{stem}_clean.dxf/.png）
 
     Args:
         filepath: DXF 文件路径
         output_dir: 预览图输出目录（默认与 DXF 同目录）
 
     Returns:
-        extract_dxf 的结构化数据 dict
+        extract_dxf 的结构化数据 dict，含 view_files 和 clean_file 字段
     """
     out_dir = output_dir or filepath.parent
     stem = filepath.stem
 
     # 1. 预处理 → 保存 _processed.dxf
-    processed_path = out_dir / f"{stem}_processed.dxf"
-    if not processed_path.exists():
-        try:
-            preprocess_dxf(filepath, processed_path)
-        except Exception as e:
-            logger.warning(f"DXF 预处理失败，使用原始文件: {e}")
-            processed_path = filepath
+    if stem.endswith("_processed"):
+        processed_path = filepath
     else:
-        # 已存在则直接使用
-        pass
+        processed_path = out_dir / f"{stem}_processed.dxf"
+        if not processed_path.exists():
+            try:
+                preprocess_dxf(filepath, processed_path)
+            except Exception as e:
+                logger.warning(f"DXF 预处理失败，使用原始文件: {e}")
+                processed_path = filepath
 
     # 2. 从预处理后的 DXF 提取结构化数据
     data = extract_dxf(processed_path)
@@ -2111,6 +3008,43 @@ def process_dxf(filepath: Path, output_dir: Path | None = None) -> dict:
     # 3. 渲染预览图（含尺寸 + 无尺寸）
     render_dxf_preview(processed_path, out_dir / f"{stem}.png")
     render_dxf_preview(processed_path, out_dir / f"{stem}_无尺寸.png", skip_dimensions=True)
+
+    # 4. 为每个检测到的图框生成独立 DXF + PNG
+    view_files = save_view_dxfs(processed_path, data, out_dir)
+    if view_files:
+        data["view_files"] = view_files
+        logger.info(f"  → 已生成 {len(view_files)} 个视图 DXF: "
+                     f"{[v['name'] for v in view_files]}")
+
+    # 5. 计算每个视图的重叠率
+    if data.get("views"):
+        view_overlap: dict = {}
+        layers_info = data.get("layers", {})
+        for vname, vdata in data["views"].items():
+            _cl = [dict(c) for c in vdata.get("centerlines", [])]
+            for c in _cl:
+                c["linetype"] = "CENTER"
+            _all_lines = list(vdata.get("lines", [])) + _cl
+            ratio = compute_view_overlap_ratios(
+                _all_lines, vdata.get("circles", []),
+                vdata.get("arcs", []), layers_info)
+            view_overlap[vname] = ratio
+        if view_overlap:
+            data["view_overlap_ratios"] = view_overlap
+
+    # 6. 生成重叠合并版 DXF + PNG
+    try:
+        clean_path = out_dir / f"{stem}_clean.dxf"
+        clean_dxf_and_save(processed_path, clean_path)
+        clean_png = out_dir / f"{stem}_clean.png"
+        render_dxf_preview(clean_path, clean_png, skip_dimensions=True)
+        data["clean_file"] = {
+            "dxf_path": str(clean_path),
+            "png_path": str(clean_png),
+        }
+        logger.info(f"  → 已生成 clean 版: {clean_path.name}")
+    except Exception as e:
+        logger.warning(f"生成 clean 版失败（不影响评分）: {e}")
 
     logger.info(f"DXF 处理完成: {filepath.name} → 预处理 {processed_path.name}")
     return data
@@ -2127,6 +3061,7 @@ def run_dxf_grade(
     *,
     stu_dxf_data: dict | None = None,
     knowledge: str = "",
+    required_frames: list[str] | None = None,
 ) -> tuple[dict, dict]:
     """
     统一 DXF 评分入口——教师批量评分和学生提交评分都走这里。
@@ -2139,37 +3074,174 @@ def run_dxf_grade(
         phase2_criteria: 阶段二评分标准
         stu_dxf_data: 学生 DXF 提取数据（如已提前提取则传入，否则自动提取）
         knowledge: 补充知识
+        required_frames: 可选，答题图框列表（如 ["主视图"]），只保留框内图元
 
     Returns:
         (stu_dxf_data, grade_result) — 学生 DXF 数据和 LLM 评分结果
     """
+    import tempfile
     from services.llm_service import grade_dxf
 
     # 1. 提取学生 DXF 数据（如尚未提取则统一 process_dxf）
     if stu_dxf_data is None:
         stu_dxf_data = process_dxf(student_dxf_path)
 
-    # 3. 预览图：阶段一视觉对比用无尺寸图（纯几何，去掉标注干扰）
-    ref_nodim = ref_dir / "参考工程图_无尺寸.png"
-    ref_preview = ref_nodim if ref_nodim.exists() else (ref_dir / "参考工程图.png")
-    if not ref_preview.exists():
-        ref_preview = ref_dir / "参考工程图.dxf"
-    if not ref_preview.exists():
-        raise RuntimeError("参考 DXF 预览图不存在，请联系老师")
+    # 2. 图框过滤：只保留答题图框内的图元和标注
+    if required_frames:
+        # 从参考图数据获取答题图框的包围盒
+        ref_frames = ref_data.get("frames", [])
+        frame_bboxes = [
+            f["bbox"] for f in ref_frames
+            if f["name"] in required_frames
+        ]
+        if not frame_bboxes:
+            logger.warning(f"参考图中未找到答题图框: {required_frames}，将使用全图")
 
-    stu_png_nodim = student_dxf_path.parent / f"{student_dxf_path.stem}_无尺寸.png"
-    stu_preview = stu_png_nodim if stu_png_nodim.exists() else stu_png
+        # 过滤参考图和学生图的结构化数据
+        ref_data_filtered = filter_data_by_frames(ref_data, required_frames)
+        stu_data_filtered = filter_data_by_frames(stu_dxf_data, required_frames)
 
-    # 4. LLM 评分
-    grade_result = grade_dxf(
-        ref_data=ref_data,
-        stu_data=stu_dxf_data,
-        ref_preview_path=ref_preview,
-        stu_preview_path=stu_preview,
-        phase1_criteria=phase1_criteria,
-        phase2_criteria=phase2_criteria,
-        knowledge=knowledge,
-    )
+        # 生成过滤后的无尺寸预览图（临时文件）
+        ref_dxf_path = ref_dir / "参考工程图_processed.dxf"
+        if not ref_dxf_path.exists():
+            ref_dxf_path = ref_dir / "参考工程图.dxf"
+
+        if frame_bboxes and ref_dxf_path.exists():
+            # 参考图：过滤渲染到临时文件
+            ref_preview_tmp = Path(tempfile.mktemp(suffix="_ref_filtered.png"))
+            render_dxf_preview(ref_dxf_path, ref_preview_tmp,
+                               skip_dimensions=True, frame_bboxes=frame_bboxes)
+            ref_preview = ref_preview_tmp
+        else:
+            # 回退到已有预览图
+            ref_nodim = ref_dir / "参考工程图_无尺寸.png"
+            ref_preview = ref_nodim if ref_nodim.exists() else (ref_dir / "参考工程图.png")
+            if not ref_preview.exists():
+                ref_preview = ref_dir / "参考工程图.dxf"
+            if not ref_preview.exists():
+                raise RuntimeError("参考 DXF 预览图不存在，请联系老师")
+
+        # 学生图：过滤渲染到临时文件（使用学生自己的图框位置）
+        stu_png = student_dxf_path.parent / f"{student_dxf_path.stem}.png"
+        stu_frames = stu_dxf_data.get("frames", [])
+        stu_frame_bboxes = [
+            f["bbox"] for f in stu_frames
+            if f["name"] in required_frames
+        ]
+        if stu_frame_bboxes:
+            stu_preview_tmp = Path(tempfile.mktemp(suffix="_stu_filtered.png"))
+            render_dxf_preview(student_dxf_path, stu_preview_tmp,
+                               skip_dimensions=True, frame_bboxes=stu_frame_bboxes)
+            stu_preview = stu_preview_tmp
+        else:
+            # 学生图无图框时，用参考图框位置过滤（作为降级方案）
+            if frame_bboxes:
+                stu_preview_tmp = Path(tempfile.mktemp(suffix="_stu_filtered.png"))
+                render_dxf_preview(student_dxf_path, stu_preview_tmp,
+                                   skip_dimensions=True, frame_bboxes=frame_bboxes)
+                stu_preview = stu_preview_tmp
+            else:
+                stu_png_nodim = student_dxf_path.parent / f"{student_dxf_path.stem}_无尺寸.png"
+                stu_preview = stu_png_nodim if stu_png_nodim.exists() else stu_png
+
+        # 使用过滤后的数据
+        ref_data_used = ref_data_filtered
+        stu_data_used = stu_data_filtered
+    else:
+        # 无图框过滤，使用原有逻辑
+        ref_nodim = ref_dir / "参考工程图_无尺寸.png"
+        ref_preview = ref_nodim if ref_nodim.exists() else (ref_dir / "参考工程图.png")
+        if not ref_preview.exists():
+            ref_preview = ref_dir / "参考工程图.dxf"
+        if not ref_preview.exists():
+            raise RuntimeError("参考 DXF 预览图不存在，请联系老师")
+
+        stu_png = student_dxf_path.parent / f"{student_dxf_path.stem}.png"
+        stu_png_nodim = student_dxf_path.parent / f"{student_dxf_path.stem}_无尺寸.png"
+        stu_preview = stu_png_nodim if stu_png_nodim.exists() else stu_png
+
+        ref_data_used = ref_data
+        stu_data_used = stu_dxf_data
+
+    # 3. 计算各视图重叠率（写入评分结果）
+    view_overlap: dict[str, dict] = {}
+    frames_views = ref_data.get("frames", [])
+    target_views = required_frames or [f["name"] for f in frames_views]
+    for vname in target_views:
+        # 参考图该视图的数据
+        ref_view = ref_data_used.get("views", {}).get(vname, {})
+        stu_view = stu_data_used.get("views", {}).get(vname, {})
+        if not ref_view or not stu_view:
+            continue
+        ref_layers = ref_data.get("layers", {})
+        stu_layers = stu_dxf_data.get("layers", {})
+        def _mcl(lst):
+            return [dict(c) | {"linetype": "CENTER"} for c in lst]
+        _ref_all = list(ref_view.get("lines", [])) + _mcl(ref_view.get("centerlines", []))
+        _stu_all = list(stu_view.get("lines", [])) + _mcl(stu_view.get("centerlines", []))
+        ref_ratio = compute_view_overlap_ratios(
+            _ref_all, ref_view.get("circles", []),
+            ref_view.get("arcs", []), ref_layers)
+        stu_ratio = compute_view_overlap_ratios(
+            _stu_all, stu_view.get("circles", []),
+            stu_view.get("arcs", []), stu_layers)
+        view_overlap[vname] = {
+            "ref": ref_ratio,
+            "stu": stu_ratio,
+        }
+        logger.info(f"  视图 [{vname}] 重叠率: "
+                     f"ref={ref_ratio['total']['overlap_ratio']:.2%} "
+                     f"stu={stu_ratio['total']['overlap_ratio']:.2%}")
+
+    # 4. 计算各视图重合度（参考图 vs 学生图）
+    view_coincidence: dict[str, dict] = {}
+    for vname in target_views:
+        ref_view = ref_data_used.get("views", {}).get(vname, {})
+        stu_view = stu_data_used.get("views", {}).get(vname, {})
+        if not ref_view or not stu_view:
+            continue
+        ref_layers = ref_data.get("layers", {})
+        stu_layers = stu_dxf_data.get("layers", {})
+        try:
+            coin = compute_view_coincidence(ref_view, stu_view, ref_layers, stu_layers)
+            if "error" not in coin:
+                view_coincidence[vname] = coin
+                logger.info(f"  视图 [{vname}] 重合度: "
+                             f"重合={coin['total']['coincidence']:.2%} "
+                             f"非重合={coin['total']['extra_ratio']:.2%}")
+        except Exception as e:
+            logger.warning(f"  视图 [{vname}] 重合度计算失败: {e}")
+
+    # 5. LLM 评分
+    _tmp_files: list[Path] = []
+    if required_frames:
+        if frame_bboxes and ref_dxf_path.exists():
+            _tmp_files.append(ref_preview_tmp)
+        if stu_frame_bboxes or frame_bboxes:
+            _tmp_files.append(stu_preview_tmp)
+
+    try:
+        grade_result = grade_dxf(
+            ref_data=ref_data_used,
+            stu_data=stu_data_used,
+            ref_preview_path=ref_preview,
+            stu_preview_path=stu_preview,
+            phase1_criteria=phase1_criteria,
+            phase2_criteria=phase2_criteria,
+            knowledge=knowledge,
+        )
+    finally:
+        # 清理临时预览图
+        for _f in _tmp_files:
+            try:
+                _f.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    # 6. 重叠率 + 重合度写入评分结果
+    if view_overlap:
+        grade_result["view_overlap_ratios"] = view_overlap
+    if view_coincidence:
+        grade_result["view_coincidence"] = view_coincidence
 
     return stu_dxf_data, grade_result
-    return output_path

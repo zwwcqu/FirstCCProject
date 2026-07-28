@@ -23,10 +23,10 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Request, UploadFile, File, Form
+from fastapi import APIRouter, HTTPException, Request, Response, UploadFile, File, Form
 from fastapi.responses import FileResponse
 
-from auth import create_student_session, validate_student_session, get_student_session, MIN_PASSWORD_LENGTH, STUDENT_COOKIE
+from auth import create_student_session, validate_student_session, get_student_session, MIN_PASSWORD_LENGTH, STUDENT_COOKIE, _get_student_timeout
 from config import CONFIG_DIR, PDF_MAGIC, get_question_dir as _get_question_dir
 from services.question_service import (
     list_questions,
@@ -133,7 +133,7 @@ async def check_identity(request: Request):
 
 
 @router.post("/login")
-async def student_login(request: Request):
+async def student_login(request: Request, response: Response):
     """学生登录：验证姓名+学号+密码，返回 session token + password_changed 标志"""
     body = await request.json()
     name = (body.get("name") or "").strip()
@@ -152,6 +152,11 @@ async def student_login(request: Request):
     if not pwd_ok:
         raise HTTPException(status_code=401, detail="密码错误")
     token = create_student_session(name, student_id)
+    # 设置 HttpOnly cookie（刷新页面不丢失登录）
+    timeout_sec = int(_get_student_timeout().total_seconds())
+    response.set_cookie(key=STUDENT_COOKIE, value=token,
+                        max_age=timeout_sec, httponly=True,
+                        samesite="lax", path="/")
     return {"ok": True, "token": token, "class_name": class_name, "password_changed": pwd_changed}
 
 
@@ -253,6 +258,10 @@ async def get_analysis_result(qid: str, name: str, student_id: str):
     analysis = get_student_analysis(qid, student_id, name)
     if analysis is None:
         raise HTTPException(status_code=404, detail="分析结果不存在，请先完成图面分析")
+    # 兼容旧数据：缺失重叠率时自动补算
+    if analysis.get("entities") and analysis.get("views"):
+        from services.dxf_service import ensure_overlap_ratios
+        analysis = ensure_overlap_ratios(analysis)
     return {"ok": True, "analysis": analysis}
 
 
@@ -514,12 +523,16 @@ def _run_grade(
             stu_path = get_student_submission_path(qid, student_id, name)
             if stu_path is None:
                 raise RuntimeError("学生提交文件不存在，请重新上传")
+            if stu_path.suffix.lower() != ".dxf":
+                raise RuntimeError(
+                    f"提交文件不是 DXF（实际为 {stu_path.suffix}），请重新上传 DXF 文件")
 
             stu_analysis = get_student_analysis(qid, student_id, name)
             if stu_analysis is None:
                 raise RuntimeError("DXF 数据尚未提取，请先完成分析步骤")
 
             from services.dxf_service import run_dxf_grade
+            required_frames_dxf = q.get("required_frames", [])
             _, result = run_dxf_grade(
                 student_dxf_path=stu_path,
                 ref_data=ref_analysis,
@@ -528,6 +541,7 @@ def _run_grade(
                 phase2_criteria=phase2_criteria,
                 stu_dxf_data=stu_analysis,
                 knowledge=knowledge,
+                required_frames=required_frames_dxf or None,
             )
 
         else:
@@ -682,10 +696,20 @@ async def grade_submission_handler(
 
 @router.get("/result/{qid}/{student_id}")
 async def get_result(qid: str, student_id: str):
-    """查询某学生在某题的历史成绩"""
+    """查询某学生在某题的历史成绩（CSV + 评分 JSON 合并）"""
     row = get_student_grade(qid, student_id)
     if row is None:
         raise HTTPException(status_code=404, detail="未找到成绩")
+    # 合并评分 JSON 中的额外字段（重合度、重叠率等）
+    try:
+        name = row.get("姓名", "")
+        grade_json = get_student_grade_json(qid, student_id, name)
+        if grade_json:
+            for k in ("view_overlap_ratios", "view_coincidence", "_model", "_usage"):
+                if k in grade_json:
+                    row[k] = grade_json[k]
+    except Exception:
+        pass
     return row
 
 

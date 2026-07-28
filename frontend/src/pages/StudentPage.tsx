@@ -882,6 +882,111 @@ export default function StudentPage() {
                     {analysisData.bounds && (
                       <p className="text-xs text-gray-400">范围: X[{analysisData.bounds.min_x} ~ {analysisData.bounds.max_x}] Y[{analysisData.bounds.min_y} ~ {analysisData.bounds.max_y}]</p>
                     )}
+
+                    {/* ── 图框/视图信息 ── */}
+                    {analysisData.frames && (analysisData.frames as any[]).length > 0 && (
+                      <details className="mt-2">
+                        <summary className="text-xs text-purple-700 cursor-pointer hover:underline font-medium">
+                          图框检测（{(analysisData.frames as any[]).length} 个）
+                          {(() => {
+                            const _q = questions.find((qq: any) => qq.id === selectedQid);
+                            const _af: string[] = _q?.required_frames || [];
+                            return _af.length > 0 ? <span className="ml-1 text-purple-600 font-bold">答题: {_af.join("、")}</span> : null;
+                          })()}
+                        </summary>
+                        <div className="mt-1 space-y-2">
+                          {(() => {
+                            const _q = questions.find((qq: any) => qq.id === selectedQid);
+                            const _answerFrames: string[] = _q?.required_frames || [];
+                            return (analysisData.frames as any[]).map((f: any, fi: number) => {
+                              const b = f.bbox || {};
+                              const isAnswer = _answerFrames.length > 0 && _answerFrames.includes(f.name);
+                              const viewEnt = analysisData.views?.[f.name];
+                              return (
+                                <div key={fi} className={`p-2 rounded border ${isAnswer ? 'bg-purple-50 border-purple-300 ring-1 ring-purple-200' : 'bg-gray-50 border-gray-200'}`}>
+                                  <p className="text-xs font-medium mb-1">
+                                    {isAnswer && <span>📌 </span>}{f.name}
+                                    <span className="text-gray-400 ml-2">颜色 {f.color}</span>
+                                    {isAnswer && <span className="ml-2 text-xs text-purple-600 font-semibold">答题视图</span>}
+                                  </p>
+                                  <p className="text-xs text-gray-500">
+                                    范围: X[{b.min_x?.toFixed(1)}~{b.max_x?.toFixed(1)}] Y[{b.min_y?.toFixed(1)}~{b.max_y?.toFixed(1)}]
+                                  </p>
+                                  {/* 答题视图才显示统计 + 详细尺寸 */}
+                                  {isAnswer && viewEnt && (
+                                    <div className="mt-1 space-y-1">
+                                      {/* 图元计数 */}
+                                      <div className="grid grid-cols-4 gap-x-2 gap-y-0.5 text-xs text-gray-600">
+                                        {Object.entries(viewEnt).map(([vk, vv]) => {
+                                          if (!Array.isArray(vv) || vk === "dimensions") return null;
+                                          return (
+                                            <span key={vk}>
+                                              <span className="text-gray-400">{vk}:</span> <strong>{(vv as any[]).length}</strong>
+                                            </span>
+                                          );
+                                        })}
+                                      </div>
+                                      {/* 答题视图的尺寸标注 */}
+                                      {Array.isArray(viewEnt.dimensions) && viewEnt.dimensions.length > 0 && (
+                                        <details>
+                                          <summary className="text-xs text-green-700 cursor-pointer hover:underline font-medium mt-1">
+                                            尺寸标注（{viewEnt.dimensions.length} 个）
+                                          </summary>
+                                          <table className="w-full border mt-1">
+                                            <thead><tr className="bg-gray-50 border"><th className="p-0.5 text-left text-xs">类型</th><th className="p-0.5 text-left text-xs">文字</th><th className="p-0.5 text-left text-xs">测量值</th></tr></thead>
+                                            <tbody>{viewEnt.dimensions.map((d: any, di: number) => (
+                                              <tr key={di} className="border"><td className="p-0.5 text-xs">{d.type || "-"}</td><td className="p-0.5 font-mono text-xs">{d.text || "-"}</td><td className="p-0.5 font-mono text-xs">{d.measurement != null ? d.measurement : "-"}</td></tr>
+                                            ))}</tbody>
+                                          </table>
+                                        </details>
+                                      )}
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            });
+                          })()}
+                        </div>
+                      </details>
+                    )}
+
+                    {/* 重叠率 */}
+                    {(() => {
+                      const ov = analysisData?.view_overlap_ratios;
+                      if (!ov) return null;
+                      const _q = questions.find((qq: any) => qq.id === selectedQid);
+                      const af: string[] = _q?.required_frames || [];
+                      const views = af.length > 0 ? af : Object.keys(ov);
+                      return (
+                        <details className="mt-2">
+                          <summary className="text-xs text-purple-700 cursor-pointer hover:underline font-medium">
+                            重叠率 <span className="font-normal text-gray-400">(原始−clean)÷clean</span>
+                          </summary>
+                          <p className="text-xs text-gray-400 mb-1">0%=无重叠，越大重叠越多</p>
+                          <div className="mt-1 space-y-1 text-xs text-gray-600">
+                            {views.map((vname: string) => {
+                              const vdata = ov[vname];
+                              if (!vdata) return null;
+                              return (
+                                <div key={vname} className="flex flex-wrap gap-x-3 p-1 bg-purple-50 rounded">
+                                  <span className="font-medium text-purple-800 min-w-[4rem]">{vname}</span>
+                                  {["solid","dashed","centerline","total"].map((cat: string) => {
+                                    const d = vdata[cat];
+                                    if (!d) return null;
+                                    return (
+                                      <span key={cat}>
+                                        {cat==="total"?"合计":cat}: {d.overlap_ratio===0?"无重叠":`${(d.overlap_ratio*100).toFixed(1)}%`}
+                                        <span className="text-gray-300 ml-0.5">({d.raw_len}→{d.clean_len})</span>
+                                      </span>
+                                    );
+                                  })}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </details>
+                      );
+                    })()}
                   </div>
                 ) : (
                   /* ── 原有 LLM 分析数据展示（PDF/图片）──── */
@@ -1015,6 +1120,41 @@ export default function StudentPage() {
               <h4 className="text-sm font-medium text-yellow-700">相似度评价</h4>
               <p className="text-sm mt-1 whitespace-pre-wrap">{(result as any)["相似度评价"] || (result as any).phase1_comment || "-"}</p>
             </div>
+
+            {/* 重合度 */}
+            {(result as any).view_coincidence && Object.keys((result as any).view_coincidence).length > 0 && (
+              <div className="bg-purple-50 rounded p-3">
+                <h4 className="text-sm font-medium text-purple-700 mb-2">重合度 <span class="font-normal text-gray-400">∩÷参考图</span></h4>
+                      <p className="text-xs text-gray-400 mb-1">100%=完全重合，越小表示漏画越多</p>
+                <div className="space-y-1 text-xs">
+                  {Object.entries((result as any).view_coincidence).map(([vname, vdata]: [string, any]) => {
+                    const t = vdata.total;
+                    return (
+                      <div key={vname} className="border border-purple-200 rounded p-1.5 bg-white">
+                        <p className="font-medium text-purple-800 mb-0.5">📌 {vname}</p>
+                        <div className="flex flex-wrap gap-x-3 text-gray-600">
+                          <span>重合: <strong>{(t.coincidence*100).toFixed(1)}%</strong></span>
+                          <span>非重合: <strong>{(t.extra_ratio*100).toFixed(1)}%</strong></span>
+                          <span className="text-gray-400">偏移: ({vdata.align_offset.dx.toFixed(1)}, {vdata.align_offset.dy.toFixed(1)})</span>
+                        </div>
+                        <div className="flex flex-wrap gap-x-3 text-gray-400 mt-0.5">
+                          {["solid","dashed","centerline"].map((cat) => {
+                            const c = vdata[cat];
+                            if (!c) return null;
+                            return (
+                              <span key={cat}>
+                                {cat}: 重合={((c.coincidence||0)*100).toFixed(1)}% 非重合={((c.extra_ratio||0)*100).toFixed(1)}%
+                              </span>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
             <h4 className="text-sm font-medium text-gray-700 mt-2">量化评价</h4>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-1">
               {["图样表达", "尺寸标注", "尺寸公差", "表面质量", "形位公差", "技术要求"].map((key) => (

@@ -167,6 +167,7 @@ const TABS = [
   { key: "grade", label: "等级阈值" },
   { key: "analysis", label: "识读模板管理" },
   { key: "scoring", label: "评分模板" },
+  { key: "tools", label: "工具" },
   { key: "system", label: "系统管理" },
 ];
 
@@ -264,6 +265,15 @@ export default function SettingsPage() {
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState("");
 
+  // 学生会话超时
+  const [studentTimeout, setStudentTimeout] = useState(5);
+
+  // 重叠线清理工具
+  const [cleanFile, setCleanFile] = useState<File | null>(null);
+  const [cleanProcessing, setCleanProcessing] = useState(false);
+  const [cleanResult, setCleanResult] = useState<{ previewId: string; downloadUrl: string } | null>(null);
+  const [cleanError, setCleanError] = useState("");
+
   // LLM 参数
   const [llmParams, setLlmParams] = useState<Record<string, any>>({});
   // 图像参数
@@ -306,6 +316,7 @@ export default function SettingsPage() {
       setGradeThresholds(s.grade_thresholds || {});
       setPromptTemplates(s.prompt_templates || {});
       setScoringTemplates(s.scoring_templates || {});
+      setStudentTimeout(s.student_timeout_minutes ?? 5);
     } catch {}
   };
 
@@ -669,6 +680,79 @@ export default function SettingsPage() {
           </div>
         )}
 
+        {/* ========== 工具 ========== */}
+        {tab === "tools" && (
+          <div className={sectionClass}>
+            <h3 className="text-lg font-semibold mb-4">重叠线清理工具</h3>
+            <p className="text-sm text-gray-500 mb-4">
+              上传 DXF 文件，系统自动预处理（多段线爆炸）并合并重叠的线段、圆、圆弧，
+              保留标注/公差/文字等实体不变。处理后可下载清理后的 DXF 文件并预览效果。
+            </p>
+
+            <div className="flex items-center gap-3 mb-4">
+              <input type="file" accept=".dxf" id="clean-file-input" className="hidden"
+                onChange={(e) => {
+                  setCleanFile(e.target.files?.[0] || null);
+                  setCleanResult(null);
+                  setCleanError("");
+                }} />
+              <button onClick={() => document.getElementById("clean-file-input")?.click()}
+                className="px-4 py-2 bg-blue-600 text-white text-sm rounded hover:bg-blue-700">
+                选择文件
+              </button>
+              <span className="text-sm text-gray-500">{cleanFile?.name || "未选择文件"}</span>
+              <button
+                disabled={!cleanFile || cleanProcessing}
+                onClick={async () => {
+                  if (!cleanFile) return;
+                  setCleanProcessing(true);
+                  setCleanError("");
+                  setCleanResult(null);
+                  try {
+                    const fd = new FormData();
+                    fd.append("file", cleanFile);
+                    const res = await fetch("/api/teacher/tools/clean-overlap", {
+                      method: "POST", body: fd, credentials: "include",
+                    });
+                    if (!res.ok) {
+                      const err = await res.text();
+                      throw new Error(err || "处理失败");
+                    }
+                    const previewId = res.headers.get("X-Preview-ID") || "";
+                    const blob = await res.blob();
+                    const downloadUrl = URL.createObjectURL(blob);
+                    setCleanResult({ previewId, downloadUrl });
+                  } catch (e: any) {
+                    setCleanError(e.message);
+                  } finally {
+                    setCleanProcessing(false);
+                  }
+                }}
+                className="px-4 py-2 bg-green-600 text-white text-sm rounded hover:bg-green-700 disabled:opacity-50"
+              >
+                {cleanProcessing ? "处理中…" : "开始清理"}
+              </button>
+            </div>
+
+            {cleanError && <p className="text-red-500 text-sm mb-3">{cleanError}</p>}
+
+            {cleanResult && (
+              <div className="space-y-3">
+                <p className="text-green-600 text-sm font-medium">✅ 清理完成</p>
+                {cleanResult.previewId && (
+                  <img src={`/api/teacher/tools/clean-preview/${cleanResult.previewId}`}
+                    alt="清理后预览" className="w-full rounded border max-w-xl" />
+                )}
+                <a href={cleanResult.downloadUrl}
+                  download={cleanFile?.name?.replace(".dxf", "_clean.dxf") || "cleaned.dxf"}
+                  className="inline-block px-4 py-2 bg-green-600 text-white text-sm rounded hover:bg-green-700">
+                  下载清理后的 DXF
+                </a>
+              </div>
+            )}
+          </div>
+        )}
+
         {/* ========== 系统管理 ========== */}
         {tab === "system" && (
           <div className={sectionClass}>
@@ -713,6 +797,29 @@ export default function SettingsPage() {
                   )}
                 </div>
               )}
+            </div>
+
+            {/* 会话超时 */}
+            <div>
+              <h3 className="text-sm font-medium text-gray-700 mb-2">学生会话超时</h3>
+              <p className="text-xs text-gray-400 mb-2">学生登录后无操作超时自动退出（分钟）。</p>
+              <div className="flex items-center gap-2">
+                <input type="number" min="1" max="1440" value={studentTimeout}
+                  onChange={e => setStudentTimeout(parseInt(e.target.value) || 5)}
+                  className="w-20 border rounded px-2 py-1 text-sm" />
+                <span className="text-sm text-gray-500">分钟</span>
+                <button onClick={async () => {
+                  setSaving(true); setMsg("");
+                  try {
+                    await updateSettings({ student_timeout_minutes: studentTimeout });
+                    setMsg("已保存");
+                  } catch (e: any) { setMsg("保存失败: " + e.message); }
+                  finally { setSaving(false); }
+                }} disabled={saving}
+                  className="bg-blue-600 text-white px-3 py-1 rounded hover:bg-blue-700 disabled:opacity-50 text-sm">
+                  {saving ? "保存中…" : "保存"}
+                </button>
+              </div>
             </div>
 
             <hr className="my-4" />

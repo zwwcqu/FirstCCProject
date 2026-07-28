@@ -400,6 +400,12 @@ async def update_question_handler(
         if ref_ext == ".dxf":
             from services.question_service import save_reference_dxf
             save_reference_dxf(qid, ref_bytes, reference_pdf.filename)
+            # 清理旧预处理/视图/clean 文件，确保重新分析时完整重建
+            qdir = get_question_dir(qid)
+            for old_f in list(qdir.iterdir()):
+                if old_f.suffix.lower() in (".dxf", ".png"):
+                    if old_f.name != "参考工程图.dxf":
+                        old_f.unlink(missing_ok=True)
         else:
             save_reference_pdf(qid, ref_bytes, reference_pdf.filename)
         _run_reference_analysis(qid)   # 参考图更新后重新分析
@@ -454,6 +460,10 @@ async def get_analysis_result(request: Request, qid: str):
     _require_auth(request)
     analysis = get_reference_analysis(qid)
     if analysis is not None:
+        # 兼容旧数据：缺失重叠率时自动补算
+        if analysis.get("entities") and analysis.get("views"):
+            from services.dxf_service import ensure_overlap_ratios
+            analysis = ensure_overlap_ratios(analysis)
         return {"ok": True, "ready": True, "status": "done", "analysis": analysis}
 
     # 检查是否有错误记录（上次分析失败）
@@ -616,8 +626,14 @@ async def batch_grade(request: Request, qid: str):
         update_submission_record(qid, sid, name, student_path.stem, "analyzing" if not is_dxf else "grading")
         try:
             if is_dxf:
+                # DXF 路径防误：确保拿到的是 .dxf 文件
+                if student_path.suffix.lower() != ".dxf":
+                    raise RuntimeError(
+                        f"学生提交文件不是 DXF（实际为 {student_path.suffix}），"
+                        "请检查数据目录是否完整")
                 # DXF 流程：统一入口
                 from services.dxf_service import run_dxf_grade
+                required_frames_dxf = q_info.get("required_frames", [])
                 stu_dxf_data, result = run_dxf_grade(
                     student_dxf_path=student_path,
                     ref_data=ref_analysis,
@@ -625,6 +641,7 @@ async def batch_grade(request: Request, qid: str):
                     phase1_criteria=phase1_criteria,
                     phase2_criteria=phase2_criteria,
                     knowledge=knowledge,
+                    required_frames=required_frames_dxf or None,
                 )
                 save_student_analysis(qid, sid, name, stu_dxf_data)
             else:
@@ -691,6 +708,16 @@ async def batch_clear_grades(request: Request, qid: str):
     if not student_ids:
         raise HTTPException(status_code=400, detail="请选择至少一名学生")
 
+    # 判断题目类型，确定保留的原始文件后缀
+    q_info = get_question(qid)
+    sub_type = q_info.get("submission_type", "pdf") if q_info else "pdf"
+    if sub_type == "dxf":
+        keep_suffixes = {".dxf"}
+    elif sub_type == "pdf":
+        keep_suffixes = {".pdf"}
+    else:
+        keep_suffixes = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+
     student_dir = get_student_dir(qid)
     cleared = 0
     for sid in student_ids:
@@ -700,14 +727,16 @@ async def batch_clear_grades(request: Request, qid: str):
             safe_name = _sanitize_filename_part(name)
             safe_id = _sanitize_filename_part(sid)
             stem = f"{safe_name}_{safe_id}"
-            # 删除分析/结果 JSON 文件（保留 PDF/PNG 原文件）
+            # 删除分析/渲染/处理文件，保留原始提交文件
             if student_dir.exists():
                 for f in list(student_dir.iterdir()):
-                    if f.suffix.lower() in (".pdf", ".png"):
-                        continue
                     if f.stem == stem or f.stem.startswith(stem + "_"):
+                        # 原始提交文件不删（仅删分析/渲染/处理文件）
+                        if (f.suffix.lower() in keep_suffixes
+                                and f.stem == stem):
+                            continue
                         f.unlink()
-                        logger.info(f"[{qid}] 已删除分析文件: {f.name}")
+                        logger.info(f"[{qid}] 已删除: {f.name}")
             # 删除成绩记录
             remove_grade(qid, sid)
             # 更新提交状态为 uploaded（尚未评分）
@@ -1100,7 +1129,7 @@ def _mask_api_key(key: str) -> str:
 async def get_settings(request: Request):
     """获取完整的教师可配置设置。api_key 已脱敏，不可通过前端获取原始值。"""
     _require_auth(request)
-    from config import get_llm_params, get_image_params, get_dxf_params, get_grade_thresholds, get_prompt_templates, get_scoring_templates
+    from config import get_llm_params, get_image_params, get_dxf_params, get_grade_thresholds, get_prompt_templates, get_scoring_templates, read_settings_debug
     settings = read_settings()
     raw_thresholds = settings.get("grade_thresholds", {})
     if not raw_thresholds:
@@ -1113,6 +1142,9 @@ async def get_settings(request: Request):
         sm = dict(m)
         sm["api_key"] = _mask_api_key(sm.get("api_key", ""))
         safe_models.append(sm)
+    # 读取学生 session 超时
+    debug = read_settings_debug()
+    student_timeout = debug.get("sessions", {}).get("student_timeout_minutes", 5)
     return {
         "models": safe_models,
         "llm_active": settings.get("llm_active", 0),
@@ -1122,6 +1154,7 @@ async def get_settings(request: Request):
         "grade_thresholds": raw_thresholds,
         "prompt_templates": get_prompt_templates(),
         "scoring_templates": get_scoring_templates(),
+        "student_timeout_minutes": student_timeout,
     }
 
 
@@ -1153,6 +1186,19 @@ async def update_settings(request: Request):
             settings[section] = {**settings.get(section, {}), **body[section]}
 
     # 密码修改走哈希流程
+    if "student_timeout_minutes" in body:
+        timeout_val = int(body["student_timeout_minutes"])
+        # 同步到 settings_debug.json
+        from config import read_settings_debug
+        debug = read_settings_debug()
+        if "sessions" not in debug:
+            debug["sessions"] = {}
+        debug["sessions"]["student_timeout_minutes"] = timeout_val
+        from config import SETTINGS_DEBUG_FILE
+        import json as _json
+        SETTINGS_DEBUG_FILE.write_text(
+            _json.dumps(debug, ensure_ascii=False, indent=2))
+
     if "teacher_password" in body and body["teacher_password"]:
         change_password(body["teacher_password"])
         write_settings(settings)   # 写入其他设置项
@@ -1640,3 +1686,71 @@ async def select_q_template(request: Request, qid: str, body: dict):
     content = get_template(ttype)
     save_question_template(qid, content)
     return {"ok": True, "content": content}
+
+
+# ── 工具：DXF 重叠线清理 ──────────────────────────────────
+
+@router.post("/tools/clean-overlap")
+async def tool_clean_overlap(request: Request, file: UploadFile = File(...)):
+    """上传 DXF → 预处理（多段线爆炸）→ 清理重叠线 → 返回清理后的 DXF + PNG 预览"""
+    _require_auth(request)
+
+    import tempfile, os
+    from services.dxf_service import preprocess_dxf, clean_dxf_and_save, render_dxf_preview
+
+    # 校验文件类型
+    if not file.filename or not file.filename.lower().endswith(".dxf"):
+        raise HTTPException(status_code=400, detail="请上传 .dxf 文件")
+
+    # 保存上传到临时目录
+    tmp_dir = Path(tempfile.mkdtemp(prefix="clean_overlap_"))
+    src_path = tmp_dir / "input.dxf"
+    content = await file.read()
+    src_path.write_bytes(content)
+
+    try:
+        # Step 1: 预处理（多段线爆炸）
+        processed_path = tmp_dir / "processed.dxf"
+        preprocess_dxf(src_path, processed_path)
+
+        # Step 2: 清理重叠线
+        clean_path = tmp_dir / "cleaned.dxf"
+        clean_dxf_and_save(processed_path, clean_path)
+
+        # Step 3: 渲染预览图（无尺寸，便于看清图形）
+        preview_path = tmp_dir / "preview.png"
+        render_dxf_preview(clean_path, preview_path, skip_dimensions=True)
+
+        # 复制预览图到持久缓存目录（供前端查看）
+        cache_dir = Path(tempfile.gettempdir()) / "clean_overlap_cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        preview_cache = cache_dir / f"{tmp_dir.name}.png"
+        import shutil
+        shutil.copy2(preview_path, preview_cache)
+
+        # 返回清理后的 DXF 供下载
+        from fastapi.responses import FileResponse
+        download_name = f"{Path(file.filename).stem}_clean.dxf"
+        return FileResponse(
+            str(clean_path),
+            media_type="application/dxf",
+            filename=download_name,
+            headers={
+                "X-Preview-ID": tmp_dir.name,
+            }
+        )
+    except Exception as e:
+        import shutil
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise HTTPException(status_code=500, detail=f"处理失败: {e}")
+
+
+@router.get("/tools/clean-preview/{preview_id}")
+async def tool_clean_preview(preview_id: str):
+    """返回清理后的 PNG 预览图"""
+    import tempfile
+    png_path = Path(tempfile.gettempdir()) / "clean_overlap_cache" / f"{preview_id}.png"
+    if not png_path.exists():
+        raise HTTPException(status_code=404, detail="预览文件已过期")
+    from fastapi.responses import FileResponse
+    return FileResponse(str(png_path), media_type="image/png")
