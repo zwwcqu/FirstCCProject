@@ -2000,7 +2000,11 @@ export default function TeacherDashboard() {
                             )}
                           </div>
                         ) : (
-                          <>
+                          <details className="mb-2">
+                            <summary className="text-xs text-blue-700 cursor-pointer hover:underline font-medium">
+                              图片分析结果
+                            </summary>
+                            <div className="mt-2">
                         {studentAnalysis.工程图概述 && (
                           <div className="p-2 bg-blue-50 rounded border border-blue-100 mb-2">
                             <p className="text-xs text-blue-500 mb-1 font-medium">工程图概述</p>
@@ -2034,7 +2038,7 @@ export default function TeacherDashboard() {
                         {studentAnalysis.技术要求 && (
                           <div className="p-2 bg-yellow-50 rounded border border-yellow-100"><p className="text-yellow-600 mb-1 font-medium">技术要求</p><p className="text-gray-700 whitespace-pre-wrap">{studentAnalysis.技术要求}</p></div>
                         )}
-                        </>
+                        </div></details>
                       )}
                       </div>
                     </details>

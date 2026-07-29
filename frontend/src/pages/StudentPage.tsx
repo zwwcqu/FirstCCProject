@@ -1011,6 +1011,12 @@ export default function StudentPage() {
                   </div>
                 )}
 
+                <details className="mb-2">
+                  <summary className="text-xs text-blue-700 cursor-pointer hover:underline font-medium">
+                    图片分析结果
+                  </summary>
+                  <div className="mt-2">
+
                 {/* 工程图概述 */}
                 {analysisData.工程图概述 && (
                   <div className="mb-2 p-2 bg-blue-50 rounded border border-blue-100">
@@ -1096,6 +1102,7 @@ export default function StudentPage() {
                   <summary className="text-xs text-gray-400 cursor-pointer hover:underline">原始 JSON（调试用）</summary>
                   <pre className="text-xs bg-gray-100 p-2 rounded mt-1 overflow-auto max-h-48 whitespace-pre-wrap">{JSON.stringify(analysisData, null, 2)}</pre>
                 </details>
+                  </div></details>
                   </>
                 )}
               </div>
