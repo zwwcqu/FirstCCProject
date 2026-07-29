@@ -1178,7 +1178,11 @@ export default function TeacherDashboard() {
                     })()}
                   </div>
                 ) : (
-                  <>
+                  <details className="mt-2">
+                    <summary className="text-xs text-blue-700 cursor-pointer hover:underline font-medium">
+                      图片分析结果
+                    </summary>
+                    <div className="mt-2">
 
                 {/* 工程图概述 */}
                 {analysis.工程图概述 && (
@@ -1297,6 +1301,7 @@ export default function TeacherDashboard() {
                 )}
 
                 {/* 原始 JSON */}
+                </div></details>
                 <details>
                   <summary className="text-xs text-gray-400 cursor-pointer hover:underline">原始 JSON（调试用）</summary>
                   <pre className="text-xs bg-gray-100 p-2 rounded mt-1 overflow-auto max-h-48 whitespace-pre-wrap">{JSON.stringify(analysis, null, 2)}</pre>
