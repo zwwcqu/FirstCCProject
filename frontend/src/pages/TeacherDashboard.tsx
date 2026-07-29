@@ -971,12 +971,11 @@ export default function TeacherDashboard() {
                         <>
                           <button onClick={() => handleEdit(q)} className="text-blue-600 hover:underline">编辑</button>
                           <button onClick={() => handleDelete(q.id)} className="text-red-600 hover:underline">删除</button>
-                          <button onClick={() => handleEditTemplate(q.id)} className="text-purple-600 hover:underline">模板</button>
                         </>
                       ) : (
                         <span className="text-gray-300 text-xs">只读</span>
                       )}
-                      <button onClick={() => handleViewGrades(q.id)} className="text-green-600 hover:underline">成绩</button>
+                      <button onClick={() => handleViewGrades(q.id)} className="text-green-600 hover:underline">查看作业</button>
                     </td>
                   </tr>
                   );
