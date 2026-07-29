@@ -628,7 +628,7 @@ def clear_student_data(qid: str, student_id: str, name: str, class_name: str = "
     submissions.pop(student_id, None)
     _save_submissions(qid, submissions)
 
-    return stem
+    return new_stem
 
 
 def save_student_analysis(qid: str, student_id: str, name: str, analysis: dict, class_name: str = "") -> None:
