@@ -1150,7 +1150,7 @@ export default function TeacherDashboard() {
                       const views = af.length > 0 ? af : Object.keys(analysis.view_overlap_ratios);
                       return (
                       <div className="bg-purple-50 rounded p-2 mt-2">
-                        <p className="text-xs text-purple-700 font-medium mb-1">重叠率 <span class="font-normal text-gray-400">(原始−clean)÷clean</span></p>
+                        <p className="text-xs text-purple-700 font-medium mb-1">重叠率 <span className="font-normal text-gray-400">(原始−clean)÷clean</span></p>
                         <p className="text-xs text-gray-400 mb-1">0%=无重叠，越大重叠越多</p>
                         <div className="space-y-0.5 text-xs text-gray-600">
                           {views.map((vname: string) => {
@@ -1301,12 +1301,12 @@ export default function TeacherDashboard() {
                 )}
 
                 {/* 原始 JSON */}
-                </div></details>
-                <details>
+                </div>
+                <details className="mt-2">
                   <summary className="text-xs text-gray-400 cursor-pointer hover:underline">原始 JSON（调试用）</summary>
                   <pre className="text-xs bg-gray-100 p-2 rounded mt-1 overflow-auto max-h-48 whitespace-pre-wrap">{JSON.stringify(analysis, null, 2)}</pre>
                 </details>
-                </>
+                </details>
               )}
               </div>
             </div>
@@ -2075,7 +2075,7 @@ export default function TeacherDashboard() {
                       const views = af.length > 0 ? af : Object.keys(ov);
                       return (
                         <div className="bg-purple-50 rounded p-3">
-                          <p className="font-medium text-purple-700 text-sm mb-2">重叠率 <span class="font-normal text-gray-400">(原始−clean)÷clean</span></p>
+                          <p className="font-medium text-purple-700 text-sm mb-2">重叠率 <span className="font-normal text-gray-400">(原始−clean)÷clean</span></p>
                           <p className="text-xs text-gray-400 mb-1">0%=无重叠，越大重叠越多</p>
                           <div className="space-y-1 text-xs">
                             {views.map((vname: string) => {
@@ -2107,7 +2107,7 @@ export default function TeacherDashboard() {
                     {/* 重合度 */}
                     {studentGradeResult?.view_coincidence && Object.keys(studentGradeResult.view_coincidence).length > 0 && (
                       <div className="bg-purple-50 rounded p-3">
-                        <p className="font-medium text-purple-700 text-sm mb-2">重合度 <span class="font-normal text-gray-400">∩÷参考图</span></p>
+                        <p className="font-medium text-purple-700 text-sm mb-2">重合度 <span className="font-normal text-gray-400">∩÷参考图</span></p>
                           <p className="text-xs text-gray-400 mb-1">100%=完全重合，越小表示漏画越多</p>
                         <div className="space-y-1 text-xs">
                           {Object.entries(studentGradeResult.view_coincidence).map(([vname, vdata]: [string, any]) => {

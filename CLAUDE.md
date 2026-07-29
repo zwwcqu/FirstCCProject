@@ -47,6 +47,10 @@ cd frontend && npm run build
 
 In production, the FastAPI server serves the built frontend SPA from `frontend/dist/`. CORS is wide open (`allow_origins=["*"]`) for LAN access.
 
+## 修改前端的注意事项
+
+修改 TSX/TS 文件后必须运行 `npm run build`（或 `npx vite build`）确认构建成功，**不能只依赖 `npx tsc --noEmit`**——它不会发现 JSX 结构错误（如未闭合标签、多余闭合），这些错误会导致生产构建失败，用户打开页面空白。
+
 ## Architecture
 
 ```
