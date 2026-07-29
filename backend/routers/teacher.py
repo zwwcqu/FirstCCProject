@@ -698,6 +698,28 @@ async def get_grades(request: Request, qid: str):
     return {"qid": qid, "grades": all_rows, "columns": FIELDNAMES}
 
 
+@router.get("/grades/{qid}/csv")
+async def download_grades_csv(request: Request, qid: str):
+    """下载成绩 CSV 文件"""
+    _require_auth(request)
+    from fastapi.responses import FileResponse
+    csv_path = get_grades_csv_path(qid)
+    if not csv_path.exists():
+        raise HTTPException(status_code=404, detail="暂无成绩数据")
+    import urllib.parse
+    csv_name = f"成绩+{qid}.csv"
+    return FileResponse(
+        str(csv_path),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{qid}.csv"; '
+                f"filename*=UTF-8''{urllib.parse.quote(csv_name, safe='')}"
+            )
+        },
+    )
+
+
 @router.post("/grades/{qid}/batch-grade")
 async def batch_grade(request: Request, qid: str):
     """批量评分：对选中的学生启动后台评分任务"""

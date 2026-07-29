@@ -324,6 +324,23 @@ export async function downloadHomeworkZip(qid: string, className?: string): Prom
   URL.revokeObjectURL(a.href);
 }
 
+/** 通过 fetch 下载成绩 CSV */
+export async function downloadGradesCsv(qid: string): Promise<void> {
+  const resp = await fetch(`${BASE}/api/teacher/grades/${qid}/csv`, { credentials: "include" });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ detail: resp.statusText }));
+    throw new Error(err.detail || `下载失败 (HTTP ${resp.status})`);
+  }
+  const blob = await resp.blob();
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `成绩+${qid}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(a.href);
+}
+
 export function getStudentFileUrl(qid: string, filename: string, ts?: number): string {
   const t = ts ? `?t=${ts}` : "";
   return `${BASE}/api/student/files/${qid}/${filename}${t}`;

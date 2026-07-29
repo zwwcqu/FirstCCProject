@@ -20,6 +20,7 @@ import {
   triggerAnalysis,
   getAnalysisResult,
   downloadHomeworkZip,
+  downloadGradesCsv,
   getTeacherPreviewUrl,
   batchGrade,
   batchClearGrades,
@@ -976,6 +977,7 @@ export default function TeacherDashboard() {
                         <span className="text-gray-300 text-xs">只读</span>
                       )}
                       <button onClick={() => handleViewGrades(q.id)} className="text-green-600 hover:underline">查看作业</button>
+                      <button onClick={() => downloadGradesCsv(q.id).catch(e => alert(e.message))} className="text-amber-600 hover:underline">下载成绩</button>
                     </td>
                   </tr>
                   );
