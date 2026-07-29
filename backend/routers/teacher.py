@@ -253,10 +253,16 @@ async def logout(request: Request, response: Response):
 
 @router.get("/check")
 async def check_login(request: Request):
-    """检查登录状态，用于前端页面刷新时验证"""
+    """检查登录状态，用于前端页面刷新时自动恢复登录"""
     token = request.cookies.get(TEACHER_COOKIE)
     if token and validate_session(token):
-        return {"ok": True}
+        from auth import get_session_data
+        data = get_session_data(token) or {}
+        return {
+            "ok": True,
+            "name": data.get("teacher_name", ""),
+            "username": data.get("teacher_username", ""),
+        }
     raise HTTPException(status_code=401)
 
 

@@ -436,6 +436,17 @@ def destroy_session(token: str) -> None:
     logger.info(f"Session 已销毁: {token[:8]}…")
 
 
+def get_session_data(token: str) -> dict | None:
+    """读取 session 文件中存储的数据（教师姓名/用户名等）"""
+    sf = _session_file(token)
+    if not sf.exists():
+        return None
+    try:
+        return json.loads(sf.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
 def _validate(token: str, store: dict[str, datetime], timeout: timedelta) -> bool:
     """校验 session。内存优先，文件后备"""
     # 1. 内存命中

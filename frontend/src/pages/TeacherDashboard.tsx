@@ -202,7 +202,10 @@ export default function TeacherDashboard() {
   }, [navigate]);
 
   useEffect(() => {
-    checkLogin().catch(() => navigate("/teacher"));
+    checkLogin().then((res: any) => {
+      if (res?.name) sessionStorage.setItem("teacher_name", res.name);
+      if (res?.username) sessionStorage.setItem("teacher_username", res.username);
+    }).catch(() => navigate("/teacher"));
     loadQuestions();
     // 加载班别列表（供表单复选框使用）
     getClasses().then((data: any) => { setClasses(data.classes || []); }).catch(() => {});
