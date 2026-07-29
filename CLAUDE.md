@@ -49,7 +49,9 @@ In production, the FastAPI server serves the built frontend SPA from `frontend/d
 
 ## 修改前端的注意事项
 
-修改 TSX/TS 文件后必须运行 `npm run build`（或 `npx vite build`）确认构建成功，**不能只依赖 `npx tsc --noEmit`**——它不会发现 JSX 结构错误（如未闭合标签、多余闭合），这些错误会导致生产构建失败，用户打开页面空白。
+修改前端 TSX/TS 文件后必须运行 `npm run build`（或 `npx vite build`）确认构建成功，**不能只依赖 `npx tsc --noEmit`**——它不会发现 JSX 结构错误（如未闭合标签、多余闭合），这些错误会导致生产构建失败，用户打开页面空白。
+
+修改后端 Python 函数后，**必须启动服务器并用 curl 测试受影响的 API 端点**，不能只做 `py_compile` 或 import 检查——变量重命名、函数签名变更等会导致运行时 NameError / TypeError，编译检查发现不了。涉及核心流程（提交作业、评分、文件命名）的修改尤其需要端到端测试。
 
 ## Architecture
 
