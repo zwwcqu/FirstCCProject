@@ -669,6 +669,7 @@ def get_student_analysis(qid: str, student_id: str, name: str, class_name: str =
     student_dir = get_student_dir(qid)
     if not class_name:
         class_name = find_student_class(name, student_id)
+    safe_class = _sanitize_filename_part(class_name) if class_name else ""
     safe_id = _sanitize_filename_part(student_id)
     safe_name = _sanitize_filename_part(name)
     stem = _build_student_stem(safe_class, safe_id, safe_name)
