@@ -482,9 +482,19 @@ async def download_homework(
     # 内存中构建 ZIP
     buf = io.BytesIO()
     student_dir = get_student_dir(qid)
+    qdir = get_question_dir(qid)
     count = 0
 
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        # 加入原题答案文件（参考工程图）
+        ref_names = {"pdf": "参考工程图.pdf", "dxf": "参考工程图.dxf", "image": "参考工程图.png"}
+        ref_name = ref_names.get(submission_type)
+        if ref_name:
+            ref_fp = qdir / ref_name
+            if ref_fp.is_file():
+                zf.write(str(ref_fp), f"参考答案/{ref_fp.name}")
+
+        # 学生提交文件
         for sid, rec in sorted(filtered.items()):
             stem = rec.get("filename", "")
             if not stem:
