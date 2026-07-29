@@ -19,6 +19,7 @@ import {
   getScoringTemplates,
   triggerAnalysis,
   getAnalysisResult,
+  downloadHomeworkZip,
   getTeacherPreviewUrl,
   batchGrade,
   batchClearGrades,
@@ -836,7 +837,7 @@ export default function TeacherDashboard() {
                   <th className="text-left p-2">题号</th>
                   <th className="text-left p-2">标题</th>
                   <th className="text-left p-2">教师</th>
-                  <th className="text-left p-2">班别</th>
+                  <th className="text-left p-2">下载作业</th>
                   <th className="text-left p-2">截止时间</th>
                   <th className="text-center p-2">参考图分析</th>
                   <th className="text-right p-2">操作</th>
@@ -851,7 +852,40 @@ export default function TeacherDashboard() {
                     <td className="p-2 font-mono">{q.id}</td>
                     <td className="p-2">{q.title}</td>
                     <td className="p-2 text-sm text-gray-600">{ (q as any).teacher || "-" }</td>
-                    <td className="p-2 text-sm text-gray-600">{ (q as any).classes || "-" }</td>
+                    <td className="p-2">
+                      <div className="flex flex-wrap gap-1">
+                        {(() => {
+                          const classes = ((q as any).classes || "").split(",").map(c => c.trim()).filter(Boolean);
+                          const links: JSX.Element[] = [];
+                          const doDownload = (cls?: string) => {
+                            downloadHomeworkZip(q.id, cls).catch(e => alert(e.message));
+                          };
+                          // 每个班一个下载按钮
+                          for (const cls of classes) {
+                            links.push(
+                              <button key={cls}
+                                onClick={() => doDownload(cls)}
+                                className="inline-block bg-blue-50 text-blue-700 px-2 py-0.5 rounded text-xs hover:bg-blue-100 whitespace-nowrap cursor-pointer"
+                                title={`下载「${cls}」作业`}
+                              >
+                                {cls}
+                              </button>
+                            );
+                          }
+                          // 全部作业
+                          links.push(
+                            <button key="_all"
+                              onClick={() => doDownload()}
+                              className="inline-block bg-green-50 text-green-700 px-2 py-0.5 rounded text-xs hover:bg-green-100 whitespace-nowrap cursor-pointer"
+                              title="下载全部作业"
+                            >
+                              全部作业
+                            </button>
+                          );
+                          return links;
+                        })()}
+                      </div>
+                    </td>
                     <td className="p-2 text-sm text-gray-600">
                       {isOwner ? (
                         <span className="cursor-pointer hover:text-blue-600"

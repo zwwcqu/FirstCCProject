@@ -45,6 +45,7 @@ from services.question_service import (
     update_submission_record,
     sync_submissions_from_disk,
     clear_student_data,
+    get_class_students,
     _sanitize_filename_part,
 )
 from services.grade_service import read_all_grades, get_grades_csv_path, FIELDNAMES, save_grade, get_student_grade, remove_grade
@@ -426,6 +427,98 @@ async def delete_question_handler(request: Request, qid: str):
     if not ok:
         raise HTTPException(status_code=404, detail="题目不存在")
     return {"ok": True}
+
+
+# ── 下载作业 ────────────────────────────────────────────
+
+@router.get("/questions/{qid}/download")
+async def download_homework(
+    request: Request,
+    qid: str,
+    class_name: Optional[str] = None,
+):
+    """
+    下载学生提交的原始工程图，打包为 ZIP。
+
+    - 不传 class_name：下载该题目的全部学生作业
+    - 传入 class_name：仅下载指定班级的学生作业
+
+    ZIP 内结构：{班级}/{文件名}  或  全部/{文件名}
+    """
+    _require_auth(request)
+
+    import io
+    import zipfile
+    from fastapi.responses import StreamingResponse
+
+    question = get_question(qid)
+    if not question:
+        raise HTTPException(status_code=404, detail="题目不存在")
+
+    # 根据提交类型决定有效的原始文件扩展名
+    submission_type = question.get("submission_type", "pdf")
+    ext_map = {"pdf": [".pdf"], "image": [".png"], "dxf": [".dxf"]}
+    valid_exts = ext_map.get(submission_type, [".pdf", ".dxf", ".png"])
+
+    # 获取提交记录
+    submissions = get_submissions(qid)
+    if not submissions:
+        raise HTTPException(status_code=404, detail="暂无学生提交")
+
+    # 按班级过滤
+    if class_name:
+        students = get_class_students(class_name)
+        if not students:
+            raise HTTPException(status_code=404, detail=f"班级「{class_name}」不存在或没有学生")
+        allowed_ids = {s["学号"] for s in students}
+        filtered = {sid: rec for sid, rec in submissions.items() if sid in allowed_ids}
+        if not filtered:
+            raise HTTPException(status_code=404, detail=f"班级「{class_name}」暂无学生提交")
+        archive_prefix = f"{class_name}/"
+    else:
+        filtered = submissions
+        archive_prefix = "全部/"
+
+    # 内存中构建 ZIP
+    buf = io.BytesIO()
+    student_dir = get_student_dir(qid)
+    count = 0
+
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for sid, rec in sorted(filtered.items()):
+            stem = rec.get("filename", "")
+            if not stem:
+                continue
+            for ext in valid_exts:
+                fp = student_dir / f"{stem}{ext}"
+                if fp.is_file():
+                    zf.write(str(fp), f"{archive_prefix}{fp.name}")
+                    count += 1
+                    break  # 每个学生只打包一个原始文件
+
+    if count == 0:
+        raise HTTPException(status_code=404, detail="未找到可下载的原始提交文件")
+
+    buf.seek(0)
+
+    # 下载文件名（Content-Disposition 需 ASCII-safe，中文用 filename*）
+    import urllib.parse
+    ts = time.strftime("%Y%m%d")
+    label = (class_name or "全部").replace(" ", "_")
+    ascii_name = f"{qid}_{ts}.zip"
+    full_name = f"{qid}_{label}_{ts}.zip"
+    encoded_name = urllib.parse.quote(full_name, safe="")
+
+    return StreamingResponse(
+        iter([buf.getvalue()]),
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{ascii_name}"; '
+                f"filename*=UTF-8''{encoded_name}"
+            )
+        },
+    )
 
 
 @router.get("/scoring-templates")

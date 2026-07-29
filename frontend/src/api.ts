@@ -296,6 +296,34 @@ export function getQuestionFileUrl(qid: string, filename: string, ts?: number): 
   return `${BASE}/api/teacher/files/${qid}/${filename}${t}`;
 }
 
+export function getHomeworkDownloadUrl(qid: string, className?: string): string {
+  const params = className ? `?class_name=${encodeURIComponent(className)}` : "";
+  return `${BASE}/api/teacher/questions/${qid}/download${params}`;
+}
+
+/** 通过 fetch（带 cookie）下载作业 ZIP，不离开 SPA */
+export async function downloadHomeworkZip(qid: string, className?: string): Promise<void> {
+  const url = getHomeworkDownloadUrl(qid, className);
+  const resp = await fetch(url, { credentials: "include" });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ detail: resp.statusText }));
+    throw new Error(err.detail || `下载失败 (HTTP ${resp.status})`);
+  }
+  // 从 Content-Disposition 提取文件名
+  const cd = resp.headers.get("content-disposition") || "";
+  const match = cd.match(/filename\*?=UTF-8''([^;]+)/i) || cd.match(/filename="([^"]+)"/i);
+  const filename = match ? decodeURIComponent(match[1]) : `${qid}_全部.zip`;
+
+  const blob = await resp.blob();
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(a.href);
+}
+
 export function getStudentFileUrl(qid: string, filename: string, ts?: number): string {
   const t = ts ? `?t=${ts}` : "";
   return `${BASE}/api/student/files/${qid}/${filename}${t}`;
