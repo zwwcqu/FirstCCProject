@@ -23,6 +23,10 @@ export async function api(path: string, options: RequestInit = {}): Promise<any>
 }
 
 // ------- Student -------
+export function checkStudentSession() {
+  return api("/api/student/session");
+}
+
 export function listQuestions() {
   return api("/api/student/questions");
 }

@@ -132,6 +132,21 @@ async def check_identity(request: Request):
     return {"ok": True, "message": "", "class_name": class_name}
 
 
+@router.get("/session")
+async def check_student_session(request: Request):
+    """校验学生 session cookie 是否有效（刷新页面后自动恢复登录）"""
+    from auth import STUDENT_COOKIE, validate_student_session, get_student_session
+    token = request.cookies.get(STUDENT_COOKIE) or ""
+    if not token or not validate_student_session(token):
+        raise HTTPException(status_code=401, detail="未登录或会话已过期")
+    session = get_student_session(token)
+    if not session:
+        raise HTTPException(status_code=401, detail="会话无效")
+    from services.question_service import find_student_class
+    class_name = find_student_class(session.get("name", ""), session.get("student_id", ""))
+    return {"ok": True, "name": session["name"], "student_id": session["student_id"], "class_name": class_name}
+
+
 @router.post("/login")
 async def student_login(request: Request, response: Response):
     """学生登录：验证姓名+学号+密码，返回 session token + password_changed 标志"""

@@ -12,6 +12,7 @@ import {
   checkRoster,
   studentLogin,
   studentChangePassword,
+  checkStudentSession,
   getSubmissionRecord,
   getQuestionFileUrl,
   getStudentPreviewUrl,
@@ -116,6 +117,17 @@ export default function StudentPage() {
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const clearPolling = () => { if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; } };
+  // 页面加载时尝试恢复 session（刷新不丢失登录）
+  useEffect(() => {
+    checkStudentSession().then((res: any) => {
+      if (res?.ok && res.name && res.student_id) {
+        setIdentity({ name: res.name, id: res.student_id, isTest: false, className: res.class_name || "" });
+        loadData(res.class_name || "");
+        loadHistory(res.name, res.student_id);
+      }
+    }).catch(() => {});
+  }, []);
+
   useEffect(() => () => clearPolling(), []);
 
   // 图片浮动预览
