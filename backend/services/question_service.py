@@ -388,11 +388,14 @@ def get_student_submission_path(qid: str, student_id: str, name: str, class_name
     student_dir = get_student_dir(qid)
     if not student_dir.exists():
         return None
-    safe_class = _sanitize_filename_part(class_name) if class_name else ""
     safe_id = _sanitize_filename_part(student_id)
     safe_name = _sanitize_filename_part(name)
-    # 依次尝试：新格式带班别 → 新格式无班别 → 旧格式
-    stems = []
+    # 收集所有可能的 stem：新格式带班别 → 新格式无班别 → 旧格式
+    stems: list[str] = []
+    # 如果未传入班别，尝试从名单查找
+    if not class_name:
+        class_name = find_student_class(name, student_id)
+    safe_class = _sanitize_filename_part(class_name) if class_name else ""
     if safe_class:
         stems.append(_build_student_stem(safe_class, safe_id, safe_name))
     stems.append(f"{safe_id}_{safe_name}")
