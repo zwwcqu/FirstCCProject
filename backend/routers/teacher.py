@@ -886,7 +886,10 @@ async def batch_clear_grades(request: Request, qid: str):
             safe_name = _sanitize_filename_part(name)
             safe_id = _sanitize_filename_part(sid)
             stems = [f"{safe_name}_{safe_id}"]
+            from services.question_service import find_student_class
             class_name = rec.get("class_name", "") if rec else ""
+            if not class_name:
+                class_name = find_student_class(name, sid)
             if class_name:
                 safe_class = _sanitize_filename_part(class_name)
                 from services.question_service import _build_student_stem
