@@ -317,6 +317,7 @@ export default function TeacherDashboard() {
   };
 
   const handleCreate = async () => {
+    if (!qClasses.length) { alert("请至少选择一个班别"); return; }
     const fd = new FormData();
     fd.append("qid", qid);
     fd.append("title", title);
@@ -345,6 +346,7 @@ export default function TeacherDashboard() {
 
   const handleUpdate = async () => {
     if (!editingId) return;
+    if (!qClasses.length) { alert("请至少选择一个班别"); return; }
     const fd = new FormData();
     fd.append("title", title);
     fd.append("description", description);

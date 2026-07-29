@@ -332,6 +332,9 @@ async def create_question_handler(
     except (json.JSONDecodeError, ValueError):
         parsed_frames = []
 
+    if not classes.strip():
+        raise HTTPException(status_code=400, detail="请至少选择一个班别")
+
     try:
         entry = create_question(qid, title, description, phase1_criteria, phase2_criteria,
                                 knowledge, submission_type, teacher=teacher, classes=classes,
@@ -384,6 +387,9 @@ async def update_question_handler(
             parsed_frames = []
     except (json.JSONDecodeError, ValueError):
         parsed_frames = []
+
+    if not classes.strip():
+        raise HTTPException(status_code=400, detail="请至少选择一个班别")
 
     try:
         entry = update_question(qid, title, description, phase1_criteria, phase2_criteria,
@@ -891,14 +897,14 @@ async def batch_clear_grades(request: Request, qid: str):
                     if any(f.stem == s or f.stem.startswith(s + "_") for s in stems):
                         # 原始提交文件不删（仅删分析/渲染/处理文件）
                         if (f.suffix.lower() in keep_suffixes
-                                and f.stem == stem):
+                                and f.stem == stems[0]):
                             continue
                         f.unlink()
                         logger.info(f"[{qid}] 已删除: {f.name}")
             # 删除成绩记录
             remove_grade(qid, sid)
             # 更新提交状态为 uploaded（尚未评分）
-            update_submission_record(qid, sid, name, stem, "uploaded")
+            update_submission_record(qid, sid, name, stems[0], "uploaded")
             cleared += 1
 
     return {"ok": True, "cleared": cleared}
