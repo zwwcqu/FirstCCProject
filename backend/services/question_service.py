@@ -604,6 +604,8 @@ def clear_student_data(qid: str, student_id: str, name: str, class_name: str = "
     """
     import glob as _glob
     student_dir = get_student_dir(qid)
+    if not class_name:
+        class_name = find_student_class(name, student_id)
     safe_class = _sanitize_filename_part(class_name) if class_name else ""
     safe_id = _sanitize_filename_part(student_id)
     safe_name = _sanitize_filename_part(name)
@@ -633,6 +635,8 @@ def save_student_analysis(qid: str, student_id: str, name: str, analysis: dict, 
     """保存识读分析数据 → data/{qid}/student/{班别}_{学号}_{姓名}_分析.json"""
     student_dir = get_student_dir(qid)
     student_dir.mkdir(parents=True, exist_ok=True)
+    if not class_name:
+        class_name = find_student_class(name, student_id)
     safe_class = _sanitize_filename_part(class_name) if class_name else ""
     safe_id = _sanitize_filename_part(student_id)
     safe_name = _sanitize_filename_part(name)
@@ -649,6 +653,8 @@ def save_student_grade(qid: str, student_id: str, name: str, grade_result: dict,
     """保存评分结果 → data/{qid}/student/{班别}_{学号}_{姓名}_评分.json"""
     student_dir = get_student_dir(qid)
     student_dir.mkdir(parents=True, exist_ok=True)
+    if not class_name:
+        class_name = find_student_class(name, student_id)
     safe_class = _sanitize_filename_part(class_name) if class_name else ""
     safe_id = _sanitize_filename_part(student_id)
     safe_name = _sanitize_filename_part(name)
@@ -661,7 +667,8 @@ def save_student_grade(qid: str, student_id: str, name: str, grade_result: dict,
 def get_student_analysis(qid: str, student_id: str, name: str, class_name: str = "") -> dict | None:
     """读取识读分析数据"""
     student_dir = get_student_dir(qid)
-    safe_class = _sanitize_filename_part(class_name) if class_name else ""
+    if not class_name:
+        class_name = find_student_class(name, student_id)
     safe_id = _sanitize_filename_part(student_id)
     safe_name = _sanitize_filename_part(name)
     stem = _build_student_stem(safe_class, safe_id, safe_name)
@@ -686,6 +693,8 @@ def get_student_analysis(qid: str, student_id: str, name: str, class_name: str =
 def get_student_grade_json(qid: str, student_id: str, name: str, class_name: str = "") -> dict | None:
     """读取评分结果 JSON"""
     student_dir = get_student_dir(qid)
+    if not class_name:
+        class_name = find_student_class(name, student_id)
     safe_class = _sanitize_filename_part(class_name) if class_name else ""
     safe_id = _sanitize_filename_part(student_id)
     safe_name = _sanitize_filename_part(name)
