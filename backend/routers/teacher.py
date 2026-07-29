@@ -584,6 +584,17 @@ def _get_derived_status(qid: str, sid: str, name: str, rec: dict | None) -> str:
     student_dir = get_student_dir(qid)
     safe_name = _sanitize_filename_part(name or (rec.get("name", "") if rec else sid))
     safe_id = _sanitize_filename_part(sid)
+    # 新格式：{班别}_{学号}_{姓名}
+    class_name = rec.get("class_name", "") if rec else ""
+    if class_name:
+        safe_class = _sanitize_filename_part(class_name)
+        from services.question_service import _build_student_stem
+        stem = _build_student_stem(safe_class, safe_id, safe_name)
+        if (student_dir / f"{stem}_评分.json").exists():
+            return "graded"
+        if (student_dir / f"{stem}_分析.json").exists():
+            return "analyzed"
+    # 旧格式 {姓名}_{学号} 兼容
     if (student_dir / f"{safe_name}_{safe_id}_评分.json").exists():
         return "graded"
     if (student_dir / f"{safe_name}_{safe_id}_分析.json").exists():
@@ -651,8 +662,19 @@ async def get_grades(request: Request, qid: str):
         student_dir = get_student_dir(qid)
         safe_name_json = _sanitize_filename_part(name or (rec.get("name", "") if rec else ""))
         safe_id_json = _sanitize_filename_part(sid)
-        result_path = student_dir / f"{safe_name_json}_{safe_id_json}.json"
-        if result_path.exists():
+        cls = rec.get("class_name", "") if rec else ""
+        stems_to_try = [f"{safe_name_json}_{safe_id_json}"]
+        if cls:
+            safe_cls_json = _sanitize_filename_part(cls)
+            from services.question_service import _build_student_stem
+            stems_to_try.insert(0, _build_student_stem(safe_cls_json, safe_id_json, safe_name_json))
+        result_path = None
+        for s in stems_to_try:
+            p = student_dir / f"{s}.json"
+            if p.exists():
+                result_path = p
+                break
+        if result_path and result_path.exists():
             try:
                 rj = _json.loads(result_path.read_text(encoding="utf-8"))
                 row["_model"] = rj.get("_model", "")
@@ -819,11 +841,16 @@ async def batch_clear_grades(request: Request, qid: str):
         if name:
             safe_name = _sanitize_filename_part(name)
             safe_id = _sanitize_filename_part(sid)
-            stem = f"{safe_name}_{safe_id}"
+            stems = [f"{safe_name}_{safe_id}"]
+            class_name = rec.get("class_name", "") if rec else ""
+            if class_name:
+                safe_class = _sanitize_filename_part(class_name)
+                from services.question_service import _build_student_stem
+                stems.insert(0, _build_student_stem(safe_class, safe_id, safe_name))
             # 删除分析/渲染/处理文件，保留原始提交文件
             if student_dir.exists():
                 for f in list(student_dir.iterdir()):
-                    if f.stem == stem or f.stem.startswith(stem + "_"):
+                    if any(f.stem == s or f.stem.startswith(s + "_") for s in stems):
                         # 原始提交文件不删（仅删分析/渲染/处理文件）
                         if (f.suffix.lower() in keep_suffixes
                                 and f.stem == stem):
@@ -980,8 +1007,19 @@ async def refresh_grades(request: Request, qid: str):
         student_dir = get_student_dir(qid)
         safe_name_json = _sanitize_filename_part(name or (rec.get("name", "") if rec else ""))
         safe_id_json = _sanitize_filename_part(sid)
-        result_path = student_dir / f"{safe_name_json}_{safe_id_json}.json"
-        if result_path.exists():
+        cls = rec.get("class_name", "") if rec else ""
+        stems_to_try = [f"{safe_name_json}_{safe_id_json}"]
+        if cls:
+            safe_cls_json = _sanitize_filename_part(cls)
+            from services.question_service import _build_student_stem
+            stems_to_try.insert(0, _build_student_stem(safe_cls_json, safe_id_json, safe_name_json))
+        result_path = None
+        for s in stems_to_try:
+            p = student_dir / f"{s}.json"
+            if p.exists():
+                result_path = p
+                break
+        if result_path and result_path.exists():
             try:
                 rj = _json.loads(result_path.read_text(encoding="utf-8"))
                 row["_model"] = rj.get("_model", "")
@@ -1083,10 +1121,20 @@ async def teacher_student_preview(request: Request, qid: str, student_id: str):
     if rec:
         name = rec.get("name", "")
         safe_name = _sanitize_filename_part(name)
-        png_path = sdir / f"{safe_name}_{safe_id}.png"
-        if png_path.exists():
-            return FileResponse(str(png_path), media_type="image/png")
-        student_path = get_student_submission_path(qid, student_id, name)
+        class_name = rec.get("class_name", "")
+        # 新格式带班别
+        if class_name:
+            safe_class = _sanitize_filename_part(class_name)
+            from services.question_service import _build_student_stem
+            png_path = sdir / f"{_build_student_stem(safe_class, safe_id, safe_name)}.png"
+            if png_path.exists():
+                return FileResponse(str(png_path), media_type="image/png")
+        # 新格式无班别 / 旧格式
+        for stem in (f"{safe_id}_{safe_name}", f"{safe_name}_{safe_id}"):
+            png_path = sdir / f"{stem}.png"
+            if png_path.exists():
+                return FileResponse(str(png_path), media_type="image/png")
+        student_path = get_student_submission_path(qid, student_id, name, class_name)
         if student_path is not None:
             if student_path.suffix.lower() == ".dxf":
                 # DXF 实时渲染 PNG

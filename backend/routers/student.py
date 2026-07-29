@@ -331,14 +331,20 @@ async def upload_submission(
         from services.llm_service import bytes_to_base64
         bytes_to_base64(file_bytes, fname)
         # 清理旧的分析和评分文件
-        from services.question_service import get_student_dir, _sanitize_filename_part
+        from services.question_service import get_student_dir, _sanitize_filename_part, _build_student_stem, find_student_class
         student_dir = get_student_dir(qid)
         safe_name = _sanitize_filename_part(name)
         safe_id = _sanitize_filename_part(student_id)
-        stem = f"{safe_name}_{safe_id}"
+        class_name = find_student_class(name, student_id)
+        safe_class = _sanitize_filename_part(class_name) if class_name else ""
+        stems = [_build_student_stem(safe_class, safe_id, safe_name)]
+        if safe_class:
+            stems.append(f"{safe_id}_{safe_name}")
+        stems.append(f"{safe_name}_{safe_id}")
         if student_dir.exists():
-            for old in [f"{stem}_分析.json", f"{stem}_评分.json", f"{stem}.json"]:
-                (student_dir / old).unlink(missing_ok=True)
+            for stem in stems:
+                for old in [f"{stem}_分析.json", f"{stem}_评分.json", f"{stem}.json"]:
+                    (student_dir / old).unlink(missing_ok=True)
 
         if not is_test:
             from services.question_service import update_submission_record

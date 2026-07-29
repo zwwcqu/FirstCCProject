@@ -147,16 +147,20 @@ def remove_grade(qid: str, student_id: str) -> None:
             fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
 
-def save_result_json(qid: str, student_id: str, name: str, result: dict) -> None:
+def save_result_json(qid: str, student_id: str, name: str, result: dict, class_name: str = "") -> None:
     """将 LLM 原始批阅结果保存为 JSON（用于调试和归档）"""
-    from services.question_service import _sanitize_filename_part
+    from services.question_service import _sanitize_filename_part, _build_student_stem, find_student_class
 
     student_dir = get_student_dir(qid)
     student_dir.mkdir(parents=True, exist_ok=True)
 
-    safe_name = _sanitize_filename_part(name)
+    if not class_name:
+        class_name = find_student_class(name, student_id)
+    safe_class = _sanitize_filename_part(class_name) if class_name else ""
     safe_id = _sanitize_filename_part(student_id)
-    json_path = student_dir / f"{safe_name}_{safe_id}.json"
+    safe_name = _sanitize_filename_part(name)
+    stem = _build_student_stem(safe_class, safe_id, safe_name)
+    json_path = student_dir / f"{stem}.json"
 
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2)

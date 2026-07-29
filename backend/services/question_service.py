@@ -17,7 +17,7 @@
     题目图片.png          题目附图（可选）
     参考工程图.pdf         参考工程图（可选）
     student/
-      {姓名}_{学号}.pdf   学生提交的作业
+      {班别}_{学号}_{姓名}.pdf   学生提交的作业
 """
 
 from __future__ import annotations
@@ -52,6 +52,13 @@ ROSTER_FILENAME = "学生名单.csv"
 def _sanitize_filename_part(s: str) -> str:
     """剔除文件名中的路径分隔符和不可见控制字符，替换为下划线"""
     return re.sub(r'[\\/:*?"<>|\x00-\x1f]', '_', s)
+
+
+def _build_student_stem(safe_class: str, safe_id: str, safe_name: str) -> str:
+    """学生文件 stem：{班别}_{学号}_{姓名}。班别为空时使用 {学号}_{姓名}"""
+    if safe_class:
+        return f"{safe_class}_{safe_id}_{safe_name}"
+    return f"{safe_id}_{safe_name}"
 
 
 def _get_pdf_validation_dpi() -> int:
@@ -288,15 +295,18 @@ def get_scoring_templates() -> dict:
 
 # ── 学生提交文件存取 ────────────────────────────────────
 
-def save_student_submission(qid: str, student_id: str, name: str, file_bytes: bytes, filename: str) -> str:
+def save_student_submission(qid: str, student_id: str, name: str, file_bytes: bytes, filename: str,
+                             class_name: str = "") -> str:
     """保存学生上传的工程图文件。非 PDF/PNG 图片统一转为 PNG。保存前校验文件格式有效。"""
     from io import BytesIO
 
     student_dir = get_student_dir(qid)
     student_dir.mkdir(parents=True, exist_ok=True)
     ext = Path(filename).suffix.lower()
-    safe_name = _sanitize_filename_part(name)
+    safe_class = _sanitize_filename_part(class_name) if class_name else ""
     safe_id = _sanitize_filename_part(student_id)
+    safe_name = _sanitize_filename_part(name)
+    stem = _build_student_stem(safe_class, safe_id, safe_name)
 
     if ext == ".pdf":
         # 校验 PDF 有效（至少能渲染首页）
@@ -338,7 +348,7 @@ def save_student_submission(qid: str, student_id: str, name: str, file_bytes: by
     else:
         raise ValueError(f"不支持的文件格式: {ext}，请上传 PDF、图片或 DXF 文件")
 
-    path = student_dir / f"{safe_name}_{safe_id}{ext}"
+    path = student_dir / f"{stem}{ext}"
     path.write_bytes(file_bytes)
     return str(path)
 
@@ -346,8 +356,14 @@ def save_student_submission(qid: str, student_id: str, name: str, file_bytes: by
 def submit_student_work(qid: str, student_id: str, name: str,
                         file_bytes: bytes, filename: str) -> str:
     """学生作业提交全流程：清除旧数据 → 保存文件 → PDF 生成 PNG 预览 → 写记录。返回保存的文件名。"""
-    stem = clear_student_data(qid, student_id, name)
-    student_path = save_student_submission(qid, student_id, name, file_bytes, filename)
+    class_name = find_student_class(name, student_id)
+    safe_class = _sanitize_filename_part(class_name) if class_name else ""
+    safe_id = _sanitize_filename_part(student_id)
+    safe_name = _sanitize_filename_part(name)
+    stem = _build_student_stem(safe_class, safe_id, safe_name)
+
+    clear_student_data(qid, student_id, name, class_name)
+    student_path = save_student_submission(qid, student_id, name, file_bytes, filename, class_name)
     saved_name = Path(student_path).name
     file_stem = Path(saved_name).stem
 
@@ -362,32 +378,35 @@ def submit_student_work(qid: str, student_id: str, name: str,
             logger.warning(f"DXF 预览渲染失败（文件仍可正常使用）: {e}")
 
     # 提交时即记录班级信息
-    class_name = find_student_class(name, student_id)
     update_submission_record(qid, student_id, name, file_stem, "uploaded",
                              class_name=class_name)
     return saved_name
 
 
-def get_student_submission_path(qid: str, student_id: str, name: str) -> Path | None:
+def get_student_submission_path(qid: str, student_id: str, name: str, class_name: str = "") -> Path | None:
     """查找学生已提交的文件路径，优先返回原始文件（PDF > DXF > PNG）"""
     student_dir = get_student_dir(qid)
     if not student_dir.exists():
         return None
-    safe_name = _sanitize_filename_part(name)
+    safe_class = _sanitize_filename_part(class_name) if class_name else ""
     safe_id = _sanitize_filename_part(student_id)
-    stem = f"{safe_name}_{safe_id}"
-    # 优先 PDF（原始提交文件）
-    pdf = student_dir / f"{stem}.pdf"
-    if pdf.exists():
-        return pdf
-    # 其次 DXF
-    dxf = student_dir / f"{stem}.dxf"
-    if dxf.exists():
-        return dxf
-    # 最后图片
-    png = student_dir / f"{stem}.png"
-    if png.exists():
-        return png
+    safe_name = _sanitize_filename_part(name)
+    # 依次尝试：新格式带班别 → 新格式无班别 → 旧格式
+    stems = []
+    if safe_class:
+        stems.append(_build_student_stem(safe_class, safe_id, safe_name))
+    stems.append(f"{safe_id}_{safe_name}")
+    stems.append(f"{safe_name}_{safe_id}")
+    for stem in stems:
+        pdf = student_dir / f"{stem}.pdf"
+        if pdf.exists():
+            return pdf
+        dxf = student_dir / f"{stem}.dxf"
+        if dxf.exists():
+            return dxf
+        png = student_dir / f"{stem}.png"
+        if png.exists():
+            return png
     return None
 
 
@@ -570,7 +589,7 @@ def update_submission_record(qid: str, student_id: str, name: str,
     _save_submissions(qid, submissions)
 
 
-def clear_student_data(qid: str, student_id: str, name: str) -> str:
+def clear_student_data(qid: str, student_id: str, name: str, class_name: str = "") -> str:
     """
     清除学生的旧提交数据（重新提交时调用）：
     - 删除旧上传文件
@@ -578,17 +597,20 @@ def clear_student_data(qid: str, student_id: str, name: str) -> str:
     - 删除结果 JSON
     - 从成绩 CSV 中移除
     - 从 submissions.json 中移除
-    返回安全文件名前缀（name_id）
+    返回安全文件名前缀（为兼容旧数据同时删除新旧两种命名格式）
     """
     import glob as _glob
     student_dir = get_student_dir(qid)
-    safe_name = _sanitize_filename_part(name)
+    safe_class = _sanitize_filename_part(class_name) if class_name else ""
     safe_id = _sanitize_filename_part(student_id)
-    stem = f"{safe_name}_{safe_id}"
+    safe_name = _sanitize_filename_part(name)
+    new_stem = _build_student_stem(safe_class, safe_id, safe_name)
+    old_stem = f"{safe_name}_{safe_id}"
 
     if student_dir.exists():
         for f in student_dir.iterdir():
-            if f.stem == stem or f.stem.startswith(stem + "_"):
+            if f.stem == new_stem or f.stem.startswith(new_stem + "_") \
+                    or f.stem == old_stem or f.stem.startswith(old_stem + "_"):
                 f.unlink()
                 logger.info(f"已删除旧文件: {f}")
 
@@ -604,13 +626,14 @@ def clear_student_data(qid: str, student_id: str, name: str) -> str:
     return stem
 
 
-def save_student_analysis(qid: str, student_id: str, name: str, analysis: dict) -> None:
-    """保存识读分析数据 → data/{qid}/student/{姓名}_{学号}_分析.json"""
+def save_student_analysis(qid: str, student_id: str, name: str, analysis: dict, class_name: str = "") -> None:
+    """保存识读分析数据 → data/{qid}/student/{班别}_{学号}_{姓名}_分析.json"""
     student_dir = get_student_dir(qid)
     student_dir.mkdir(parents=True, exist_ok=True)
-    safe_name = _sanitize_filename_part(name)
+    safe_class = _sanitize_filename_part(class_name) if class_name else ""
     safe_id = _sanitize_filename_part(student_id)
-    stem = f"{safe_name}_{safe_id}"
+    safe_name = _sanitize_filename_part(name)
+    stem = _build_student_stem(safe_class, safe_id, safe_name)
     (student_dir / f"{stem}_分析.json").write_text(
         json.dumps(analysis, ensure_ascii=False, indent=2), encoding="utf-8")
     # 清理旧格式
@@ -619,29 +642,36 @@ def save_student_analysis(qid: str, student_id: str, name: str, analysis: dict) 
     logger.info(f"学生识读结果已保存: [{qid}] {name}({student_id})")
 
 
-def save_student_grade(qid: str, student_id: str, name: str, grade_result: dict) -> None:
-    """保存评分结果 → data/{qid}/student/{姓名}_{学号}_评分.json"""
+def save_student_grade(qid: str, student_id: str, name: str, grade_result: dict, class_name: str = "") -> None:
+    """保存评分结果 → data/{qid}/student/{班别}_{学号}_{姓名}_评分.json"""
     student_dir = get_student_dir(qid)
     student_dir.mkdir(parents=True, exist_ok=True)
-    safe_name = _sanitize_filename_part(name)
+    safe_class = _sanitize_filename_part(class_name) if class_name else ""
     safe_id = _sanitize_filename_part(student_id)
-    stem = f"{safe_name}_{safe_id}"
+    safe_name = _sanitize_filename_part(name)
+    stem = _build_student_stem(safe_class, safe_id, safe_name)
     (student_dir / f"{stem}_评分.json").write_text(
         json.dumps(grade_result, ensure_ascii=False, indent=2), encoding="utf-8")
     logger.info(f"学生评分结果已保存: [{qid}] {name}({student_id})")
 
 
-def get_student_analysis(qid: str, student_id: str, name: str) -> dict | None:
-    """读取识读分析数据。兼容旧格式。"""
+def get_student_analysis(qid: str, student_id: str, name: str, class_name: str = "") -> dict | None:
+    """读取识读分析数据"""
     student_dir = get_student_dir(qid)
-    safe_name = _sanitize_filename_part(name)
+    safe_class = _sanitize_filename_part(class_name) if class_name else ""
     safe_id = _sanitize_filename_part(student_id)
-    stem = f"{safe_name}_{safe_id}"
+    safe_name = _sanitize_filename_part(name)
+    stem = _build_student_stem(safe_class, safe_id, safe_name)
     for path in [student_dir / f"{stem}_分析.json", student_dir / f"{stem}.json"]:
         if path.exists():
             return json.loads(path.read_text(encoding="utf-8"))
-    old_struct = student_dir / f"{stem}_结构分析.json"
-    old_quant = student_dir / f"{stem}_量化分析.json"
+    # 兼容旧格式 {姓名}_{学号}
+    old_stem = f"{safe_name}_{safe_id}"
+    for path in [student_dir / f"{old_stem}_分析.json", student_dir / f"{old_stem}.json"]:
+        if path.exists():
+            return json.loads(path.read_text(encoding="utf-8"))
+    old_struct = student_dir / f"{old_stem}_结构分析.json"
+    old_quant = student_dir / f"{old_stem}_量化分析.json"
     if old_struct.exists() and old_quant.exists():
         return {
             "structure": json.loads(old_struct.read_text(encoding="utf-8")),
@@ -650,15 +680,20 @@ def get_student_analysis(qid: str, student_id: str, name: str) -> dict | None:
     return None
 
 
-def get_student_grade_json(qid: str, student_id: str, name: str) -> dict | None:
+def get_student_grade_json(qid: str, student_id: str, name: str, class_name: str = "") -> dict | None:
     """读取评分结果 JSON"""
     student_dir = get_student_dir(qid)
-    safe_name = _sanitize_filename_part(name)
+    safe_class = _sanitize_filename_part(class_name) if class_name else ""
     safe_id = _sanitize_filename_part(student_id)
-    stem = f"{safe_name}_{safe_id}"
+    safe_name = _sanitize_filename_part(name)
+    stem = _build_student_stem(safe_class, safe_id, safe_name)
     path = student_dir / f"{stem}_评分.json"
     if path.exists():
         return json.loads(path.read_text(encoding="utf-8"))
+    # 兼容旧格式
+    old_path = student_dir / f"{safe_name}_{safe_id}_评分.json"
+    if old_path.exists():
+        return json.loads(old_path.read_text(encoding="utf-8"))
     return None
 
 
@@ -744,6 +779,11 @@ def sync_submissions_from_disk(qid: str) -> int:
         safe_name = _sanitize_filename_part(s["姓名"])
         safe_id = _sanitize_filename_part(s["学号"])
         roster_map[f"{safe_name}_{safe_id}"] = s
+        # 新格式：{班别}_{学号}_{姓名}
+        class_name = s.get("班级", "")
+        if class_name:
+            safe_class = _sanitize_filename_part(class_name)
+            roster_map[_build_student_stem(safe_class, safe_id, safe_name)] = s
 
     submissions = get_submissions(qid)
     added = 0
